@@ -1,0 +1,13 @@
+<?xml version="1.0" ?>
+<launch>
+  <arg name="robot_ip" />
+  <arg name="load_gripper" default="true" />
+
+  <include file="$(find franka_control)/launch/franka_control.launch">
+    <arg name="robot_ip" value="$(arg robot_ip)" />
+    <arg name="load_gripper" value="$(arg load_gripper)" />
+  </include>
+
+  <rosparam command="load" file="$(find franka_kitting_controller)/config/kitting_state_controller.yaml" />
+  <node name="controller_spawner" pkg="controller_manager" type="spawner" respawn="false" output="screen" args="kitting_state_controller"/>
+</launch>

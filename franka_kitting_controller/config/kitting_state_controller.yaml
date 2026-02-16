@@ -1,0 +1,4 @@
+kitting_state_controller:
+    type: franka_kitting_controller/KittingStateController
+    arm_id: panda
+    publish_rate: 250.0  # [Hz]
