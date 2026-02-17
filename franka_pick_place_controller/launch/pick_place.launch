@@ -13,6 +13,14 @@
     <arg name="controller"  value="position_joint_trajectory_controller" />
   </include>
 
+  <!-- Disable the "Zero Jacobian close to singularity" warning from FrankaHWSim.
+       The position controller does not use the Jacobian so the warning is purely
+       informational.  Value -1 disables the check.  Set after the include because
+       panda.launch loads franka_hw_sim.yaml (which defaults to 0.0001).  The
+       spawn_model node reads this param asynchronously during Gazebo plugin init,
+       so this override takes effect before the plugin starts. -->
+  <param name="singularity_warning_threshold" value="-1" />
+
   <!-- Pick-and-place node (delayed to let controllers fully initialize) -->
   <node pkg="franka_pick_place_controller"
         type="panda_pick_place_gazebo_no_moveit.py"

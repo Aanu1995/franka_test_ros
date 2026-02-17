@@ -90,6 +90,12 @@ pick_place.launch
 | `GRASP_FORCE` | 50 N | Gripper grasping force |
 | `GRASP_WIDTH` | 0.025 m | Target gripper width for stone |
 
+## Known Warnings
+
+**`equilibrium_pose contains unnormalized quaternions`** -- This is a known upstream `franka_ros` warning from the `franka_state_controller`. It occurs because the `O_T_EE` 4x4 matrix published in `FrankaState` messages can produce slightly non-unit quaternions due to floating-point drift. It is harmless and does not affect the pick-and-place behaviour. It is not produced by this package.
+
+**`Zero Jacobian close to singularity`** -- This comes from `FrankaHWSim` (`model_kdl.cpp`) which checks the Jacobian's smallest singular value against `singularity_warning_threshold` (0.0001) on every control cycle. It fires when the robot passes through a kinematic singularity (e.g. wrist joints near zero, elbow near straight). This package mitigates it by biasing the IK solver's nullspace toward a preferred configuration that keeps j4 bent and j5/j6 away from zero. The warning may still appear briefly during transitions but does not affect motion execution.
+
 ## Grasping Notes
 
 This package uses **friction-based grasping** -- the `FrankaGripperSim` applies continuous force (50 N) per finger in its HOLDING state. The stone model has a friction coefficient of 0.6 and a mass of 82 g.
