@@ -10,7 +10,7 @@
     <arg name="paused"      value="$(arg paused)" />
     <arg name="world"       value="$(find franka_gazebo)/world/stone.sdf" />
     <arg name="use_gripper" value="true" />
-    <arg name="controller"  value="effort_joint_trajectory_controller" />
+    <arg name="controller"  value="position_joint_trajectory_controller" />
   </include>
 
   <!-- Pick-and-place node (delayed to let controllers fully initialize) -->

@@ -10,6 +10,8 @@ find_package(catkin REQUIRED COMPONENTS
   franka_gazebo
   gazebo_msgs
   sensor_msgs
+  tf
+  tf_conversions
 )
 
 catkin_package()
