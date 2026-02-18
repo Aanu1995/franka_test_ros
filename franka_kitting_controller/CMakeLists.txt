@@ -11,8 +11,10 @@ find_package(catkin REQUIRED COMPONENTS
   message_generation
   pluginlib
   realtime_tools
+  rosbag
   roscpp
   std_msgs
+  topic_tools
 )
 
 find_package(Franka 0.9.0 QUIET)
@@ -38,11 +40,14 @@ catkin_package(
     message_runtime
     pluginlib
     realtime_tools
+    rosbag
     roscpp
     std_msgs
+    topic_tools
   DEPENDS Franka
 )
 
+## Controller library (loaded by ros_control)
 add_library(kitting_state_controller
   src/kitting_state_controller.cpp
 )
@@ -66,8 +71,30 @@ target_include_directories(kitting_state_controller PUBLIC
   include
 )
 
+## Phase 2 logger executable (standalone node)
+add_executable(kitting_phase2_logger
+  src/kitting_phase2_logger.cpp
+)
+
+add_dependencies(kitting_phase2_logger
+  ${${PROJECT_NAME}_EXPORTED_TARGETS}
+  ${catkin_EXPORTED_TARGETS}
+  ${PROJECT_NAME}_generate_messages_cpp
+)
+
+target_link_libraries(kitting_phase2_logger
+  ${catkin_LIBRARIES}
+)
+
+target_include_directories(kitting_phase2_logger SYSTEM PUBLIC
+  ${catkin_INCLUDE_DIRS}
+)
+target_include_directories(kitting_phase2_logger PUBLIC
+  include
+)
+
 ## Installation
-install(TARGETS kitting_state_controller
+install(TARGETS kitting_state_controller kitting_phase2_logger
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}

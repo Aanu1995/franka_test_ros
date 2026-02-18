@@ -1,0 +1,20 @@
+<?xml version="1.0" ?>
+<launch>
+  <!--
+    Phase 2 logger node ONLY.
+    Requires Phase 1 (kitting_state_controller.launch) to already be running.
+    This launch adds the rosbag recording manager that:
+      - Subscribes to /kitting_phase2/record_control for START, STOP, ABORT
+      - Subscribes to /kitting_phase2/state for optional auto-stop on CONTACT
+      - Records all configured topics into one bag per trial
+  -->
+  <arg name="object_name" default="default_object" />
+  <arg name="auto_stop_on_contact" default="false" />
+
+  <!-- Phase 2 logger node (C++) -->
+  <node name="kitting_phase2_logger" pkg="franka_kitting_controller" type="kitting_phase2_logger" output="screen">
+    <rosparam command="load" file="$(find franka_kitting_controller)/config/kitting_phase2_logger.yaml" subst_value="true" />
+    <param name="object_name" value="$(arg object_name)" />
+    <param name="auto_stop_on_contact" value="$(arg auto_stop_on_contact)" />
+  </node>
+</launch>

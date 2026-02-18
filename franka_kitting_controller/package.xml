@@ -18,8 +18,10 @@
   <depend>libfranka</depend>
   <depend>pluginlib</depend>
   <depend>realtime_tools</depend>
+  <depend>rosbag</depend>
   <depend>roscpp</depend>
   <depend>std_msgs</depend>
+  <depend>topic_tools</depend>
 
   <exec_depend>franka_control</exec_depend>
   <exec_depend>franka_description</exec_depend>
