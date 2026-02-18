@@ -54,13 +54,15 @@ Phase 2 launches **only** the C++ rosbag recording manager. It does not start th
 
 ```bash
 # In a separate terminal (Phase 1 must already be running)
-roslaunch franka_kitting_controller kitting_phase2.launch object_name:=cup
+roslaunch franka_kitting_controller kitting_phase2.launch object_name:=cup base_directory:=/data/kitting
 ```
 
 | Argument               | Default          | Description                              |
 |------------------------|------------------|------------------------------------------|
+| `base_directory`       | `~/kitting_bags` | Root directory for all trial data        |
 | `object_name`          | `default_object` | Object name for bag file naming          |
 | `auto_stop_on_contact` | `false`          | Auto-stop recording on CONTACT           |
+| `export_csv_on_stop`   | `true`           | Auto-export CSV when recording stops     |
 
 ## Phase 2: Interaction States
 
