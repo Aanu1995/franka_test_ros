@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 
+#include <actionlib/client/simple_action_client.h>
 #include <controller_interface/multi_interface_controller.h>
 #include <hardware_interface/robot_hw.h>
 #include <realtime_tools/realtime_publisher.h>
@@ -12,6 +13,9 @@
 #include <ros/time.h>
 #include <std_msgs/String.h>
 
+#include <franka_gripper/GraspAction.h>
+#include <franka_gripper/MoveAction.h>
+#include <franka_kitting_controller/KittingGripperCommand.h>
 #include <franka_kitting_controller/KittingState.h>
 #include <franka_hw/franka_model_interface.h>
 #include <franka_hw/franka_state_interface.h>
@@ -28,20 +32,26 @@ enum class GraspPhase {
   UPLIFT
 };
 
+/// Action client type aliases for gripper control.
+using MoveClient = actionlib::SimpleActionClient<franka_gripper::MoveAction>;
+using GraspClient = actionlib::SimpleActionClient<franka_gripper::GraspAction>;
+
 /**
  * Passive read-only controller that publishes comprehensive robot state
  * and implements Phase 2 contact detection with a 5-state machine.
  *
  * This controller does NOT command torques, modify stiffness, or change impedance.
+ * It does execute gripper actions (MoveAction, GraspAction) via actionlib when
+ * commands are received on /kitting_phase2/state_cmd.
  *
  * Phase 2 topics:
- *   /kitting_phase2/state  [subscribed]  State labels from user
- *                                        (BASELINE, CLOSING, SECURE_GRASP, UPLIFT)
- *                          [published]   CONTACT (auto-detected by controller)
+ *   /kitting_phase2/state_cmd [subscribed]  KittingGripperCommand from user (CLOSING, SECURE_GRASP)
+ *                                           with per-object gripper parameters (0 = use YAML default)
+ *   /kitting_phase2/state     [subscribed]  State labels from user (BASELINE, UPLIFT)
+ *                              [published]  CONTACT (auto), CLOSING, SECURE_GRASP (from state_cmd)
  *
- * The user publishes state labels on /kitting_phase2/state to transition the
- * controller's phase. Recording is controlled separately via
- * /kitting_phase2/record_control (handled by the logger node, not the controller).
+ * Recording is controlled separately via /kitting_phase2/record_control
+ * (handled by the logger node, not the controller).
  */
 class KittingStateController
     : public controller_interface::MultiInterfaceController<franka_hw::FrankaModelInterface,
@@ -67,6 +77,24 @@ class KittingStateController
   // --- Phase 2: State subscriber (listens to /kitting_phase2/state) ---
   ros::Subscriber state_sub_;
   void stateCallback(const std_msgs::String::ConstPtr& msg);
+
+  // --- Phase 2: Command subscriber (listens to /kitting_phase2/state_cmd) ---
+  ros::Subscriber state_cmd_sub_;
+  void stateCmdCallback(const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg);
+
+  // --- Phase 2: Gripper action clients ---
+  std::unique_ptr<MoveClient> move_client_;
+  std::unique_ptr<GraspClient> grasp_client_;
+
+  // --- Phase 2: Gripper default parameters (overridable per-command) ---
+  bool execute_gripper_actions_{true};
+  double closing_width_{0.04};
+  double closing_speed_{0.04};
+  double grasp_width_{0.02};
+  double epsilon_inner_{0.005};
+  double epsilon_outer_{0.005};
+  double grasp_speed_{0.04};
+  double grasp_force_{10.0};
 
   // State machine
   GraspPhase current_phase_{GraspPhase::BASELINE};

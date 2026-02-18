@@ -12,7 +12,9 @@
 
   <build_export_depend>message_runtime</build_export_depend>
 
+  <depend>actionlib</depend>
   <depend>controller_interface</depend>
+  <depend>franka_gripper</depend>
   <depend>franka_hw</depend>
   <depend>hardware_interface</depend>
   <depend>libfranka</depend>

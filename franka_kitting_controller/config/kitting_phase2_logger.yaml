@@ -6,5 +6,6 @@ kitting_phase2_logger:
     topics_to_record:
         - /kitting_state_controller/kitting_state_data
         - /kitting_phase2/state
+        - /kitting_phase2/state_cmd
         - /kitting_phase2/record_control
         - /joint_states

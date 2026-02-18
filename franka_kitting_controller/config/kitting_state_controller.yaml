@@ -12,3 +12,13 @@ kitting_state_controller:
     use_slope_gate: false # Optional slope gate (enable if drift false positives)
     slope_dt: 0.02       # Slope finite difference dt [s]
     slope_min: 5.0       # Minimum slope for contact [1/s]
+
+    # Phase 2: Gripper default parameters (overridable per-command via KittingGripperCommand)
+    execute_gripper_actions: true  # Set false for signal-only testing mode
+    closing_width: 0.04           # [m] Default width for MoveAction in CLOSING
+    closing_speed: 0.04           # [m/s] Default speed for MoveAction in CLOSING
+    grasp_width: 0.02             # [m] Default width for GraspAction in SECURE_GRASP
+    epsilon_inner: 0.005          # [m] Default inner epsilon for GraspAction
+    epsilon_outer: 0.005          # [m] Default outer epsilon for GraspAction
+    grasp_speed: 0.04             # [m/s] Default speed for GraspAction in SECURE_GRASP
+    grasp_force: 10.0             # [N] Default force for GraspAction in SECURE_GRASP
