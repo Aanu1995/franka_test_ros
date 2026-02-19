@@ -22,3 +22,9 @@ kitting_state_controller:
     epsilon_outer: 0.005          # [m] Default outer epsilon for GraspAction
     grasp_speed: 0.04             # [m/s] Default speed for GraspAction in SECURE_GRASP
     grasp_force: 10.0             # [N] Default force for GraspAction in SECURE_GRASP
+
+    # Phase 2: UPLIFT micro-lift parameters (overridable per-command via KittingGripperCommand)
+    uplift_distance: 0.003          # [m] Default upward displacement (3mm, max 10mm)
+    uplift_duration: 1.0            # [s] Cosine-smoothed motion duration
+    uplift_reference_frame: "world" # Reference frame for z-axis displacement
+    require_secure_grasp: true      # If true, UPLIFT only allowed from SECURE_GRASP state

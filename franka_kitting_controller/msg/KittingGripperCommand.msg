@@ -1,7 +1,7 @@
-# KittingGripperCommand - Runtime gripper command with per-object parameters
+# KittingGripperCommand - Runtime command with per-object parameters
 #
-# Published by the user on /kitting_phase2/state_cmd to trigger CLOSING or
-# SECURE_GRASP with optional per-object gripper parameters.
+# Published by the user on /kitting_phase2/state_cmd to trigger CLOSING,
+# SECURE_GRASP, or UPLIFT with optional per-object parameters.
 #
 # Any parameter left at 0.0 (the default) will fall back to the value loaded
 # from the controller's YAML config at startup.  This lets you override only
@@ -12,8 +12,13 @@
 #   grasp_width: 0.01
 #   grasp_force: 20.0
 #   (all other fields 0 -> use YAML defaults)
+#
+# Example: micro-lift 5mm over 2 seconds
+#   command: "UPLIFT"
+#   uplift_distance: 0.005
+#   uplift_duration: 2.0
 
-# Command: "CLOSING" or "SECURE_GRASP"
+# Command: "CLOSING", "SECURE_GRASP", or "UPLIFT"
 string command
 
 # --- CLOSING parameters (used when command == "CLOSING") ---
@@ -26,3 +31,7 @@ float64 epsilon_inner    # [m]   Inner epsilon for GraspAction (0 = use default)
 float64 epsilon_outer    # [m]   Outer epsilon for GraspAction (0 = use default)
 float64 grasp_speed      # [m/s] Speed for GraspAction        (0 = use default)
 float64 grasp_force      # [N]   Force for GraspAction        (0 = use default)
+
+# --- UPLIFT parameters (used when command == "UPLIFT") ---
+float64 uplift_distance  # [m]   Upward displacement (0 = use default, max 0.01m)
+float64 uplift_duration  # [s]   Duration of cosine-smoothed micro-lift (0 = use default)

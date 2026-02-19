@@ -1,7 +1,7 @@
 <library path="lib/libkitting_state_controller">
   <class name="franka_kitting_controller/KittingStateController" type="franka_kitting_controller::KittingStateController" base_class_type="controller_interface::ControllerBase">
     <description>
-      Passive read-only controller that publishes comprehensive robot state data (joint positions, velocities, torques, Cartesian pose, Jacobian, gravity, Coriolis, external forces, and derived metrics) as a single KittingState message for kitting task development.
+      Controller that publishes comprehensive robot state data and executes Cartesian micro-lift (UPLIFT) for kitting task development. Claims FrankaModelInterface, FrankaStateInterface, and FrankaPoseCartesianInterface.
     </description>
   </class>
 </library>

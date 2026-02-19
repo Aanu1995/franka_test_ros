@@ -1,6 +1,6 @@
 # franka_kitting_controller
 
-Passive, real-time state acquisition controller for the Franka Panda with Phase 2 contact detection and rosbag data collection. Reads all robot state, model, and Cartesian signals, publishes them as a single `KittingState` message, and autonomously detects contact using statistical thresholding. This controller does **not** command torques, modify stiffness, or change impedance.
+Real-time state acquisition and Cartesian micro-lift controller for the Franka Panda with Phase 2 contact detection and rosbag data collection. Reads all robot state, model, and Cartesian signals, publishes them as a single `KittingState` message, autonomously detects contact using statistical thresholding, and executes smooth Cartesian micro-lift (UPLIFT) internally. Claims `FrankaPoseCartesianInterface` for Cartesian pose control.
 
 ## Overview
 
@@ -106,11 +106,13 @@ Characterize stable object compression.
 
 ### UPLIFT
 
-Validate grasp robustness under load.
+Validate grasp robustness under load. The **controller internally executes** a smooth Cartesian micro-lift using cosine-smoothed trajectory interpolation — no external motion planner is involved.
 
-- End-effector performs micro-lift (2-5 mm)
+- Controller commands a small upward displacement (default 3 mm, max 10 mm) via `FrankaPoseCartesianInterface`
+- Cosine-smoothed trajectory ensures zero velocity at start and end (no step jumps)
 - Object weight transfers to gripper
 - Predictable change in torque distribution; no large instability if grasp is secure
+- Motion duration and distance are configurable via YAML defaults or per-command overrides
 
 ### Topics
 
@@ -123,8 +125,8 @@ Recording and state labeling are independent concerns.
 | `/kitting_phase2/state`                  | std_msgs/String           | Pub/Sub    | State labels for offline segmentation    |
 | `/kitting_phase2/record_control`         | std_msgs/String           | Subscribed | Recording control: START, STOP, ABORT    |
 
-- `/kitting_phase2/state_cmd` — The **user** publishes a `KittingGripperCommand` with `command` field set to `CLOSING` or `SECURE_GRASP`, plus optional per-object gripper parameters. Any parameter left at `0.0` falls back to the YAML config default. The **controller** executes the corresponding gripper action (async, non-blocking), publishes the state label on `/kitting_phase2/state`, and updates its internal state machine.
-- `/kitting_phase2/state` — The **user** publishes BASELINE and UPLIFT here. The **controller** publishes CLOSING, SECURE_GRASP (from `state_cmd`), and CONTACT (auto-detected). States are labels for offline analysis — they do NOT control recording.
+- `/kitting_phase2/state_cmd` — The **user** publishes a `KittingGripperCommand` with `command` field set to `CLOSING`, `SECURE_GRASP`, or `UPLIFT`, plus optional per-object parameters. Any parameter left at `0.0` falls back to the YAML config default. The **controller** executes the corresponding action (gripper move/grasp, or Cartesian micro-lift), publishes the state label on `/kitting_phase2/state`, and updates its internal state machine.
+- `/kitting_phase2/state` — The **user** publishes BASELINE here. The **controller** publishes CLOSING, SECURE_GRASP, UPLIFT (from `state_cmd`), and CONTACT (auto-detected). States are labels for offline analysis — they do NOT control recording.
 - `/kitting_phase2/record_control` — The **user** publishes START, STOP, ABORT to control recording. The **logger** subscribes to this topic.
 
 ### Recording
@@ -174,8 +176,13 @@ rostopic pub /kitting_phase2/state_cmd franka_kitting_controller/KittingGripperC
 rostopic pub /kitting_phase2/state_cmd franka_kitting_controller/KittingGripperCommand \
   "{command: 'SECURE_GRASP', grasp_width: 0.03, epsilon_inner: 0.008, epsilon_outer: 0.008, grasp_speed: 0.02, grasp_force: 30.0}" --once
 
-# UPLIFT (user publishes directly on /state)
-rostopic pub /kitting_phase2/state std_msgs/String "data: 'UPLIFT'" --once
+# UPLIFT — use YAML defaults (3mm over 1s)
+rostopic pub /kitting_phase2/state_cmd franka_kitting_controller/KittingGripperCommand \
+  "{command: 'UPLIFT'}" --once
+
+# UPLIFT — override distance and duration for a specific object
+rostopic pub /kitting_phase2/state_cmd franka_kitting_controller/KittingGripperCommand \
+  "{command: 'UPLIFT', uplift_distance: 0.005, uplift_duration: 2.0}" --once
 
 # Stop recording
 rostopic pub /kitting_phase2/record_control std_msgs/String "data: 'STOP'" --once
@@ -229,8 +236,12 @@ Once CONTACT is declared, it is **latched** (cannot return to CLOSING).
 | `epsilon_outer`            | double | `0.005` | Default outer epsilon for GraspAction [m]      |
 | `grasp_speed`              | double | `0.04`  | Default speed for GraspAction [m/s]            |
 | `grasp_force`              | double | `10.0`  | Default force for GraspAction [N]              |
+| `uplift_distance`          | double | `0.003` | Default upward displacement [m] (max 0.01)     |
+| `uplift_duration`          | double | `1.0`   | Cosine-smoothed motion duration [s]            |
+| `uplift_reference_frame`   | string | `world` | Reference frame for z-axis displacement        |
+| `require_secure_grasp`     | bool   | `true`  | Only allow UPLIFT from SECURE_GRASP state      |
 
-These gripper parameters are **defaults**. They can be overridden per-command by setting non-zero values in the `KittingGripperCommand` message published on `/kitting_phase2/state_cmd`.
+Gripper and UPLIFT parameters are **defaults**. They can be overridden per-command by setting non-zero values in the `KittingGripperCommand` message published on `/kitting_phase2/state_cmd`.
 
 ### Logger Parameters (`config/kitting_phase2_logger.yaml`)
 
@@ -326,20 +337,23 @@ State labels are synchronized by iterating the bag chronologically: each signal 
 
 Per-object gripper command published on `/kitting_phase2/state_cmd`. Any parameter left at `0.0` (the ROS default for `float64`) falls back to the YAML config value loaded at startup. This lets you override only the parameters that differ for a particular object.
 
-| Field            | Type    | Description                                              |
-|------------------|---------|----------------------------------------------------------|
-| `command`        | string  | `"CLOSING"` or `"SECURE_GRASP"`                         |
-| `closing_width`  | float64 | Target width for MoveAction [m] (0 = use default)       |
-| `closing_speed`  | float64 | Speed for MoveAction [m/s] (0 = use default)            |
-| `grasp_width`    | float64 | Target width for GraspAction [m] (0 = use default)      |
-| `epsilon_inner`  | float64 | Inner epsilon for GraspAction [m] (0 = use default)     |
-| `epsilon_outer`  | float64 | Outer epsilon for GraspAction [m] (0 = use default)     |
-| `grasp_speed`    | float64 | Speed for GraspAction [m/s] (0 = use default)           |
-| `grasp_force`    | float64 | Force for GraspAction [N] (0 = use default)             |
+| Field              | Type    | Description                                              |
+|--------------------|---------|----------------------------------------------------------|
+| `command`          | string  | `"CLOSING"`, `"SECURE_GRASP"`, or `"UPLIFT"`            |
+| `closing_width`    | float64 | Target width for MoveAction [m] (0 = use default)       |
+| `closing_speed`    | float64 | Speed for MoveAction [m/s] (0 = use default)            |
+| `grasp_width`      | float64 | Target width for GraspAction [m] (0 = use default)      |
+| `epsilon_inner`    | float64 | Inner epsilon for GraspAction [m] (0 = use default)     |
+| `epsilon_outer`    | float64 | Outer epsilon for GraspAction [m] (0 = use default)     |
+| `grasp_speed`      | float64 | Speed for GraspAction [m/s] (0 = use default)           |
+| `grasp_force`      | float64 | Force for GraspAction [N] (0 = use default)             |
+| `uplift_distance`  | float64 | Upward displacement [m] (0 = use default, max 0.01)     |
+| `uplift_duration`  | float64 | Duration of cosine-smoothed micro-lift [s] (0 = default)|
 
 Only the parameters relevant to the command are used:
 - `CLOSING` uses `closing_width` and `closing_speed`
 - `SECURE_GRASP` uses `grasp_width`, `epsilon_inner`, `epsilon_outer`, `grasp_speed`, and `grasp_force`
+- `UPLIFT` uses `uplift_distance` and `uplift_duration`
 
 ## KittingState Message
 
@@ -361,12 +375,13 @@ Only the parameters relevant to the command are used:
 
 ## Interfaces
 
-The controller claims two read-only hardware interfaces:
+The controller claims three hardware interfaces:
 
 - `FrankaStateInterface` -- provides access to `franka::RobotState`
 - `FrankaModelInterface` -- provides access to dynamics/kinematics (Jacobian, gravity, Coriolis)
+- `FrankaPoseCartesianInterface` -- provides exclusive Cartesian pose command authority for UPLIFT micro-lift
 
-No command interfaces (EffortJoint, CartesianPose, etc.) are claimed. The controller is purely passive — it reads state only. Gripper actions are dispatched via `actionlib::SimpleActionClient` from the subscriber callback thread, not from the RT `update()` loop.
+When not executing UPLIFT, the controller operates in **passthrough mode**: it reads the robot's own desired pose (`O_T_EE_d`) and writes it back as the command every tick. This results in zero tracking error and the robot holds position. During UPLIFT, the controller commands a cosine-smoothed trajectory upward. Gripper actions are dispatched via `actionlib::SimpleActionClient` from the subscriber callback thread, not from the RT `update()` loop.
 
 ## Real-Time Safety
 
@@ -378,6 +393,9 @@ No command interfaces (EffortJoint, CartesianPose, etc.) are claimed. The contro
 - State publisher uses `trylock()` pattern (publish only on transition, non-blocking)
 - Gripper action clients use `sendGoal()` (non-blocking) from subscriber thread, never from `update()`
 - Action clients created with `spin_thread=true` for plugin context (no external spin required)
+- Cartesian pose command issued every tick (1 kHz) — passthrough when idle, trajectory during UPLIFT
+- UPLIFT trajectory uses only `std::array<double, 16>`, `std::cos()`, and `std::min()` — no allocation
+- `starting()` captures initial desired pose to avoid step discontinuity on controller start
 - Rosbag management runs in a separate C++ node (no Python overhead)
 
 ## Recording Performance
@@ -419,9 +437,17 @@ Move EE into table. **Expected**: clear increase in Fz, `wrench_norm`, `tau_ext_
 - metadata.yaml contains bag_filename, csv_filename, total_samples, start/stop times, and detector parameters
 - Publishing CLOSING on `state_cmd` triggers gripper MoveAction + state label
 - Publishing SECURE_GRASP on `state_cmd` triggers gripper GraspAction + state label
-- Per-command gripper parameters override YAML defaults when non-zero
+- Publishing UPLIFT on `state_cmd` triggers internal Cartesian micro-lift + state label
+- UPLIFT moves robot upward by `uplift_distance` over `uplift_duration` with cosine smoothing
+- UPLIFT orientation remains unchanged throughout the motion
+- UPLIFT is rejected if `require_secure_grasp` is true and current state is not SECURE_GRASP
+- UPLIFT distance is clamped to 10 mm maximum (with warning)
+- Duplicate UPLIFT commands are ignored while UPLIFT is active
+- BASELINE during UPLIFT clears the active motion and returns to passthrough
+- Per-command gripper/UPLIFT parameters override YAML defaults when non-zero
 - Parameters left at 0.0 fall back to YAML config values
 - Duplicate CLOSING/SECURE_GRASP commands are ignored
+- Controller holds position (passthrough) when not executing UPLIFT — no drift or jerk
 - Gripper server unavailability does not crash the controller (state change still occurs)
 - `execute_gripper_actions: false` enables signal-only testing mode
 

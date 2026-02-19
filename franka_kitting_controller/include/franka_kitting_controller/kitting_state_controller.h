@@ -2,6 +2,8 @@
 // Use of this source code is governed by the Apache-2.0 license, see LICENSE
 #pragma once
 
+#include <array>
+#include <atomic>
 #include <memory>
 #include <string>
 
@@ -17,6 +19,7 @@
 #include <franka_gripper/MoveAction.h>
 #include <franka_kitting_controller/KittingGripperCommand.h>
 #include <franka_kitting_controller/KittingState.h>
+#include <franka_hw/franka_cartesian_command_interface.h>
 #include <franka_hw/franka_model_interface.h>
 #include <franka_hw/franka_state_interface.h>
 #include <franka_hw/trigger_rate.h>
@@ -37,27 +40,30 @@ using MoveClient = actionlib::SimpleActionClient<franka_gripper::MoveAction>;
 using GraspClient = actionlib::SimpleActionClient<franka_gripper::GraspAction>;
 
 /**
- * Passive read-only controller that publishes comprehensive robot state
- * and implements Phase 2 contact detection with a 5-state machine.
+ * Controller that publishes comprehensive robot state, implements Phase 2
+ * contact detection with a 5-state machine, and executes Cartesian micro-lift
+ * (UPLIFT) internally.
  *
- * This controller does NOT command torques, modify stiffness, or change impedance.
- * It does execute gripper actions (MoveAction, GraspAction) via actionlib when
- * commands are received on /kitting_phase2/state_cmd.
+ * Claims FrankaModelInterface, FrankaStateInterface, and FrankaPoseCartesianInterface.
+ * The Cartesian pose interface is used for UPLIFT micro-lift execution. In all other
+ * states, the controller operates in passthrough mode (holds current position).
  *
  * Phase 2 topics:
- *   /kitting_phase2/state_cmd [subscribed]  KittingGripperCommand from user (CLOSING, SECURE_GRASP)
- *                                           with per-object gripper parameters (0 = use YAML default)
- *   /kitting_phase2/state     [subscribed]  State labels from user (BASELINE, UPLIFT)
- *                              [published]  CONTACT (auto), CLOSING, SECURE_GRASP (from state_cmd)
+ *   /kitting_phase2/state_cmd [subscribed]  KittingGripperCommand (CLOSING, SECURE_GRASP, UPLIFT)
+ *                                           with per-object parameters (0 = use YAML default)
+ *   /kitting_phase2/state     [subscribed]  State labels from user (BASELINE)
+ *                              [published]  CONTACT (auto), CLOSING, SECURE_GRASP, UPLIFT (from state_cmd)
  *
  * Recording is controlled separately via /kitting_phase2/record_control
  * (handled by the logger node, not the controller).
  */
 class KittingStateController
     : public controller_interface::MultiInterfaceController<franka_hw::FrankaModelInterface,
-                                                            franka_hw::FrankaStateInterface> {
+                                                            franka_hw::FrankaStateInterface,
+                                                            franka_hw::FrankaPoseCartesianInterface> {
  public:
   bool init(hardware_interface::RobotHW* robot_hw, ros::NodeHandle& node_handle) override;
+  void starting(const ros::Time&) override;
   void update(const ros::Time& time, const ros::Duration& period) override;
 
  private:
@@ -66,6 +72,8 @@ class KittingStateController
   std::unique_ptr<franka_hw::FrankaStateHandle> franka_state_handle_;
   franka_hw::FrankaModelInterface* model_interface_{nullptr};
   std::unique_ptr<franka_hw::FrankaModelHandle> model_handle_;
+  franka_hw::FrankaPoseCartesianInterface* cartesian_pose_interface_{nullptr};
+  std::unique_ptr<franka_hw::FrankaCartesianPoseHandle> cartesian_pose_handle_;
 
   // --- Phase 1: State data publisher ---
   realtime_tools::RealtimePublisher<franka_kitting_controller::KittingState> kitting_publisher_;
@@ -96,10 +104,15 @@ class KittingStateController
   double grasp_speed_{0.04};
   double grasp_force_{10.0};
 
-  // State machine
-  GraspPhase current_phase_{GraspPhase::BASELINE};
-  GraspPhase pending_phase_{GraspPhase::BASELINE};
-  bool phase_changed_{false};  // Set by stateCallback when logger sends START
+  // State machine — cross-thread synchronization
+  // current_phase_: read by subscriber thread (precondition checks), written by RT thread.
+  // pending_phase_: written by subscriber thread, read by RT thread.
+  // phase_changed_: the synchronization flag — release on write, acquire on read.
+  //   All stores before the release-store of phase_changed_ are visible to the RT thread
+  //   after its acquire-load of phase_changed_ returns true.
+  std::atomic<GraspPhase> current_phase_{GraspPhase::BASELINE};
+  std::atomic<GraspPhase> pending_phase_{GraspPhase::BASELINE};
+  std::atomic<bool> phase_changed_{false};
   bool contact_latched_{false};
 
   // --- Phase 2: Contact detector parameters ---
@@ -132,6 +145,29 @@ class KittingStateController
   double prev_tau_ext_norm_{0.0};
   ros::Time prev_tau_ext_time_;
   bool prev_tau_ext_valid_{false};
+
+  // --- UPLIFT trajectory state (RT-thread owned, except uplift_active_) ---
+  std::atomic<bool> uplift_active_{false};  // Read by subscriber (duplicate guard), written by RT
+  double uplift_elapsed_{0.0};
+  std::array<double, 16> uplift_start_pose_{};
+  double uplift_z_start_{0.0};
+
+  // RT-local copies of UPLIFT parameters — snapshotted when UPLIFT starts in update().
+  // These isolate the RT trajectory from concurrent subscriber writes.
+  double rt_uplift_distance_{0.003};
+  double rt_uplift_duration_{1.0};
+
+  // --- UPLIFT parameters (loaded from YAML, overridable per-command) ---
+  // Written by subscriber thread (stateCmdCallback), read by RT thread only via rt_ copies.
+  double uplift_distance_{0.003};
+  double uplift_duration_{1.0};
+  std::string uplift_reference_frame_{"world"};
+  bool require_secure_grasp_{true};
+  static constexpr double kMaxUpliftDistance{0.01};
+
+  /// Compute cosine-smoothed uplift pose for the current elapsed time.
+  /// Uses rt_uplift_distance_ and rt_uplift_duration_ (RT-local copies).
+  std::array<double, 16> computeUpliftPose(double elapsed) const;
 
   /// Publish a state label string exactly once per transition.
   void publishStateLabel(const std::string& label);
