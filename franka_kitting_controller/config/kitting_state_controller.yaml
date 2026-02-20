@@ -3,15 +3,21 @@ kitting_state_controller:
   arm_id: panda
   publish_rate: 250.0 # [Hz]
 
-  # Phase 2: Contact detector parameters
-  enable_contact_detector: true
+  # Phase 2: Baseline collection parameters
   T_base: 0.7 # Baseline collection duration [s]
   N_min: 50 # Minimum samples before enabling detection
-  k_sigma: 5.0 # Threshold multiplier: theta = mu + k * sigma
-  T_hold: 0.12 # Debounce hold time [s]
-  use_slope_gate: false # Optional slope gate (enable if drift false positives)
-  slope_dt: 0.02 # Slope finite difference dt [s]
-  slope_min: 5.0 # Minimum slope for contact [1/s]
+
+  # Phase 2: Arm-based contact detector
+  enable_arm_contact: true
+  k_sigma: 3.0 # Threshold multiplier: theta = mu + k * sigma
+  delta_min: 0.3 # [Nm] Minimum absolute rise above mu (noise guard)
+  T_arm_hold: 0.10 # [s] Debounce hold time for arm detector
+
+  # Phase 2: Gripper-based contact detector
+  enable_gripper_contact: true
+  v_stall: 0.003 # [m/s] Stall velocity threshold
+  epsilon_w: 0.002 # [m] Width tolerance to commanded target
+  T_gripper_hold: 0.10 # [s] Debounce hold time for gripper detector
 
   # Phase 2: Gripper default parameters (overridable per-command via KittingGripperCommand)
   execute_gripper_actions: true # Set false for signal-only testing mode

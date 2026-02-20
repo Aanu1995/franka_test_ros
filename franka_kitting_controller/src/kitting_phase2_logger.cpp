@@ -85,15 +85,22 @@ KittingPhase2Logger::KittingPhase2Logger()
         "/joint_states"};
   }
 
-  // Detector params for metadata
+  // Detector params for metadata (hybrid contact detection)
   std::string ctrl_ns = "/kitting_state_controller/";
   nh_.param(ctrl_ns + "T_base", T_base_, 0.7);
   nh_.param(ctrl_ns + "N_min", N_min_, 50);
-  nh_.param(ctrl_ns + "k_sigma", k_sigma_, 5.0);
-  nh_.param(ctrl_ns + "T_hold", T_hold_, 0.12);
-  nh_.param(ctrl_ns + "use_slope_gate", use_slope_gate_, false);
-  nh_.param(ctrl_ns + "slope_dt", slope_dt_, 0.02);
-  nh_.param(ctrl_ns + "slope_min", slope_min_, 5.0);
+
+  // Arm-based detector params
+  nh_.param(ctrl_ns + "enable_arm_contact", enable_arm_contact_, true);
+  nh_.param(ctrl_ns + "k_sigma", k_sigma_, 3.0);
+  nh_.param(ctrl_ns + "delta_min", delta_min_, 0.3);
+  nh_.param(ctrl_ns + "T_arm_hold", T_arm_hold_, 0.10);
+
+  // Gripper-based detector params
+  nh_.param(ctrl_ns + "enable_gripper_contact", enable_gripper_contact_, true);
+  nh_.param(ctrl_ns + "v_stall", v_stall_, 0.003);
+  nh_.param(ctrl_ns + "epsilon_w", epsilon_w_, 0.002);
+  nh_.param(ctrl_ns + "T_gripper_hold", T_gripper_hold_, 0.10);
 
   // --- Subscribe to record control (STOP, ABORT) ---
   record_control_sub_ = nh_.subscribe(
@@ -363,11 +370,16 @@ void KittingPhase2Logger::writeMetadata() {
   f << "detector_parameters:\n";
   f << "  T_base: " << T_base_ << "\n";
   f << "  N_min: " << N_min_ << "\n";
-  f << "  k_sigma: " << k_sigma_ << "\n";
-  f << "  T_hold: " << T_hold_ << "\n";
-  f << "  use_slope_gate: " << (use_slope_gate_ ? "true" : "false") << "\n";
-  f << "  slope_dt: " << slope_dt_ << "\n";
-  f << "  slope_min: " << slope_min_ << "\n";
+  f << "  arm_detector:\n";
+  f << "    enabled: " << (enable_arm_contact_ ? "true" : "false") << "\n";
+  f << "    k_sigma: " << k_sigma_ << "\n";
+  f << "    delta_min: " << delta_min_ << "\n";
+  f << "    T_arm_hold: " << T_arm_hold_ << "\n";
+  f << "  gripper_detector:\n";
+  f << "    enabled: " << (enable_gripper_contact_ ? "true" : "false") << "\n";
+  f << "    v_stall: " << v_stall_ << "\n";
+  f << "    epsilon_w: " << epsilon_w_ << "\n";
+  f << "    T_gripper_hold: " << T_gripper_hold_ << "\n";
 
   double mu = 0, sigma = 0, theta = 0;
   bool has_mu = nh_.getParam("/kitting_state_controller/baseline_mu", mu);
@@ -422,6 +434,7 @@ void KittingPhase2Logger::exportCsv(const std::string& bag_path,
     csv << ",ee_vx,ee_vy,ee_vz,ee_wx,ee_wy,ee_wz";
     for (int i = 1; i <= 7; ++i) csv << ",gravity_" << i;
     for (int i = 1; i <= 7; ++i) csv << ",coriolis_" << i;
+    csv << ",gripper_width";
     csv << "\n";
 
     // Set high precision for floating point
@@ -474,6 +487,8 @@ void KittingPhase2Logger::exportCsv(const std::string& bag_path,
         for (size_t i = 0; i < 7; ++i) csv << "," << ks->gravity[i];
         // coriolis[7]
         for (size_t i = 0; i < 7; ++i) csv << "," << ks->coriolis[i];
+        // gripper_width
+        csv << "," << ks->gripper_width;
 
         csv << "\n";
         sample_count++;

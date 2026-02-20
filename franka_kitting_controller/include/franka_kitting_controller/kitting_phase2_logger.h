@@ -53,9 +53,16 @@ class KittingPhase2Logger {
   std::vector<std::string> topics_to_record_;
 
   // Detector params (read from parameter server for metadata)
-  double T_base_, k_sigma_, T_hold_, slope_dt_, slope_min_;
+  double T_base_;
   int N_min_;
-  bool use_slope_gate_;
+
+  // Arm-based detector
+  bool enable_arm_contact_;
+  double k_sigma_, delta_min_, T_arm_hold_;
+
+  // Gripper-based detector
+  bool enable_gripper_contact_;
+  double v_stall_, epsilon_w_, T_gripper_hold_;
 
   // --- Trial state ---
   std::mutex trial_mutex_;  // Protects all trial state below

@@ -22,3 +22,4 @@ float64[7] coriolis     # Coriolis torque vector [Nm]
 float64[6] ee_velocity  # End-effector velocity (J * dq) [m/s, rad/s]
 float64 tau_ext_norm    # Euclidean norm of tau_ext
 float64 wrench_norm     # Euclidean norm of wrench_ext
+float64 gripper_width   # Measured gripper width w(t) = q_finger1 + q_finger2 [m]

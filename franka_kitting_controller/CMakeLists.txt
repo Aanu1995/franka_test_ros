@@ -15,6 +15,7 @@ find_package(catkin REQUIRED COMPONENTS
   realtime_tools
   rosbag
   roscpp
+  sensor_msgs
   std_msgs
   topic_tools
 )
@@ -47,6 +48,7 @@ catkin_package(
     realtime_tools
     rosbag
     roscpp
+    sensor_msgs
     std_msgs
     topic_tools
   DEPENDS Franka

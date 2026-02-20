@@ -22,6 +22,7 @@
   <depend>realtime_tools</depend>
   <depend>rosbag</depend>
   <depend>roscpp</depend>
+  <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
   <depend>topic_tools</depend>
 
