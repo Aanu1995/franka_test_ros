@@ -307,6 +307,7 @@ bool KittingStateController::init(hardware_interface::RobotHW* robot_hw,
   node_handle.param("T_base", T_base_, 0.7);
   node_handle.param("N_min", N_min_, 50);
   node_handle.param("k_sigma", k_sigma_, 5.0);
+  node_handle.param("delta_min", delta_min_, 0.5);
   node_handle.param("T_hold", T_hold_, 0.12);
   node_handle.param("use_slope_gate", use_slope_gate_, false);
   node_handle.param("slope_dt", slope_dt_, 0.02);
@@ -315,7 +316,7 @@ bool KittingStateController::init(hardware_interface::RobotHW* robot_hw,
   ROS_INFO_STREAM("KittingStateController: Contact detector "
                    << (enable_contact_detector_ ? "ENABLED" : "DISABLED")
                    << " | T_base=" << T_base_ << " N_min=" << N_min_ << " k_sigma=" << k_sigma_
-                   << " T_hold=" << T_hold_);
+                   << " delta_min=" << delta_min_ << " T_hold=" << T_hold_);
 
   // --- Phase 2: Gripper default parameters (overridable per-command via KittingGripperCommand) ---
   node_handle.param("execute_gripper_actions", execute_gripper_actions_, true);
@@ -618,7 +619,14 @@ void KittingStateController::update(const ros::Time& time, const ros::Duration& 
       // --- CLOSING: detect contact ---
       if (current_phase_.load(std::memory_order_relaxed) == GraspPhase::CLOSING &&
           baseline_armed_ && !contact_latched_) {
-        bool threshold_exceeded = (tau_ext_norm > contact_threshold_);
+        // Two conditions required:
+        //   1. Statistical exceedance: x(t) > theta
+        //   2. Minimum absolute rise:  x(t) - mu > delta_min  (noise guard)
+        // Without delta_min, a tiny sigma makes theta ≈ mu, and normal
+        // noise fluctuations trigger false contact.
+        double delta = tau_ext_norm - baseline_mu_;
+        bool threshold_exceeded = (tau_ext_norm > contact_threshold_) &&
+                                  (delta > delta_min_);
 
         // Optional slope gate
         if (threshold_exceeded && use_slope_gate_) {
@@ -653,8 +661,9 @@ void KittingStateController::update(const ros::Time& time, const ros::Duration& 
               publishStateLabel("CONTACT");
               ROS_INFO("============================================================");
               ROS_INFO("  [STATE]  >>  CONTACT  <<  Object contact detected!");
-              ROS_INFO("    tau_ext_norm=%.4f  threshold=%.4f  hold=%.3fs",
-                       tau_ext_norm, contact_threshold_, hold_elapsed);
+              ROS_INFO("    x(t)=%.4f  theta=%.4f  delta=%.4f  hold=%.3fs",
+                       tau_ext_norm, contact_threshold_,
+                       tau_ext_norm - baseline_mu_, hold_elapsed);
               ROS_INFO("============================================================");
             }
           }
@@ -677,13 +686,14 @@ void KittingStateController::update(const ros::Time& time, const ros::Duration& 
       GraspPhase phase = current_phase_.load(std::memory_order_relaxed);
       if (phase == GraspPhase::CLOSING) {
         double margin = tau_ext_norm - contact_threshold_;
-        ROS_INFO("  [SIGNAL]  CLOSING  |  x(t)=%.4f  θ=%.4f  margin=%.4f  %s",
-                 tau_ext_norm, contact_threshold_, margin,
-                 (margin > 0.0) ? "ABOVE" : "below");
+        double sig_delta = tau_ext_norm - baseline_mu_;
+        ROS_INFO("  [SIGNAL]  CLOSING  |  x(t)=%.4f  theta=%.4f  margin=%.4f  delta=%.4f  %s",
+                 tau_ext_norm, contact_threshold_, margin, sig_delta,
+                 (margin > 0.0 && sig_delta > delta_min_) ? "ABOVE" : "below");
       } else if (phase == GraspPhase::CONTACT ||
                  phase == GraspPhase::SECURE_GRASP ||
                  phase == GraspPhase::UPLIFT) {
-        ROS_INFO("  [SIGNAL]  %s  |  x(t)=%.4f  θ=%.4f  Δ=+%.4f",
+        ROS_INFO("  [SIGNAL]  %s  |  x(t)=%.4f  theta=%.4f  margin=+%.4f",
                  phaseToString(phase).c_str(),
                  tau_ext_norm, contact_threshold_,
                  tau_ext_norm - contact_threshold_);
