@@ -602,6 +602,26 @@ void KittingStateController::update(const ros::Time& time, const ros::Duration& 
     }
 
     // ====================================================================
+    // Signal monitor — log x(t) and θ at 2 Hz for terminal readability
+    // ====================================================================
+    if (signal_log_trigger_() && baseline_armed_) {
+      GraspPhase phase = current_phase_.load(std::memory_order_relaxed);
+      if (phase == GraspPhase::CLOSING) {
+        double margin = tau_ext_norm - contact_threshold_;
+        ROS_INFO("  [SIGNAL]  CLOSING  |  x(t)=%.4f  θ=%.4f  margin=%.4f  %s",
+                 tau_ext_norm, contact_threshold_, margin,
+                 (margin > 0.0) ? "ABOVE" : "below");
+      } else if (phase == GraspPhase::CONTACT ||
+                 phase == GraspPhase::SECURE_GRASP ||
+                 phase == GraspPhase::UPLIFT) {
+        ROS_INFO("  [SIGNAL]  %s  |  x(t)=%.4f  θ=%.4f  Δ=+%.4f",
+                 phaseToString(phase).c_str(),
+                 tau_ext_norm, contact_threshold_,
+                 tau_ext_norm - contact_threshold_);
+      }
+    }
+
+    // ====================================================================
     // Publish KittingState message (Phase 1 data)
     // ====================================================================
     if (kitting_publisher_.trylock()) {

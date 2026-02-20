@@ -146,6 +146,9 @@ class KittingStateController
   ros::Time prev_tau_ext_time_;
   bool prev_tau_ext_valid_{false};
 
+  // Slow-rate logger for contact signal monitoring (2 Hz — readable in terminal)
+  franka_hw::TriggerRate signal_log_trigger_{2.0};
+
   // --- UPLIFT trajectory state (RT-thread owned, except uplift_active_) ---
   std::atomic<bool> uplift_active_{false};  // Read by subscriber (duplicate guard), written by RT
   double uplift_elapsed_{0.0};
