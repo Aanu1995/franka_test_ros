@@ -77,42 +77,43 @@ BASELINE -> CLOSING -> CONTACT -> SECURE_GRASP -> UPLIFT
 Establish reference signal behavior before interaction.
 
 - Gripper fully open, end-effector stationary, no object contact
-- External torque norm reflects system noise only
-- Used for computing baseline mean (mu), standard deviation (sigma), and contact threshold theta = mu + k*sigma
+- External torque norm `x(t) = ||τ_ext||` reflects system noise only
+- Collects `N` samples over `T_base` seconds (default 0.7 s)
+- Computes baseline mean `μ`, standard deviation `σ`, and contact threshold `θ = μ + kσ`
 
 ### CLOSING
 
 Observe approach dynamics before contact.
 
-- Gripper begins closing toward object
-- External torque gradually changes
-- No confirmed sustained contact yet (no sustained exceedance of threshold theta)
+- Gripper begins closing toward object at width `w` and speed `v`
+- External torque `x(t)` gradually changes as fingers approach
+- Contact detector checks `x(t) > θ` every tick — no sustained exceedance yet
 
 ### CONTACT
 
-Detect first stable physical interaction. Published automatically by the controller.
+Detect first stable physical interaction. Published **automatically** by the controller.
 
 - Object touches gripper fingers
-- External torque norm exceeds threshold theta continuously for T_hold seconds
-- CONTACT is latched once detected (cannot return to CLOSING)
+- External torque norm exceeds threshold: `x(t) > θ` continuously for `T_hold` seconds (default 0.12 s)
+- CONTACT is **latched** once detected — cannot return to CLOSING
 
 ### SECURE_GRASP
 
 Characterize stable object compression.
 
-- Gripper continues slight compression after contact
-- External torque stabilizes with reduced variance compared to CONTACT transient
-- Stable force distribution
+- Gripper applies force `F` via GraspAction to width `w` with tolerance `ε_inner`/`ε_outer`
+- External torque `x(t)` stabilizes with reduced variance compared to CONTACT transient
+- Stable force distribution indicates object is securely held
 
 ### UPLIFT
 
 Validate grasp robustness under load. The **controller internally executes** a smooth Cartesian micro-lift using cosine-smoothed trajectory interpolation — no external motion planner is involved.
 
-- Controller commands a small upward displacement (default 3 mm, max 10 mm) via `FrankaPoseCartesianInterface`
-- Cosine-smoothed trajectory ensures zero velocity at start and end (no step jumps)
-- Object weight transfers to gripper
-- Predictable change in torque distribution; no large instability if grasp is secure
-- Motion duration and distance are configurable via YAML defaults or per-command overrides
+- Controller displaces end-effector upward by distance `d` (default 3 mm, max 10 mm) over duration `T` (default 1.0 s)
+- Cosine-smoothed trajectory `s = 0.5(1 - cos(π · s_raw))` ensures zero velocity at start and end
+- Only z-translation of `O_T_EE_d[14]` is modified — orientation and x/y unchanged
+- Object weight transfers to gripper; `x(t)` shows predictable change if grasp is secure
+- Parameters `d` and `T` configurable via YAML defaults or per-command overrides
 
 ### Topics
 
@@ -193,24 +194,160 @@ rostopic pub /kitting_phase2/record_control std_msgs/String "data: 'ABORT'" --on
 
 ## Phase 2: Contact Detection Mathematics
 
-The controller detects contact using the following algorithm on `tau_ext_norm`:
+The controller autonomously detects physical contact between the gripper and the object using statistical thresholding on the external torque norm signal. Contact detection runs at the publish rate (default 250 Hz) inside the real-time `update()` loop.
 
-### Baseline (during BASELINE state)
+### Symbols
 
-Collect N samples of x(t) = tau_ext_norm over T_base seconds.
+| Symbol | Name                    | Unit  | Default | Description                                                                 |
+|--------|-------------------------|-------|---------|-----------------------------------------------------------------------------|
+| `x(t)` | Signal                  | Nm    | —       | External torque norm: `x(t) = \|\|τ_ext\|\| = √(Σ τ_ext_i²)` at time `t` |
+| `N`    | Sample count            | —     | —       | Number of baseline samples collected (must reach `N_min`)                  |
+| `μ`    | Baseline mean           | Nm    | —       | Average of `x(t)` during BASELINE — the system noise floor                |
+| `σ`    | Baseline std. deviation | Nm    | —       | Spread of `x(t)` during BASELINE — how much noise naturally fluctuates    |
+| `k`    | Sigma multiplier        | —     | 5.0     | Number of standard deviations above `μ` for the threshold                 |
+| `θ`    | Contact threshold       | Nm    | —       | Trigger level: `θ = μ + kσ`                                               |
+| `T_base` | Baseline duration     | s     | 0.7     | Minimum time to collect baseline samples                                   |
+| `N_min`  | Minimum sample count  | —     | 50      | Minimum samples before baseline statistics are valid                       |
+| `T_hold` | Debounce hold time    | s     | 0.12    | Duration `x(t)` must continuously exceed `θ` to declare contact           |
+| `dx/dt`  | Signal slope          | Nm/s  | —       | Time derivative of `x(t)`, used by optional slope gate                    |
+| `slope_min` | Minimum slope       | Nm/s  | 5.0     | Minimum `dx/dt` required for contact (only if slope gate enabled)         |
 
-Compute:
-- Mean: `mu = (1/N) * sum(x_i)`
-- Standard deviation: `sigma = sqrt( (1/(N-1)) * sum((x_i - mu)^2) )`
-- Threshold: `theta = mu + k * sigma`
+### Step 1: Baseline Collection (during BASELINE state)
 
-### Detection (during CLOSING state)
+The controller collects `N` samples of `x(t) = ||τ_ext||` over at least `T_base` seconds. Collection continues until **both** conditions are met: elapsed time `≥ T_base` **and** sample count `N ≥ N_min`. This dual condition prevents silent failure when `N_min > publish_rate × T_base`.
 
-Contact is declared when `x(t) > theta` continuously for T_hold seconds (debounce).
+Statistics are computed using a single-pass algorithm (no array storage):
 
-Optional slope gate (disabled by default): also requires `dx/dt > slope_min`.
+```
+         1
+  μ  =  ─── Σ x_i
+         N
 
-Once CONTACT is declared, it is **latched** (cannot return to CLOSING).
+              ┌─────────────────────────────────┐
+              │  1                               │
+  σ  =  sqrt │ ───── Σ (x_i - μ)²              │
+              │ N - 1                            │
+              └─────────────────────────────────┘
+
+  θ  =  μ + k · σ
+```
+
+Where:
+- `μ` (mu) is the **mean** — average noise level when nothing is touching the robot
+- `σ` (sigma) is the **standard deviation** — how much that noise fluctuates
+- `θ` (theta) is the **threshold** — the trigger level `k` standard deviations above the mean
+- The variance uses Bessel's correction (`N-1`) for an unbiased estimate from a finite sample
+- Negative variance (possible due to floating-point) is clamped to zero before taking the square root
+
+**Interpretation of `k`**: With `k = 5`, the threshold `θ` is 5 standard deviations above the noise floor. For Gaussian noise, the probability of a random sample exceeding `θ` is `< 0.00003%`. Higher `k` = fewer false positives but requires stronger contact. Lower `k` = more sensitive but risks false triggers.
+
+### Step 2: Contact Detection (during CLOSING state)
+
+Once baseline statistics are computed (`baseline_armed = true`), the controller checks every sample during CLOSING:
+
+```
+  Contact condition:   x(t)  >  θ       where θ = μ + kσ
+```
+
+**Debounce**: A single sample exceeding `θ` is not sufficient. The signal must remain above `θ` **continuously** for `T_hold` seconds. If `x(t)` drops below `θ` at any point, the debounce timer resets to zero.
+
+```
+  Let t₀ = first time x(t) > θ
+
+  CONTACT declared when:   x(t) > θ   ∀ t ∈ [t₀, t₀ + T_hold]
+```
+
+In other words: `x(t)` must exceed `θ` without interruption for `T_hold` consecutive seconds.
+
+**Optional slope gate** (disabled by default, `use_slope_gate: false`): When enabled, contact additionally requires the signal to be **rising**:
+
+```
+  dx       x(t) - x(t - Δt)
+  ── (t) = ─────────────────  >  slope_min
+  dt              Δt
+```
+
+Where `Δt = slope_dt`. This filters out slow drift that might cross `θ` without actual contact.
+
+### Step 3: Latching
+
+Once CONTACT is declared, it is **latched** — the detector cannot return to CLOSING. This prevents oscillation at the contact boundary. A new trial (publishing BASELINE) is required to re-arm the detector.
+
+## Phase 2: UPLIFT Trajectory Mathematics
+
+The UPLIFT state executes a smooth Cartesian micro-lift internally using cosine-smoothed time-based trajectory interpolation. The trajectory runs at the control loop rate (1 kHz) and commands the end-effector pose via `FrankaPoseCartesianInterface`.
+
+### Symbols
+
+| Symbol     | Name                      | Unit  | Default | Description                                                                 |
+|------------|---------------------------|-------|---------|-----------------------------------------------------------------------------|
+| `d`        | Uplift distance           | m     | 0.003   | Total upward displacement along the z-axis (max 0.01)                      |
+| `T`        | Uplift duration           | s     | 1.0     | Total time for the cosine-smoothed trajectory                              |
+| `t`        | Elapsed time              | s     | —       | Time since UPLIFT started, incremented by `Δt` (control period) each tick  |
+| `Δt`       | Control period            | s     | 0.001   | Time between consecutive `update()` calls (1 kHz)                          |
+| `s_raw`    | Normalized time           | —     | —       | Linear progress: `s_raw = min(t/T, 1)`, clamped to [0, 1]                 |
+| `s`        | Smoothed progress         | —     | —       | Cosine-smoothed: `s = ½(1 − cos(π · s_raw))`, maps [0,1] → [0,1]         |
+| `z₀`       | Start z-position          | m     | —       | z-translation of `O_T_EE_d` at the moment UPLIFT begins: `z₀ = O_T_EE_d[14]` |
+| `z(t)`     | Commanded z-position      | m     | —       | `z(t) = z₀ + s · d`                                                       |
+| `v(t)`     | Commanded z-velocity      | m/s   | —       | `v(t) = dz/dt = (π·d)/(2T) · sin(π·t/T)`                                 |
+| `O_T_EE_d` | Desired end-effector pose | —     | —       | 4×4 column-major homogeneous transform; index [14] = z-translation        |
+
+### Trajectory Equation
+
+The trajectory smoothly moves the end-effector from `z₀` to `z₀ + d` over duration `T`:
+
+```
+              t
+  s_raw  =  min( ─── , 1 )
+              T
+
+         1
+  s  =  ─── ( 1  −  cos( π · s_raw ) )
+         2
+
+  z(t)  =  z₀  +  s · d
+```
+
+The **velocity profile** (first derivative) is:
+
+```
+  dz       π · d
+  ── (t) = ───── · sin( π · t / T )
+  dt        2T
+```
+
+### Trajectory Properties
+
+| Property              | Mathematical expression              | Physical meaning                              |
+|-----------------------|--------------------------------------|-----------------------------------------------|
+| Position at `t = 0`   | `z(0) = z₀`                         | Starts at the current height                  |
+| Position at `t = T`   | `z(T) = z₀ + d`                     | Ends exactly `d` meters above start           |
+| Velocity at `t = 0`   | `dz/dt = 0`                         | Zero velocity at start (no step discontinuity)|
+| Velocity at `t = T`   | `dz/dt = 0`                         | Zero velocity at end (smooth stop)            |
+| Peak velocity         | `v_max = πd/(2T)` at `t = T/2`      | Maximum speed at the midpoint of the motion   |
+| Peak velocity (default) | `v_max = π·0.003/(2·1.0) ≈ 0.0047 m/s` | ~4.7 mm/s — well within Franka limits     |
+
+### Execution Details
+
+1. **Start**: When UPLIFT is received via `state_cmd`, the controller captures the current `O_T_EE_d` as the start pose and records `z₀ = O_T_EE_d[14]`. Parameters `d` and `T` are snapshotted into RT-local copies (`rt_uplift_distance_`, `rt_uplift_duration_`) to prevent mid-trajectory corruption from concurrent subscriber writes.
+
+2. **Per-tick** (1 kHz): The controller increments `t ← t + Δt`, computes `s_raw`, `s`, and `z(t)`, then calls `setCommand(pose)`. Only the z-translation (index [14]) is modified — orientation and x/y position remain unchanged from the start pose.
+
+3. **Completion**: When `t ≥ T`, the trajectory is done. `uplift_active` is cleared and the controller transitions to passthrough mode, holding position at `z₀ + d`.
+
+4. **Passthrough mode**: When not executing UPLIFT, the controller reads `O_T_EE_d` and writes it back as the command every tick. This produces zero tracking error — the robot holds position with no drift or jerk.
+
+### Safety Constraints
+
+| Constraint              | Symbol / Value     | Description                                                    |
+|-------------------------|--------------------|----------------------------------------------------------------|
+| Maximum distance        | `d ≤ 0.01 m`      | Hard clamp — any `d > 10 mm` is clamped with a warning        |
+| Minimum distance        | `d > 0`            | Zero or negative `d` is rejected                               |
+| Minimum duration        | `T > 0`            | Zero or negative `T` is rejected                               |
+| Maximum velocity        | `v_max = πd/(2T)`  | Bounded by the clamp on `d` and the minimum `T`               |
+| Precondition            | Configurable       | `require_secure_grasp: true` requires SECURE_GRASP state       |
+| Duplicate rejection     | —                  | UPLIFT is ignored while a trajectory is already active         |
+| BASELINE interruption   | —                  | BASELINE clears UPLIFT, returns to passthrough (with warning)  |
 
 ## Configuration
 
