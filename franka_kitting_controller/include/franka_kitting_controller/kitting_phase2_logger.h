@@ -62,7 +62,13 @@ class KittingPhase2Logger {
 
   // Gripper-based detector
   bool enable_gripper_contact_;
-  double v_stall_, epsilon_w_, T_gripper_hold_;
+  double v_stall_, epsilon_w_, w_min_, T_gripper_hold_;
+
+  // Baseline statistics (extracted from last KittingState message in bag)
+  double recorded_baseline_mu_{0.0};
+  double recorded_baseline_sigma_{0.0};
+  double recorded_contact_threshold_{0.0};
+  bool has_baseline_stats_{false};
 
   // --- Trial state ---
   std::mutex trial_mutex_;  // Protects all trial state below

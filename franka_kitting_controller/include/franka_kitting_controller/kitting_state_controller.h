@@ -110,6 +110,16 @@ class KittingStateController
   std::unique_ptr<MoveClient> move_client_;
   std::unique_ptr<GraspClient> grasp_client_;
 
+  // --- Phase 2: Automatic gripper stop on CONTACT ---
+  // When CONTACT is detected during CLOSING, the RT thread sets a flag.
+  // A non-RT timer checks this flag and cancels the active gripper action,
+  // then sends a hold command (MoveAction to current width at low speed).
+  bool stop_on_contact_{true};              // Enable/disable auto-stop (YAML param)
+  std::atomic<bool> gripper_stop_pending_{false};  // Set by RT, consumed by timer
+  std::atomic<double> contact_width_{0.0};  // Width captured at CONTACT instant
+  ros::Timer gripper_stop_timer_;           // Non-RT timer (checks flag periodically)
+  void gripperStopTimerCallback(const ros::TimerEvent& event);
+
   // --- Phase 2: Gripper default parameters (overridable per-command) ---
   bool execute_gripper_actions_{true};
   double closing_width_{0.04};
@@ -173,12 +183,16 @@ class KittingStateController
   // --- Gripper-based contact detector ---
   // Subscribes to /franka_gripper/joint_states for measured finger positions.
   // Gripper width w(t) = q_finger1 + q_finger2.
-  // GripperContact: |w_dot| < v_stall AND |w - w_cmd| > epsilon_w for T_gripper_hold.
+  // GripperContact (directional): |w_dot| < v_stall
+  //                            AND (w - w_cmd) > epsilon_w  (object blocked early)
+  //                            AND w > w_min                (not at mechanical limit)
+  //                            for T_gripper_hold seconds continuously.
   ros::Subscriber gripper_joint_state_sub_;
   void gripperJointStateCallback(const sensor_msgs::JointState::ConstPtr& msg);
 
   double v_stall_{0.003};            // Stall velocity threshold [m/s]
-  double epsilon_w_{0.002};          // Width tolerance to commanded [m]
+  double epsilon_w_{0.002};          // Directional width gap tolerance [m]
+  double w_min_{0.002};              // Minimum width safety guard [m]
   double T_gripper_hold_{0.10};      // Debounce hold time for gripper detector
 
   // Gripper state (written by subscriber callback, read by RT via atomic)

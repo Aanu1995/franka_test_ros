@@ -100,6 +100,7 @@ KittingPhase2Logger::KittingPhase2Logger()
   nh_.param(ctrl_ns + "enable_gripper_contact", enable_gripper_contact_, true);
   nh_.param(ctrl_ns + "v_stall", v_stall_, 0.003);
   nh_.param(ctrl_ns + "epsilon_w", epsilon_w_, 0.002);
+  nh_.param(ctrl_ns + "w_min", w_min_, 0.002);
   nh_.param(ctrl_ns + "T_gripper_hold", T_gripper_hold_, 0.10);
 
   // --- Subscribe to record control (STOP, ABORT) ---
@@ -296,6 +297,34 @@ void KittingPhase2Logger::stopTrial() {
   ts << std::put_time(&tm, "%Y%m%d_%H%M%S");
   stop_time_str_ = ts.str();
 
+  // Count KittingState messages and extract baseline stats from bag for metadata
+  has_baseline_stats_ = false;
+  try {
+    rosbag::Bag count_bag;
+    count_bag.open(bag_path_, rosbag::bagmode::Read);
+    rosbag::View count_view(count_bag,
+        rosbag::TopicQuery("/kitting_state_controller/kitting_state_data"));
+    total_samples_ = static_cast<int>(count_view.size());
+
+    // Extract baseline statistics from the last KittingState message
+    // (baseline_mu/sigma/threshold are populated once baseline completes and persist)
+    for (auto it = count_view.begin(); it != count_view.end(); ++it) {
+      auto ks = it->instantiate<franka_kitting_controller::KittingState>();
+      if (ks && ks->contact_threshold > 0.0) {
+        recorded_baseline_mu_ = ks->baseline_mu;
+        recorded_baseline_sigma_ = ks->baseline_sigma;
+        recorded_contact_threshold_ = ks->contact_threshold;
+        has_baseline_stats_ = true;
+        break;  // First non-zero threshold = baseline just computed, all subsequent same
+      }
+    }
+
+    count_bag.close();
+  } catch (const std::exception& e) {
+    ROS_WARN("KittingPhase2Logger: Could not count samples: %s", e.what());
+    total_samples_ = -1;
+  }
+
   // Build CSV path: trial_dir/trial_NNN_signals.csv
   std::ostringstream csv_ss;
   csv_ss << trial_dir_ << "/trial_"
@@ -379,17 +408,19 @@ void KittingPhase2Logger::writeMetadata() {
   f << "    enabled: " << (enable_gripper_contact_ ? "true" : "false") << "\n";
   f << "    v_stall: " << v_stall_ << "\n";
   f << "    epsilon_w: " << epsilon_w_ << "\n";
+  f << "    w_min: " << w_min_ << "\n";
   f << "    T_gripper_hold: " << T_gripper_hold_ << "\n";
 
-  double mu = 0, sigma = 0, theta = 0;
-  bool has_mu = nh_.getParam("/kitting_state_controller/baseline_mu", mu);
-  bool has_sigma = nh_.getParam("/kitting_state_controller/baseline_sigma", sigma);
-  bool has_theta = nh_.getParam("/kitting_state_controller/contact_threshold", theta);
-
   f << "baseline_statistics:\n";
-  f << "  baseline_mu_tau_ext_norm: " << (has_mu ? std::to_string(mu) : "null") << "\n";
-  f << "  baseline_sigma_tau_ext_norm: " << (has_sigma ? std::to_string(sigma) : "null") << "\n";
-  f << "  contact_threshold_theta: " << (has_theta ? std::to_string(theta) : "null") << "\n";
+  if (has_baseline_stats_) {
+    f << "  baseline_mu_tau_ext_norm: " << recorded_baseline_mu_ << "\n";
+    f << "  baseline_sigma_tau_ext_norm: " << recorded_baseline_sigma_ << "\n";
+    f << "  contact_threshold_theta: " << recorded_contact_threshold_ << "\n";
+  } else {
+    f << "  baseline_mu_tau_ext_norm: null\n";
+    f << "  baseline_sigma_tau_ext_norm: null\n";
+    f << "  contact_threshold_theta: null\n";
+  }
 
   f.close();
   ROS_INFO("KittingPhase2Logger: Metadata written -> %s", meta_path.c_str());
@@ -435,6 +466,11 @@ void KittingPhase2Logger::exportCsv(const std::string& bag_path,
     for (int i = 1; i <= 7; ++i) csv << ",gravity_" << i;
     for (int i = 1; i <= 7; ++i) csv << ",coriolis_" << i;
     csv << ",gripper_width";
+    // Contact detection diagnostics
+    csv << ",baseline_mu,baseline_sigma,contact_threshold";
+    csv << ",arm_margin,arm_delta";
+    csv << ",gripper_cmd_width,gripper_velocity";
+    csv << ",arm_detector_active,gripper_detector_active,contact_detected";
     csv << "\n";
 
     // Set high precision for floating point
@@ -489,6 +525,18 @@ void KittingPhase2Logger::exportCsv(const std::string& bag_path,
         for (size_t i = 0; i < 7; ++i) csv << "," << ks->coriolis[i];
         // gripper_width
         csv << "," << ks->gripper_width;
+
+        // Contact detection diagnostics
+        csv << "," << ks->baseline_mu
+            << "," << ks->baseline_sigma
+            << "," << ks->contact_threshold;
+        csv << "," << ks->arm_margin
+            << "," << ks->arm_delta;
+        csv << "," << ks->gripper_cmd_width
+            << "," << ks->gripper_velocity;
+        csv << "," << (ks->arm_detector_active ? 1 : 0)
+            << "," << (ks->gripper_detector_active ? 1 : 0)
+            << "," << (ks->contact_detected ? 1 : 0);
 
         csv << "\n";
         sample_count++;

@@ -331,6 +331,7 @@ bool KittingStateController::init(hardware_interface::RobotHW* robot_hw,
   node_handle.param("enable_gripper_contact", enable_gripper_contact_, true);
   node_handle.param("v_stall", v_stall_, 0.003);
   node_handle.param("epsilon_w", epsilon_w_, 0.002);
+  node_handle.param("w_min", w_min_, 0.002);
   node_handle.param("T_gripper_hold", T_gripper_hold_, 0.10);
 
   if (!enable_arm_contact_ && !enable_gripper_contact_) {
@@ -343,9 +344,9 @@ bool KittingStateController::init(hardware_interface::RobotHW* robot_hw,
   ROS_INFO("  Arm detector:     %s | k_sigma=%.1f delta_min=%.2f T_arm_hold=%.3fs",
            enable_arm_contact_ ? "ENABLED" : "DISABLED",
            k_sigma_, delta_min_, T_arm_hold_);
-  ROS_INFO("  Gripper detector: %s | v_stall=%.4f epsilon_w=%.4f T_gripper_hold=%.3fs",
+  ROS_INFO("  Gripper detector: %s | v_stall=%.4f epsilon_w=%.4f w_min=%.4f T_gripper_hold=%.3fs",
            enable_gripper_contact_ ? "ENABLED" : "DISABLED",
-           v_stall_, epsilon_w_, T_gripper_hold_);
+           v_stall_, epsilon_w_, w_min_, T_gripper_hold_);
   ROS_INFO("  Baseline: T_base=%.2fs N_min=%d", T_base_, N_min_);
 
   // --- Phase 2: Gripper default parameters (overridable per-command via KittingGripperCommand) ---
@@ -408,6 +409,20 @@ bool KittingStateController::init(hardware_interface::RobotHW* robot_hw,
       ROS_WARN("KittingStateController: GraspAction server not yet available "
                "(will retry on command)");
     }
+  }
+
+  // --- Phase 2: Automatic gripper stop on CONTACT ---
+  node_handle.param("stop_on_contact", stop_on_contact_, true);
+  ROS_INFO("KittingStateController: stop_on_contact=%s",
+           stop_on_contact_ ? "true" : "false");
+
+  // Non-RT timer checks gripper_stop_pending_ flag set by the RT thread.
+  // 100 Hz polling (10ms) gives sub-frame latency for the stop command.
+  {
+    ros::NodeHandle timer_nh;  // global handle for the timer callback queue
+    gripper_stop_timer_ = timer_nh.createTimer(
+        ros::Duration(0.01),
+        &KittingStateController::gripperStopTimerCallback, this);
   }
 
   // Acquire FrankaStateInterface
@@ -510,6 +525,40 @@ void KittingStateController::starting(const ros::Time& /* time */) {
   ROS_INFO("============================================================");
 }
 
+void KittingStateController::gripperStopTimerCallback(const ros::TimerEvent& /*event*/) {
+  // Non-RT callback: checks if the RT thread flagged a gripper stop on CONTACT.
+  // Runs at 100 Hz; the flag is set at most once per CLOSING→CONTACT transition.
+  if (!gripper_stop_pending_.load(std::memory_order_acquire)) {
+    return;
+  }
+  gripper_stop_pending_.store(false, std::memory_order_relaxed);
+
+  double w_contact = contact_width_.load(std::memory_order_relaxed);
+
+  // 1. Cancel any active gripper action (MoveAction or GraspAction).
+  //    cancelGoal() is non-blocking — it publishes a cancel message on the action topic.
+  if (move_client_ && move_client_->isServerConnected()) {
+    move_client_->cancelAllGoals();
+  }
+  if (grasp_client_ && grasp_client_->isServerConnected()) {
+    grasp_client_->cancelAllGoals();
+  }
+
+  // 2. Hold current width: send a MoveAction to the contact width at low speed.
+  //    This prevents the gripper from drifting after cancellation.
+  if (move_client_ && move_client_->isServerConnected()) {
+    franka_gripper::MoveGoal hold_goal;
+    hold_goal.width = w_contact;
+    hold_goal.speed = 0.01;  // Low hold speed [m/s]
+    move_client_->sendGoal(hold_goal);
+  }
+
+  ROS_INFO("============================================================");
+  ROS_INFO("  [CONTACT]  Gripper stopped at width=%.4f m", w_contact);
+  ROS_INFO("    Cancelled active action, holding current position");
+  ROS_INFO("============================================================");
+}
+
 void KittingStateController::update(const ros::Time& time, const ros::Duration& period) {
   // ====================================================================
   // 1. Apply pending state transition from subscriber (every tick)
@@ -536,6 +585,7 @@ void KittingStateController::update(const ros::Time& time, const ros::Duration& 
       baseline_sigma_ = 0.0;
       contact_threshold_ = 0.0;
       contact_latched_ = false;
+      gripper_stop_pending_.store(false, std::memory_order_relaxed);
       // Reset arm detector debounce
       arm_exceeding_ = false;
       // Reset gripper detector debounce
@@ -633,6 +683,13 @@ void KittingStateController::update(const ros::Time& time, const ros::Duration& 
     // Read gripper width from subscriber (atomic, non-blocking)
     double gripper_w = gripper_width_.load(std::memory_order_relaxed);
 
+    // Contact detection diagnostics (populated during CLOSING, published every tick)
+    double diag_arm_margin = 0.0;       // tau_ext_norm - theta
+    double diag_arm_delta = 0.0;        // tau_ext_norm - mu
+    double diag_gripper_velocity = 0.0; // finite-difference dw/dt
+    bool diag_arm_active = false;       // arm detector condition met this tick
+    bool diag_gripper_active = false;   // gripper stall condition met this tick
+
     // --- BASELINE: collect arm signal samples ---
     if (current_phase_.load(std::memory_order_relaxed) == GraspPhase::BASELINE) {
       if (!baseline_collecting_) {
@@ -678,9 +735,13 @@ void KittingStateController::update(const ros::Time& time, const ros::Duration& 
       std::string trigger_source;
 
       // ---- Arm-based detector ----
+      diag_arm_margin = tau_ext_norm - contact_threshold_;
+      diag_arm_delta = tau_ext_norm - baseline_mu_;
+
       if (enable_arm_contact_) {
         bool arm_triggered = (tau_ext_norm > contact_threshold_) &&
                              ((tau_ext_norm - baseline_mu_) > delta_min_);
+        diag_arm_active = arm_triggered;
 
         if (arm_triggered) {
           if (!arm_exceeding_) {
@@ -699,17 +760,28 @@ void KittingStateController::update(const ros::Time& time, const ros::Duration& 
       }
 
       // ---- Gripper-based detector ----
-      if (enable_gripper_contact_ && !arm_contact) {
+      {
+        // Always compute gripper velocity for diagnostics, even if detector disabled
         double dt = (1.0 / 250.0);  // publish rate period
-        double w_dot = 0.0;
-
         if (prev_gripper_width_valid_) {
-          w_dot = (gripper_w - prev_gripper_width_) / dt;
+          diag_gripper_velocity = (gripper_w - prev_gripper_width_) / dt;
         }
+      }
 
+      if (enable_gripper_contact_ && !arm_contact) {
+        double w_dot = diag_gripper_velocity;
+
+        // 1) Stall: fingers stopped moving
         bool stalled = (std::abs(w_dot) < v_stall_) && prev_gripper_width_valid_;
-        bool not_at_target = (std::abs(gripper_w - gripper_cmd_width_) > epsilon_w_);
-        bool gripper_triggered = stalled && not_at_target;
+        // 2) Directional gap: gripper stopped BEFORE reaching target (w > w_cmd)
+        //    Object blocked the fingers — measured width exceeds commanded width.
+        //    Using signed difference (NOT absolute value) prevents false contact
+        //    when the gripper reaches its target normally (w ≈ w_cmd → gap ≈ 0).
+        bool blocked_early = (gripper_w - gripper_cmd_width_) > epsilon_w_;
+        // 3) Not fully closed: avoid false contact at mechanical limit
+        bool above_min = (gripper_w > w_min_);
+        bool gripper_triggered = stalled && blocked_early && above_min;
+        diag_gripper_active = gripper_triggered;
 
         if (gripper_triggered) {
           if (!gripper_exceeding_) {
@@ -725,24 +797,34 @@ void KittingStateController::update(const ros::Time& time, const ros::Duration& 
         } else {
           gripper_exceeding_ = false;
         }
-
-        prev_gripper_width_ = gripper_w;
-        prev_gripper_width_valid_ = true;
       }
+
+      // Always update prev_gripper_width_ so velocity computation is correct
+      // on the next tick, regardless of whether the gripper detector ran.
+      prev_gripper_width_ = gripper_w;
+      prev_gripper_width_valid_ = true;
 
       // ---- Fusion: OR ----
       if (arm_contact || gripper_contact) {
         contact_latched_ = true;
         current_phase_.store(GraspPhase::CONTACT, std::memory_order_relaxed);
         publishStateLabel("CONTACT");
+
+        // Signal the non-RT timer to stop the gripper (cancel + hold)
+        if (stop_on_contact_ && execute_gripper_actions_) {
+          contact_width_.store(gripper_w, std::memory_order_relaxed);
+          gripper_stop_pending_.store(true, std::memory_order_release);
+        }
+
         ROS_INFO("============================================================");
         ROS_INFO("  [STATE]  >>  CONTACT  <<  Object contact detected!");
         ROS_INFO("    Triggered by: %s detector", trigger_source.c_str());
         ROS_INFO("    tau_ext_norm=%.4f  theta=%.4f  delta=%.4f",
                  tau_ext_norm, contact_threshold_, tau_ext_norm - baseline_mu_);
-        ROS_INFO("    gripper_w=%.4f  w_cmd=%.4f  |w-w_cmd|=%.4f",
+        ROS_INFO("    gripper_w=%.4f  w_cmd=%.4f  gap=%.4f",
                  gripper_w, gripper_cmd_width_,
-                 std::abs(gripper_w - gripper_cmd_width_));
+                 gripper_w - gripper_cmd_width_);
+        ROS_INFO("    stop_on_contact=%s", stop_on_contact_ ? "true" : "false");
         ROS_INFO("============================================================");
       }
     }
@@ -759,11 +841,14 @@ void KittingStateController::update(const ros::Time& time, const ros::Duration& 
       } else if (phase == GraspPhase::CLOSING && baseline_armed_) {
         double arm_margin = tau_ext_norm - contact_threshold_;
         double arm_delta = tau_ext_norm - baseline_mu_;
+        double gripper_gap = gripper_w - gripper_cmd_width_;  // directional: >0 means blocked early
         ROS_INFO("  [SIGNAL]  CLOSING  |  x(t)=%.4f  θ=%.4f  margin=%.4f  delta=%.4f  "
-                 "w=%.4f  w_cmd=%.4f  %s",
+                 "w=%.4f  w_cmd=%.4f  gap=%.4f  ẇ=%.4f  %s  %s",
                  tau_ext_norm, contact_threshold_, arm_margin, arm_delta,
-                 gripper_w, gripper_cmd_width_,
-                 (arm_margin > 0.0 && arm_delta > delta_min_) ? "ARM_ABOVE" : "arm_below");
+                 gripper_w, gripper_cmd_width_, gripper_gap, diag_gripper_velocity,
+                 (arm_margin > 0.0 && arm_delta > delta_min_) ? "ARM_ABOVE" : "arm_below",
+                 (gripper_gap > epsilon_w_ && std::abs(diag_gripper_velocity) < v_stall_)
+                     ? "GRIP_STALL" : "grip_moving");
       } else if (baseline_armed_ &&
                  (phase == GraspPhase::CONTACT ||
                   phase == GraspPhase::SECURE_GRASP ||
@@ -812,6 +897,18 @@ void KittingStateController::update(const ros::Time& time, const ros::Duration& 
       kitting_publisher_.msg_.tau_ext_norm = tau_ext_norm;
       kitting_publisher_.msg_.wrench_norm = wrench_norm;
       kitting_publisher_.msg_.gripper_width = gripper_w;
+
+      // Contact detection diagnostics
+      kitting_publisher_.msg_.baseline_mu = baseline_mu_;
+      kitting_publisher_.msg_.baseline_sigma = baseline_sigma_;
+      kitting_publisher_.msg_.contact_threshold = contact_threshold_;
+      kitting_publisher_.msg_.arm_margin = diag_arm_margin;
+      kitting_publisher_.msg_.arm_delta = diag_arm_delta;
+      kitting_publisher_.msg_.gripper_cmd_width = gripper_cmd_width_;
+      kitting_publisher_.msg_.gripper_velocity = diag_gripper_velocity;
+      kitting_publisher_.msg_.arm_detector_active = diag_arm_active;
+      kitting_publisher_.msg_.gripper_detector_active = diag_gripper_active;
+      kitting_publisher_.msg_.contact_detected = contact_latched_;
 
       kitting_publisher_.unlockAndPublish();
     }

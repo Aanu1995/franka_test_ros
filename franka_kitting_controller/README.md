@@ -100,7 +100,7 @@ Observe approach dynamics before contact. Hybrid contact detection is active.
 - Gripper begins closing toward object at width `w` and speed `v`
 - Two independent detectors run in parallel:
   - **Arm detector**: checks `x(t) > θ` AND `x(t) - μ > δ_min` with `T_arm_hold` debounce
-  - **Gripper detector**: checks `|ẇ| < v_stall` AND `|w - w_cmd| > ε_w` with `T_gripper_hold` debounce
+  - **Gripper detector**: checks `|ẇ| < v_stall` AND `(w - w_cmd) > ε_w` AND `w > w_min` with `T_gripper_hold` debounce
 - CONTACT = ArmContact OR GripperContact (either detector can trigger)
 
 ### CONTACT
@@ -110,6 +110,7 @@ Detect first stable physical interaction. Published **automatically** by the con
 - Object touches gripper fingers — detected by **either** gripper stall or arm torque exceedance
 - CONTACT log identifies which detector triggered (ARM or GRIPPER)
 - CONTACT is **latched** once detected — cannot return to CLOSING
+- **Gripper auto-stop**: When `stop_on_contact` is true (default), the active gripper action is cancelled and the gripper holds its current width at the moment of contact. This prevents over-compression of the object. The stop is executed asynchronously (non-blocking) via a non-RT timer.
 
 ### SECURE_GRASP
 
@@ -279,20 +280,23 @@ The `δ_min` guard prevents false triggers when `σ` is very small (low noise). 
 | `ẇ(t)`          | Gripper width velocity | m/s   | —       | `ẇ(t) = (w(t) - w(t-Δt)) / Δt`                                    |
 | `w_cmd`         | Commanded width        | m     | —       | Target width from the CLOSING command                               |
 | `v_stall`       | Stall velocity threshold | m/s | 0.003   | Below this speed, fingers are considered stalled                    |
-| `ε_w`           | Width tolerance        | m     | 0.002   | Minimum distance from target to rule out normal completion          |
+| `ε_w`           | Directional width gap  | m     | 0.002   | Minimum gap above target to confirm early blockage                  |
+| `w_min`         | Minimum width guard    | m     | 0.002   | Reject contact at gripper mechanical limit                          |
 | `T_gripper_hold`| Gripper debounce time  | s     | 0.10    | Duration conditions must hold continuously                          |
 
-#### Gripper Stall Condition
+#### Gripper Stall Condition (Directional)
 
-GripperContact is TRUE when **both** conditions hold continuously for `T_gripper_hold` seconds:
+GripperContact is TRUE when **all three** conditions hold continuously for `T_gripper_hold` seconds:
 
 ```
   1. Stall:              |ẇ(t)| < v_stall
 
-  2. Not at target:      |w(t) - w_cmd| > ε_w
+  2. Directional gap:    (w(t) - w_cmd) > ε_w        ← signed, NOT absolute value
+
+  3. Not fully closed:   w(t) > w_min
 ```
 
-The stall condition detects when fingers stop moving (blocked by object) before reaching the commanded width. The `ε_w` guard prevents false contact when the gripper reaches its target normally.
+**Why directional?** The previous `|w - w_cmd|` check caused false positives when the gripper reached its target normally (velocity → 0, but w ≈ w_cmd so no real contact). The signed condition `(w - w_cmd) > ε_w` ensures w(t) > w_cmd, meaning the gripper stopped **before** reaching its target because an object blocked the fingers. The `w_min` guard prevents false contact when the gripper reaches its mechanical limit.
 
 ### Fusion and Latching
 
@@ -396,8 +400,10 @@ The **velocity profile** (first derivative) is:
 | `T_arm_hold`               | double | `0.10`  | Arm detector debounce hold time [s]            |
 | `enable_gripper_contact`   | bool   | `true`  | Enable gripper-based contact detector          |
 | `v_stall`                  | double | `0.003` | Gripper stall velocity threshold [m/s]         |
-| `epsilon_w`                | double | `0.002` | Width tolerance to commanded target [m]        |
+| `epsilon_w`                | double | `0.002` | Directional width gap threshold [m]            |
+| `w_min`                    | double | `0.002` | Minimum width guard (mechanical limit) [m]     |
 | `T_gripper_hold`           | double | `0.10`  | Gripper detector debounce hold time [s]        |
+| `stop_on_contact`          | bool   | `true`  | Cancel gripper action and hold width on CONTACT |
 | `execute_gripper_actions`  | bool   | `true`  | Execute gripper actions (false = signal-only)   |
 | `closing_width`            | double | `0.04`  | Default width for MoveAction in CLOSING [m]    |
 | `closing_speed`            | double | `0.04`  | Default speed for MoveAction in CLOSING [m/s]  |
@@ -478,6 +484,7 @@ detector_parameters:
     enabled: true
     v_stall: 0.003
     epsilon_w: 0.002
+    w_min: 0.002
     T_gripper_hold: 0.10
 baseline_statistics:
   baseline_mu_tau_ext_norm: 0.342
@@ -489,7 +496,7 @@ baseline_statistics:
 
 When `export_csv_on_stop` is `true` (default), the logger automatically reads back the rosbag after recording stops and writes a flattened CSV file using the C++ `rosbag::View` API. The export runs in a background thread so the stop operation returns immediately.
 
-The CSV contains one row per `KittingState` message (61 columns):
+The CSV contains one row per `KittingState` message (71 columns):
 
 | Group            | Columns                                                          |
 |------------------|------------------------------------------------------------------|
@@ -503,6 +510,8 @@ The CSV contains one row per `KittingState` message (61 columns):
 | EE velocity      | `ee_vx`, `ee_vy`, `ee_vz`, `ee_wx`, `ee_wy`, `ee_wz`           |
 | Gravity          | `gravity_1` ... `gravity_7`                                      |
 | Coriolis         | `coriolis_1` ... `coriolis_7`                                    |
+| Gripper          | `gripper_width`                                                  |
+| Contact diag.    | `baseline_mu`, `baseline_sigma`, `contact_threshold`, `arm_margin`, `arm_delta`, `gripper_cmd_width`, `gripper_velocity`, `arm_detector_active`, `gripper_detector_active`, `contact_detected` |
 
 `O_T_EE` (16 values) and `jacobian` (42 values) are not included in the CSV. They remain in the rosbag.
 
@@ -548,6 +557,16 @@ Only the parameters relevant to the command are used:
 | `tau_ext_norm`  | float64      | Euclidean norm of `tau_ext`                          |
 | `wrench_norm`  | float64      | Euclidean norm of `wrench_ext`                       |
 | `gripper_width` | float64     | Measured gripper width (q_finger1 + q_finger2) [m]   |
+| `baseline_mu`   | float64     | Baseline mean of tau_ext_norm [Nm]                   |
+| `baseline_sigma` | float64    | Baseline std dev of tau_ext_norm [Nm]                |
+| `contact_threshold` | float64 | theta = mu + k * sigma [Nm]                          |
+| `arm_margin`    | float64     | tau_ext_norm − theta (>0 = above threshold) [Nm]     |
+| `arm_delta`     | float64     | tau_ext_norm − mu (absolute rise above baseline) [Nm]|
+| `gripper_cmd_width` | float64 | Commanded gripper target width w_cmd [m]             |
+| `gripper_velocity` | float64  | Finite-difference gripper velocity dw/dt [m/s]       |
+| `arm_detector_active` | bool  | True if arm detector condition is met this tick      |
+| `gripper_detector_active` | bool | True if gripper stall condition is met this tick  |
+| `contact_detected` | bool     | True once CONTACT is latched                         |
 
 ## Interfaces
 
@@ -610,12 +629,17 @@ Move EE into table. **Expected**: clear increase in Fz, `wrench_norm`, `tau_ext_
 - Logger shutdown (Ctrl+C) automatically stops recording (equivalent to STOP)
 - CONTACT auto-stop works when `auto_stop_on_contact` is enabled
 - Hybrid CONTACT detection: arm torque OR gripper stall (independently debounced)
-- Finger contact on free objects triggers CONTACT via gripper stall detector
+- Finger contact on free objects triggers CONTACT via gripper stall detector (directional: w > w_cmd)
+- Gripper reaching target width normally does NOT trigger false CONTACT
 - Load transfer or constrained contact triggers CONTACT via arm torque detector
 - CONTACT log identifies which detector triggered (ARM or GRIPPER)
+- Gripper stops immediately on CONTACT when `stop_on_contact` is true (cancels active action, holds width)
+- No further gripper compression occurs after CONTACT (width remains constant until SECURE_GRASP)
+- Gripper stop is non-blocking (asynchronous via non-RT timer, does not block control loop)
+- `stop_on_contact: false` allows gripper to continue (testing mode)
 - If both detectors are disabled, controller refuses to start (FATAL)
 - Bag contains 5 topics: kitting_state_data, state, state_cmd, record_control, joint_states
-- CSV contains 61 flattened columns with correct state labels per row (includes gripper_width)
+- CSV contains 71 flattened columns with correct state labels per row (includes gripper_width + 10 contact diagnostics)
 - CSV export does not block the ROS spin loop (runs in background thread)
 - metadata.yaml contains bag_filename, csv_filename, total_samples, start/stop times, and detector parameters
 - Publishing CLOSING on `state_cmd` triggers gripper MoveAction + state label

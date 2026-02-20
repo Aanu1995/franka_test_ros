@@ -16,8 +16,12 @@ kitting_state_controller:
   # Phase 2: Gripper-based contact detector
   enable_gripper_contact: true
   v_stall: 0.003 # [m/s] Stall velocity threshold
-  epsilon_w: 0.002 # [m] Width tolerance to commanded target
+  epsilon_w: 0.002 # [m] Directional width gap: (w - w_cmd) > epsilon_w means blocked early
+  w_min: 0.002 # [m] Minimum width safety guard (reject contact at mechanical limit)
   T_gripper_hold: 0.10 # [s] Debounce hold time for gripper detector
+
+  # Phase 2: Gripper stop on CONTACT
+  stop_on_contact: true # Cancel active gripper action and hold width when CONTACT detected
 
   # Phase 2: Gripper default parameters (overridable per-command via KittingGripperCommand)
   execute_gripper_actions: true # Set false for signal-only testing mode
