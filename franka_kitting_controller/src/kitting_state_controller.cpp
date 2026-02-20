@@ -21,6 +21,8 @@ namespace franka_kitting_controller {
 
 std::string KittingStateController::phaseToString(GraspPhase phase) {
   switch (phase) {
+    case GraspPhase::START:
+      return "START";
     case GraspPhase::BASELINE:
       return "BASELINE";
     case GraspPhase::CLOSING:
@@ -55,6 +57,15 @@ std::array<double, 16> KittingStateController::computeUpliftPose(double elapsed)
   return pose;
 }
 
+void KittingStateController::loggerReadyCallback(const std_msgs::Bool::ConstPtr& msg) {
+  if (msg->data && !logger_ready_.load(std::memory_order_relaxed)) {
+    logger_ready_.store(true, std::memory_order_relaxed);
+    ROS_INFO("============================================================");
+    ROS_INFO("  [READY]  Phase 2 logger detected — commands now accepted");
+    ROS_INFO("============================================================");
+  }
+}
+
 void KittingStateController::stateCallback(const std_msgs::String::ConstPtr& msg) {
   // Listens to /kitting_phase2/state for BASELINE from the user.
   // CLOSING, SECURE_GRASP, and UPLIFT are now handled via /kitting_phase2/state_cmd.
@@ -63,6 +74,20 @@ void KittingStateController::stateCallback(const std_msgs::String::ConstPtr& msg
   // This callback runs in the subscriber's spinner thread (non-RT).
   // Phase changes are applied in update() via pending_phase_ / phase_changed_.
   const std::string& label = msg->data;
+
+  // --- Guard: reject commands if the Phase 2 logger is not running ---
+  // Ignore controller's own echo publications (they don't need the logger guard).
+  if (label != "UPLIFT" && label != "CONTACT" && label != "CLOSING" &&
+      label != "SECURE_GRASP") {
+    if (!logger_ready_.load(std::memory_order_relaxed)) {
+      ROS_WARN("KittingStateController: '%s' rejected — Phase 2 logger not detected. "
+               "Launch the logger first:\n"
+               "  roslaunch franka_kitting_controller kitting_phase2.launch "
+               "object_name:=<OBJ> base_directory:=<DIR>",
+               label.c_str());
+      return;
+    }
+  }
 
   if (label == "BASELINE") {
     pending_phase_.store(GraspPhase::BASELINE, std::memory_order_relaxed);
@@ -95,6 +120,24 @@ void KittingStateController::stateCmdCallback(
   //   4. Set pending_phase_ + phase_changed_ for RT update() to apply
   //   5. Publish state label on /kitting_phase2/state
   const std::string& cmd = msg->command;
+
+  // --- Guard: reject commands if the Phase 2 logger is not running ---
+  if (!logger_ready_.load(std::memory_order_relaxed)) {
+    ROS_WARN("KittingStateController: Command '%s' rejected — Phase 2 logger not detected. "
+             "Launch the logger first:\n"
+             "  roslaunch franka_kitting_controller kitting_phase2.launch "
+             "object_name:=<OBJ> base_directory:=<DIR>",
+             cmd.c_str());
+    return;
+  }
+
+  // --- Guard: reject commands before BASELINE has been published ---
+  if (current_phase_.load(std::memory_order_relaxed) == GraspPhase::START) {
+    ROS_WARN("KittingStateController: Command '%s' rejected — controller is in START state. "
+             "Publish BASELINE on /kitting_phase2/state first to begin the grasp sequence.",
+             cmd.c_str());
+    return;
+  }
 
   if (cmd == "CLOSING") {
     if (current_phase_.load(std::memory_order_relaxed) == GraspPhase::CLOSING) {
@@ -379,6 +422,11 @@ bool KittingStateController::init(hardware_interface::RobotHW* robot_hw,
   ros::NodeHandle root_nh;
   state_publisher_.init(root_nh, "/kitting_phase2/state", 1);
 
+  // Phase 2: Logger readiness subscriber (latched topic from logger node).
+  // Commands are rejected until this signal is received.
+  logger_ready_sub_ = root_nh.subscribe("/kitting_phase2/logger_ready", 1,
+                                         &KittingStateController::loggerReadyCallback, this);
+
   // Phase 2: State subscriber — user publishes BASELINE here.
   // CLOSING/SECURE_GRASP/UPLIFT/CONTACT echoes are ignored.
   state_sub_ = root_nh.subscribe("/kitting_phase2/state", 10,
@@ -399,6 +447,12 @@ void KittingStateController::starting(const ros::Time& /* time */) {
   cartesian_pose_handle_->setCommand(uplift_start_pose_);  // Defensive: no uninitialized gap
   uplift_active_.store(false, std::memory_order_relaxed);
   uplift_elapsed_ = 0.0;
+
+  ROS_INFO("============================================================");
+  ROS_INFO("  [STATE]  >>  START  <<  Controller running");
+  ROS_INFO("    Step 1: Launch Phase 2 logger (kitting_phase2.launch)");
+  ROS_INFO("    Step 2: Publish BASELINE on /kitting_phase2/state");
+  ROS_INFO("============================================================");
 }
 
 void KittingStateController::update(const ros::Time& time, const ros::Duration& period) {

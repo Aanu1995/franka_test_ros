@@ -11,6 +11,7 @@
 #include <ros/ros.h>
 #include <rosbag/bag.h>
 #include <rosbag/view.h>
+#include <std_msgs/Bool.h>
 #include <std_msgs/String.h>
 #include <topic_tools/shape_shifter.h>
 
@@ -21,13 +22,13 @@ namespace franka_kitting_controller {
 /**
  * C++ rosbag recording manager for Phase 2 data collection.
  *
- * Recording and state labeling are independent concerns:
+ * Recording starts automatically when the node launches — no START command
+ * is needed. The logger opens a new trial bag immediately on startup and
+ * records all configured topics until STOP or ABORT is published, or the
+ * node is shut down (which triggers an automatic STOP).
  *
- *   /kitting_phase2/record_control  ->  START, STOP, ABORT
+ *   /kitting_phase2/record_control  ->  STOP, ABORT
  *   /kitting_phase2/state           ->  BASELINE, CLOSING, CONTACT, SECURE_GRASP, UPLIFT
- *
- * Recording continues regardless of state changes until STOP is published
- * (or auto-stop triggers on CONTACT if enabled).
  *
  * States are labels for offline analysis segmentation only.
  * They do NOT control recording (except optional auto-stop on CONTACT).
@@ -70,7 +71,8 @@ class KittingPhase2Logger {
   // --- ROS ---
   ros::NodeHandle nh_;
   ros::NodeHandle private_nh_;
-  ros::Subscriber record_control_sub_;  // START, STOP, ABORT
+  ros::Publisher logger_ready_pub_;     // Latched /kitting_phase2/logger_ready
+  ros::Subscriber record_control_sub_;  // STOP, ABORT
   ros::Subscriber state_sub_;           // State labels (for auto-stop on CONTACT)
   std::vector<ros::Subscriber> topic_subs_;
 

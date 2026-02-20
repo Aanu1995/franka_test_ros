@@ -12,10 +12,10 @@ This controller runs inside the `ros_control` real-time loop provided by `franka
 - **Derived metrics**: external torque norm, wrench norm, end-effector velocity
 
 **Phase 2** adds:
-- 5-state grasp machine: `BASELINE` -> `CLOSING` -> `CONTACT` -> `SECURE_GRASP` -> `UPLIFT`
+- 6-state grasp machine: `START` -> `BASELINE` -> `CLOSING` -> `CONTACT` -> `SECURE_GRASP` -> `UPLIFT`
 - Autonomous contact detection using baseline statistics + threshold + debounce
-- One rosbag per trial with all state transitions
-- Automatic CSV export on STOP for analysis-ready datasets
+- One rosbag per trial with all state transitions (recording starts automatically on launch)
+- Automatic CSV export on stop for analysis-ready datasets
 - Per-trial metadata output for offline analysis reproducibility
 
 ## Dependencies
@@ -66,11 +66,23 @@ roslaunch franka_kitting_controller kitting_phase2.launch object_name:=cup base_
 
 ## Phase 2: Interaction States
 
-Five discrete interaction states structure grasp execution into measurable phases. They are published on `/kitting_phase2/state` for signal labeling and offline analysis. States do NOT control recording (except optional auto-stop on CONTACT).
+Six interaction states structure grasp execution into measurable phases. The controller starts in `START` and waits for the user to publish `BASELINE` before any Phase 2 activity begins. States are published on `/kitting_phase2/state` for signal labeling and offline analysis. Recording starts automatically when the logger is launched and continues through all state transitions.
 
 ```
-BASELINE -> CLOSING -> CONTACT -> SECURE_GRASP -> UPLIFT
+START -> BASELINE -> CLOSING -> CONTACT -> SECURE_GRASP -> UPLIFT
 ```
+
+### START
+
+Initial state after the controller is launched. No baseline collection, no contact detection — just Cartesian passthrough (hold position) and state data publishing at 250 Hz.
+
+- Controller is running and publishing `KittingState` data
+- No Phase 2 activity: no baseline statistics, no gripper commands accepted
+- **All commands are rejected** until the Phase 2 logger is running (see below)
+- Even after the logger is detected, all commands on `/kitting_phase2/state_cmd` are rejected until `BASELINE` is published
+- Transition: launch the Phase 2 logger, then publish `BASELINE` on `/kitting_phase2/state`
+
+**Logger readiness gate**: The controller subscribes to `/kitting_phase2/logger_ready` (a latched `std_msgs/Bool` topic published by the logger node). Until this signal is received, **all state commands are rejected** with a warning instructing the user to launch the Phase 2 logger first. This enforces the documented two-step launch sequence and prevents data collection without a running logger.
 
 ### BASELINE
 
@@ -124,35 +136,36 @@ Recording and state labeling are independent concerns.
 | `<ns>/kitting_state_data`                | KittingState              | Published  | Full state data at 250 Hz                |
 | `/kitting_phase2/state_cmd`              | KittingGripperCommand     | Subscribed | Commands with per-object gripper params  |
 | `/kitting_phase2/state`                  | std_msgs/String           | Pub/Sub    | State labels for offline segmentation    |
-| `/kitting_phase2/record_control`         | std_msgs/String           | Subscribed | Recording control: START, STOP, ABORT    |
+| `/kitting_phase2/record_control`         | std_msgs/String           | Subscribed | Recording control: STOP, ABORT           |
+| `/kitting_phase2/logger_ready`           | std_msgs/Bool             | Subscribed | Latched readiness signal from logger node|
 
 - `/kitting_phase2/state_cmd` — The **user** publishes a `KittingGripperCommand` with `command` field set to `CLOSING`, `SECURE_GRASP`, or `UPLIFT`, plus optional per-object parameters. Any parameter left at `0.0` falls back to the YAML config default. The **controller** executes the corresponding action (gripper move/grasp, or Cartesian micro-lift), publishes the state label on `/kitting_phase2/state`, and updates its internal state machine.
 - `/kitting_phase2/state` — The **user** publishes BASELINE here. The **controller** publishes CLOSING, SECURE_GRASP, UPLIFT (from `state_cmd`), and CONTACT (auto-detected). States are labels for offline analysis — they do NOT control recording.
-- `/kitting_phase2/record_control` — The **user** publishes START, STOP, ABORT to control recording. The **logger** subscribes to this topic.
+- `/kitting_phase2/record_control` — The **user** publishes STOP or ABORT to end recording. Recording starts automatically when the logger launches — no START command is needed. The **logger** subscribes to this topic.
+- `/kitting_phase2/logger_ready` — The **logger** publishes `true` (latched) on startup. The **controller** subscribes and gates all Phase 2 commands behind this signal. If the logger is not running, BASELINE and all `state_cmd` commands are rejected.
 
 ### Recording
 
-One rosbag per trial. Recording and state labeling are independent — recording continues regardless of state changes until STOP is published.
+One rosbag per trial. **Recording starts automatically** when the logger node is launched — no START command is needed. The logger opens a new trial bag immediately on startup and records all configured topics.
 
 | Command | Action                                           |
 |---------|--------------------------------------------------|
-| `START` | Create new trial directory, open bag, begin recording |
 | `STOP`  | Close bag, save metadata, export CSV (if enabled) |
 | `ABORT` | Close bag, delete trial directory (no CSV)        |
 
-- **START** is ignored if already recording.
 - **STOP** is ignored if not recording.
 - **ABORT** is ignored if not recording.
+- If the logger node is shut down (Ctrl+C), recording is automatically stopped (equivalent to STOP).
 
 If `auto_stop_on_contact` is enabled and the controller publishes CONTACT, recording is auto-stopped (equivalent to STOP).
 
 ### Sending Commands
 
 ```bash
-# Start recording
-rostopic pub /kitting_phase2/record_control std_msgs/String "data: 'START'" --once
+# Recording starts automatically when the logger is launched — no START needed.
 
-# Set BASELINE (user publishes directly on /state)
+# Set BASELINE — REQUIRED before any other state command
+# Controller starts in START state; BASELINE begins the grasp sequence
 rostopic pub /kitting_phase2/state std_msgs/String "data: 'BASELINE'" --once
 
 # CLOSING — use YAML defaults for gripper parameters (all params = 0 -> defaults)
@@ -414,7 +427,7 @@ One bag per trial, organized by object. CSV is automatically exported alongside 
       metadata.yaml
 ```
 
-The single bag contains all data from all states (BASELINE through UPLIFT) for that trial. The CSV is exported in a background thread so STOP returns immediately.
+The single bag contains all data from all states (BASELINE through UPLIFT) for that trial. Recording starts automatically on launch and stops on STOP, ABORT, or node shutdown. The CSV is exported in a background thread so STOP returns immediately.
 
 ### metadata.yaml Contents
 
@@ -449,7 +462,7 @@ baseline_statistics:
 
 ### CSV Export
 
-When `export_csv_on_stop` is `true` (default), the logger automatically reads back the rosbag after STOP and writes a flattened CSV file using the C++ `rosbag::View` API. The export runs in a background thread so STOP returns immediately.
+When `export_csv_on_stop` is `true` (default), the logger automatically reads back the rosbag after recording stops and writes a flattened CSV file using the C++ `rosbag::View` API. The export runs in a background thread so the stop operation returns immediately.
 
 The CSV contains one row per `KittingState` message (60 columns):
 
@@ -541,7 +554,7 @@ The Phase 2 logger is written in C++ using the `rosbag::Bag` API directly and `t
 
 - **No subprocess spawn** — bag is opened via API, not `rosbag record` subprocess
 - **No Python GIL** — pure C++ callbacks, no interpreter overhead
-- **No subscription handshake delay** — topics are already subscribed when recording starts; the bag file is simply opened and messages are written immediately
+- **No subscription handshake delay** — topics are already subscribed and recording starts automatically on launch; the bag file is opened immediately
 - **Multi-threaded** — uses `ros::AsyncSpinner(4)` so data callbacks and command callbacks run concurrently
 - **Single mutex** — one lock protects all trial state, minimal contention
 
@@ -561,12 +574,14 @@ Move EE into table. **Expected**: clear increase in Fz, `wrench_norm`, `tau_ext_
 
 ## Phase 2 Acceptance Checks
 
+- **Logger must be running before any state commands are accepted** — controller rejects BASELINE and all `state_cmd` commands until `/kitting_phase2/logger_ready` is received
+- Recording starts automatically when the logger launches — no START command needed
 - Recording and state labeling are independent
-- START/STOP/ABORT on `/kitting_phase2/record_control` control recording
+- STOP/ABORT on `/kitting_phase2/record_control` end recording
 - State labels on `/kitting_phase2/state` are for offline segmentation only
 - One rosbag per trial containing all signals and all state transitions
-- START is ignored if already recording
 - STOP saves bag + metadata + CSV, ABORT deletes trial (no CSV)
+- Logger shutdown (Ctrl+C) automatically stops recording (equivalent to STOP)
 - CONTACT auto-stop works when `auto_stop_on_contact` is enabled
 - Bag contains 5 topics: kitting_state_data, state, state_cmd, record_control, joint_states
 - CSV contains 60 flattened columns with correct state labels per row

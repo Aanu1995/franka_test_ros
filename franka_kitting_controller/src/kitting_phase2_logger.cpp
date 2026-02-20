@@ -95,11 +95,10 @@ KittingPhase2Logger::KittingPhase2Logger()
   nh_.param(ctrl_ns + "slope_dt", slope_dt_, 0.02);
   nh_.param(ctrl_ns + "slope_min", slope_min_, 5.0);
 
-  // --- Subscribe to record control ---
+  // --- Subscribe to record control (STOP, ABORT) ---
   record_control_sub_ = nh_.subscribe(
       "/kitting_phase2/record_control", 10,
       &KittingPhase2Logger::recordControlCallback, this);
-  ROS_INFO("KittingPhase2Logger: Listening on /kitting_phase2/record_control");
 
   // --- Subscribe to state labels (for auto-stop on CONTACT) ---
   state_sub_ = nh_.subscribe(
@@ -112,6 +111,23 @@ KittingPhase2Logger::KittingPhase2Logger()
         topic, 100,
         boost::bind(&KittingPhase2Logger::topicCallback, this, _1, topic));
     topic_subs_.push_back(sub);
+  }
+
+  // --- Publish latched logger_ready signal ---
+  // The controller gates Phase 2 commands behind this signal.
+  // Latched = new subscribers immediately receive the last published message.
+  logger_ready_pub_ = nh_.advertise<std_msgs::Bool>(
+      "/kitting_phase2/logger_ready", 1, true /* latched */);
+  std_msgs::Bool ready_msg;
+  ready_msg.data = true;
+  logger_ready_pub_.publish(ready_msg);
+
+  // --- Auto-start recording on launch ---
+  // Recording begins immediately when the logger node starts.
+  // No need to publish START on /kitting_phase2/record_control.
+  {
+    std::lock_guard<std::mutex> lock(trial_mutex_);
+    startTrial();
   }
 
   ROS_INFO("KittingPhase2Logger: Ready | base_dir=%s object=%s auto_stop=%s csv_export=%s",
@@ -131,14 +147,7 @@ void KittingPhase2Logger::recordControlCallback(const std_msgs::String::ConstPtr
 
   std::lock_guard<std::mutex> lock(trial_mutex_);
 
-  if (cmd == "START") {
-    if (is_recording_) {
-      ROS_WARN("KittingPhase2Logger: Already recording, ignoring START");
-      return;
-    }
-    startTrial();
-
-  } else if (cmd == "STOP") {
+  if (cmd == "STOP") {
     if (!is_recording_) {
       ROS_DEBUG("KittingPhase2Logger: Not recording, ignoring STOP");
       return;
@@ -153,7 +162,8 @@ void KittingPhase2Logger::recordControlCallback(const std_msgs::String::ConstPtr
     abortTrial();
 
   } else {
-    ROS_WARN("KittingPhase2Logger: Unknown command '%s' on record_control", cmd.c_str());
+    ROS_WARN("KittingPhase2Logger: Unknown command '%s' on record_control "
+             "(expected STOP or ABORT)", cmd.c_str());
   }
 }
 

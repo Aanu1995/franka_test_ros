@@ -13,6 +13,7 @@
 #include <realtime_tools/realtime_publisher.h>
 #include <ros/node_handle.h>
 #include <ros/time.h>
+#include <std_msgs/Bool.h>
 #include <std_msgs/String.h>
 
 #include <franka_gripper/GraspAction.h>
@@ -26,8 +27,12 @@
 
 namespace franka_kitting_controller {
 
-/// The 5 grasp states for Phase 2 data collection.
+/// Grasp states for Phase 2 data collection.
+/// Controller starts in START — no baseline collection, no contact detection,
+/// just Cartesian passthrough and state data publishing. The grasp state machine
+/// begins when the user explicitly publishes BASELINE on /kitting_phase2/state.
 enum class GraspPhase {
+  START,          // Initial state: controller running, awaiting BASELINE command
   BASELINE,
   CLOSING,
   CONTACT,
@@ -41,7 +46,7 @@ using GraspClient = actionlib::SimpleActionClient<franka_gripper::GraspAction>;
 
 /**
  * Controller that publishes comprehensive robot state, implements Phase 2
- * contact detection with a 5-state machine, and executes Cartesian micro-lift
+ * contact detection with a 6-state machine, and executes Cartesian micro-lift
  * (UPLIFT) internally.
  *
  * Claims FrankaModelInterface, FrankaStateInterface, and FrankaPoseCartesianInterface.
@@ -82,6 +87,14 @@ class KittingStateController
   // --- Phase 2: State label publisher ---
   realtime_tools::RealtimePublisher<std_msgs::String> state_publisher_;
 
+  // --- Phase 2: Logger readiness gate ---
+  // The controller rejects all Phase 2 commands until the logger node publishes
+  // true on /kitting_phase2/logger_ready (latched topic).
+  // This enforces the documented launch order: Phase 1 first, then Phase 2.
+  ros::Subscriber logger_ready_sub_;
+  std::atomic<bool> logger_ready_{false};
+  void loggerReadyCallback(const std_msgs::Bool::ConstPtr& msg);
+
   // --- Phase 2: State subscriber (listens to /kitting_phase2/state) ---
   ros::Subscriber state_sub_;
   void stateCallback(const std_msgs::String::ConstPtr& msg);
@@ -110,8 +123,8 @@ class KittingStateController
   // phase_changed_: the synchronization flag — release on write, acquire on read.
   //   All stores before the release-store of phase_changed_ are visible to the RT thread
   //   after its acquire-load of phase_changed_ returns true.
-  std::atomic<GraspPhase> current_phase_{GraspPhase::BASELINE};
-  std::atomic<GraspPhase> pending_phase_{GraspPhase::BASELINE};
+  std::atomic<GraspPhase> current_phase_{GraspPhase::START};
+  std::atomic<GraspPhase> pending_phase_{GraspPhase::START};
   std::atomic<bool> phase_changed_{false};
   bool contact_latched_{false};
 
