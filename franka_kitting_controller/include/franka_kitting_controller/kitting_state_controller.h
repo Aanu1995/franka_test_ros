@@ -13,7 +13,6 @@
 #include <realtime_tools/realtime_publisher.h>
 #include <ros/node_handle.h>
 #include <ros/time.h>
-#include <sensor_msgs/JointState.h>
 #include <std_msgs/Bool.h>
 #include <std_msgs/String.h>
 
@@ -110,16 +109,6 @@ class KittingStateController
   std::unique_ptr<MoveClient> move_client_;
   std::unique_ptr<GraspClient> grasp_client_;
 
-  // --- Phase 2: Automatic gripper stop on CONTACT ---
-  // When CONTACT is detected during CLOSING, the RT thread sets a flag.
-  // A non-RT timer checks this flag and cancels the active gripper action,
-  // then sends a hold command (MoveAction to current width at low speed).
-  bool stop_on_contact_{true};              // Enable/disable auto-stop (YAML param)
-  std::atomic<bool> gripper_stop_pending_{false};  // Set by RT, consumed by timer
-  std::atomic<double> contact_width_{0.0};  // Width captured at CONTACT instant
-  ros::Timer gripper_stop_timer_;           // Non-RT timer (checks flag periodically)
-  void gripperStopTimerCallback(const ros::TimerEvent& event);
-
   // --- Phase 2: Gripper default parameters (overridable per-command) ---
   bool execute_gripper_actions_{true};
   double closing_width_{0.04};
@@ -141,25 +130,17 @@ class KittingStateController
   std::atomic<bool> phase_changed_{false};
   bool contact_latched_{false};
 
-  // =====================================================================
-  // Phase 2: Hybrid Contact Detection (Gripper + Arm Fusion)
-  //
-  // CONTACT = GripperContact OR ArmContact
-  //   GripperContact: gripper stalls before reaching commanded width
-  //   ArmContact:     tau_ext_norm exceeds statistical threshold + delta_min
-  //
-  // Each detector has independent debounce. CONTACT is latched once declared.
-  // =====================================================================
-
-  // --- Global enables ---
-  bool enable_gripper_contact_{true};
-  bool enable_arm_contact_{true};
-
-  // --- Baseline parameters (shared by arm detector) ---
+  // --- Phase 2: Contact detector parameters ---
+  bool enable_contact_detector_{true};
   double T_base_{0.7};
   int N_min_{50};
+  double k_sigma_{5.0};
+  double T_hold_{0.12};
+  bool use_slope_gate_{false};
+  double slope_dt_{0.02};
+  double slope_min_{5.0};
 
-  // --- Baseline statistics (computed during BASELINE phase) ---
+  // Baseline statistics (computed during BASELINE phase)
   double baseline_sum_{0.0};
   double baseline_sum_sq_{0.0};
   int baseline_n_{0};
@@ -171,41 +152,16 @@ class KittingStateController
   double baseline_sigma_{0.0};
   double contact_threshold_{0.0};  // theta = mu + k * sigma
 
-  // --- Arm-based contact detector ---
-  double k_sigma_{3.0};
-  double delta_min_{0.3};      // Minimum absolute rise above mu (noise guard)
-  double T_arm_hold_{0.10};    // Debounce hold time for arm detector
+  // Debounce state
+  ros::Time exceed_start_time_;
+  bool exceeding_{false};
 
-  // Arm debounce state
-  ros::Time arm_exceed_start_time_;
-  bool arm_exceeding_{false};
+  // Slope gate state
+  double prev_tau_ext_norm_{0.0};
+  ros::Time prev_tau_ext_time_;
+  bool prev_tau_ext_valid_{false};
 
-  // --- Gripper-based contact detector ---
-  // Subscribes to /franka_gripper/joint_states for measured finger positions.
-  // Gripper width w(t) = q_finger1 + q_finger2.
-  // GripperContact (directional): |w_dot| < v_stall
-  //                            AND (w - w_cmd) > epsilon_w  (object blocked early)
-  //                            AND w > w_min                (not at mechanical limit)
-  //                            for T_gripper_hold seconds continuously.
-  ros::Subscriber gripper_joint_state_sub_;
-  void gripperJointStateCallback(const sensor_msgs::JointState::ConstPtr& msg);
-
-  double v_stall_{0.003};            // Stall velocity threshold [m/s]
-  double epsilon_w_{0.002};          // Directional width gap tolerance [m]
-  double w_min_{0.002};              // Minimum width safety guard [m]
-  double T_gripper_hold_{0.10};      // Debounce hold time for gripper detector
-
-  // Gripper state (written by subscriber callback, read by RT via atomic)
-  std::atomic<double> gripper_width_{0.0};    // Current measured gripper width w(t)
-  double prev_gripper_width_{0.0};            // Previous w(t-1) for velocity computation
-  bool prev_gripper_width_valid_{false};
-  double gripper_cmd_width_{0.04};            // Commanded target width for current closing
-
-  // Gripper debounce state
-  ros::Time gripper_exceed_start_time_;
-  bool gripper_exceeding_{false};
-
-  // --- Slow-rate logger for contact signal monitoring (2 Hz) ---
+  // Slow-rate logger for contact signal monitoring (2 Hz — readable in terminal)
   franka_hw::TriggerRate signal_log_trigger_{2.0};
 
   // --- UPLIFT trajectory state (RT-thread owned, except uplift_active_) ---

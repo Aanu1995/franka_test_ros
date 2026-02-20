@@ -1,6 +1,6 @@
 # franka_kitting_controller
 
-Real-time state acquisition and Cartesian micro-lift controller for the Franka Panda with Phase 2 hybrid contact detection and rosbag data collection. Reads all robot state, model, and Cartesian signals, publishes them as a single `KittingState` message, autonomously detects contact using **hybrid gripper + arm signal fusion**, and executes smooth Cartesian micro-lift (UPLIFT) internally. Claims `FrankaPoseCartesianInterface` for Cartesian pose control.
+Real-time state acquisition and Cartesian micro-lift controller for the Franka Panda with Phase 2 contact detection and rosbag data collection. Reads all robot state, model, and Cartesian signals, publishes them as a single `KittingState` message, autonomously detects contact using statistical thresholding, and executes smooth Cartesian micro-lift (UPLIFT) internally. Claims `FrankaPoseCartesianInterface` for Cartesian pose control.
 
 ## Overview
 
@@ -13,7 +13,7 @@ This controller runs inside the `ros_control` real-time loop provided by `franka
 
 **Phase 2** adds:
 - 6-state grasp machine: `START` -> `BASELINE` -> `CLOSING` -> `CONTACT` -> `SECURE_GRASP` -> `UPLIFT`
-- Hybrid contact detection fusing gripper stall + arm torque signals (OR fusion)
+- Autonomous contact detection using baseline statistics + threshold + debounce
 - One rosbag per trial with all state transitions (recording starts automatically on launch)
 - Automatic CSV export on stop for analysis-ready datasets
 - Per-trial metadata output for offline analysis reproducibility
@@ -95,22 +95,19 @@ Establish reference signal behavior before interaction.
 
 ### CLOSING
 
-Observe approach dynamics before contact. Hybrid contact detection is active.
+Observe approach dynamics before contact.
 
 - Gripper begins closing toward object at width `w` and speed `v`
-- Two independent detectors run in parallel:
-  - **Arm detector**: checks `x(t) > θ` AND `x(t) - μ > δ_min` with `T_arm_hold` debounce
-  - **Gripper detector**: checks `|ẇ| < v_stall` AND `(w - w_cmd) > ε_w` AND `w > w_min` with `T_gripper_hold` debounce
-- CONTACT = ArmContact OR GripperContact (either detector can trigger)
+- External torque `x(t)` gradually changes as fingers approach
+- Contact detector checks `x(t) > θ` every tick — no sustained exceedance yet
 
 ### CONTACT
 
 Detect first stable physical interaction. Published **automatically** by the controller.
 
-- Object touches gripper fingers — detected by **either** gripper stall or arm torque exceedance
-- CONTACT log identifies which detector triggered (ARM or GRIPPER)
+- Object touches gripper fingers
+- External torque norm exceeds threshold: `x(t) > θ` continuously for `T_hold` seconds (default 0.12 s)
 - CONTACT is **latched** once detected — cannot return to CLOSING
-- **Gripper auto-stop**: When `stop_on_contact` is true (default), the active gripper action is cancelled and the gripper holds its current width at the moment of contact. This prevents over-compression of the object. The stop is executed asynchronously (non-blocking) via a non-RT timer.
 
 ### SECURE_GRASP
 
@@ -141,7 +138,6 @@ Recording and state labeling are independent concerns.
 | `/kitting_phase2/state`                  | std_msgs/String           | Pub/Sub    | State labels for offline segmentation    |
 | `/kitting_phase2/record_control`         | std_msgs/String           | Subscribed | Recording control: STOP, ABORT           |
 | `/kitting_phase2/logger_ready`           | std_msgs/Bool             | Subscribed | Latched readiness signal from logger node|
-| `/franka_gripper/joint_states`           | sensor_msgs/JointState    | Subscribed | Gripper finger positions for stall detect|
 
 - `/kitting_phase2/state_cmd` — The **user** publishes a `KittingGripperCommand` with `command` field set to `CLOSING`, `SECURE_GRASP`, or `UPLIFT`, plus optional per-object parameters. Any parameter left at `0.0` falls back to the YAML config default. The **controller** executes the corresponding action (gripper move/grasp, or Cartesian micro-lift), publishes the state label on `/kitting_phase2/state`, and updates its internal state machine.
 - `/kitting_phase2/state` — The **user** publishes BASELINE here. The **controller** publishes CLOSING, SECURE_GRASP, UPLIFT (from `state_cmd`), and CONTACT (auto-detected). States are labels for offline analysis — they do NOT control recording.
@@ -209,40 +205,31 @@ rostopic pub /kitting_phase2/record_control std_msgs/String "data: 'STOP'" --onc
 rostopic pub /kitting_phase2/record_control std_msgs/String "data: 'ABORT'" --once
 ```
 
-## Phase 2: Hybrid Contact Detection
+## Phase 2: Contact Detection Mathematics
 
-The controller autonomously detects physical contact using **two independent detectors** fused with OR logic:
+The controller autonomously detects physical contact between the gripper and the object using statistical thresholding on the external torque norm signal. Contact detection runs at the publish rate (default 250 Hz) inside the real-time `update()` loop.
 
-```
-CONTACT = GripperContact OR ArmContact
-```
+### Symbols
 
-This hybrid approach ensures robustness across object types:
-- **Gripper-only closure** on free objects may not produce measurable arm torques → gripper stall detects contact
-- **Heavier or constrained objects** may produce arm torques before finger stall → arm detector catches it
+| Symbol | Name                    | Unit  | Default | Description                                                                 |
+|--------|-------------------------|-------|---------|-----------------------------------------------------------------------------|
+| `x(t)` | Signal                  | Nm    | —       | External torque norm: `x(t) = \|\|τ_ext\|\| = √(Σ τ_ext_i²)` at time `t` |
+| `N`    | Sample count            | —     | —       | Number of baseline samples collected (must reach `N_min`)                  |
+| `μ`    | Baseline mean           | Nm    | —       | Average of `x(t)` during BASELINE — the system noise floor                |
+| `σ`    | Baseline std. deviation | Nm    | —       | Spread of `x(t)` during BASELINE — how much noise naturally fluctuates    |
+| `k`    | Sigma multiplier        | —     | 5.0     | Number of standard deviations above `μ` for the threshold                 |
+| `θ`    | Contact threshold       | Nm    | —       | Trigger level: `θ = μ + kσ`                                               |
+| `T_base` | Baseline duration     | s     | 0.7     | Minimum time to collect baseline samples                                   |
+| `N_min`  | Minimum sample count  | —     | 50      | Minimum samples before baseline statistics are valid                       |
+| `T_hold` | Debounce hold time    | s     | 0.12    | Duration `x(t)` must continuously exceed `θ` to declare contact           |
+| `dx/dt`  | Signal slope          | Nm/s  | —       | Time derivative of `x(t)`, used by optional slope gate                    |
+| `slope_min` | Minimum slope       | Nm/s  | 5.0     | Minimum `dx/dt` required for contact (only if slope gate enabled)         |
 
-Both detectors run at the publish rate (250 Hz) inside the real-time `update()` loop. Each has independent debounce. CONTACT is latched once declared by either detector.
+### Step 1: Baseline Collection (during BASELINE state)
 
-### Arm-Based Contact Detector
+The controller collects `N` samples of `x(t) = ||τ_ext||` over at least `T_base` seconds. Collection continues until **both** conditions are met: elapsed time `≥ T_base` **and** sample count `N ≥ N_min`. This dual condition prevents silent failure when `N_min > publish_rate × T_base`.
 
-#### Symbols
-
-| Symbol    | Name                    | Unit  | Default | Description                                                                 |
-|-----------|-------------------------|-------|---------|-----------------------------------------------------------------------------|
-| `x(t)`   | Signal                  | Nm    | —       | External torque norm: `x(t) = \|\|τ_ext\|\| = √(Σ τ_ext_i²)` at time `t` |
-| `N`      | Sample count            | —     | —       | Number of baseline samples collected (must reach `N_min`)                  |
-| `μ`      | Baseline mean           | Nm    | —       | Average of `x(t)` during BASELINE — the system noise floor                |
-| `σ`      | Baseline std. deviation | Nm    | —       | Spread of `x(t)` during BASELINE — how much noise naturally fluctuates    |
-| `k`      | Sigma multiplier        | —     | 3.0     | Number of standard deviations above `μ` for the threshold                 |
-| `θ`      | Contact threshold       | Nm    | —       | Trigger level: `θ = μ + kσ`                                               |
-| `δ_min`  | Minimum absolute rise   | Nm    | 0.3     | Minimum rise above `μ` required (noise guard)                              |
-| `T_base` | Baseline duration       | s     | 0.7     | Minimum time to collect baseline samples                                   |
-| `N_min`  | Minimum sample count    | —     | 50      | Minimum samples before baseline statistics are valid                       |
-| `T_arm_hold` | Arm debounce time   | s     | 0.10    | Duration conditions must hold continuously                                 |
-
-#### Step 1: Baseline Collection (during BASELINE state)
-
-The controller collects `N` samples of `x(t) = ||τ_ext||` over at least `T_base` seconds. Statistics are computed using a single-pass algorithm (no array storage):
+Statistics are computed using a single-pass algorithm (no array storage):
 
 ```
          1
@@ -258,55 +245,46 @@ The controller collects `N` samples of `x(t) = ||τ_ext||` over at least `T_base
   θ  =  μ + k · σ
 ```
 
-#### Step 2: Arm Contact Condition
+Where:
+- `μ` (mu) is the **mean** — average noise level when nothing is touching the robot
+- `σ` (sigma) is the **standard deviation** — how much that noise fluctuates
+- `θ` (theta) is the **threshold** — the trigger level `k` standard deviations above the mean
+- The variance uses Bessel's correction (`N-1`) for an unbiased estimate from a finite sample
+- Negative variance (possible due to floating-point) is clamped to zero before taking the square root
 
-ArmContact is TRUE when **both** conditions hold continuously for `T_arm_hold` seconds:
+**Interpretation of `k`**: With `k = 5`, the threshold `θ` is 5 standard deviations above the noise floor. For Gaussian noise, the probability of a random sample exceeding `θ` is `< 0.00003%`. Higher `k` = fewer false positives but requires stronger contact. Lower `k` = more sensitive but risks false triggers.
 
-```
-  1. Statistical exceedance:   x(t) > θ         where θ = μ + kσ
+### Step 2: Contact Detection (during CLOSING state)
 
-  2. Minimum absolute rise:    x(t) - μ > δ_min
-```
-
-The `δ_min` guard prevents false triggers when `σ` is very small (low noise). Even if `x(t)` exceeds `θ`, contact is not declared unless the absolute rise above `μ` exceeds `δ_min`.
-
-### Gripper-Based Contact Detector
-
-#### Symbols
-
-| Symbol          | Name                  | Unit  | Default | Description                                                         |
-|-----------------|-----------------------|-------|---------|---------------------------------------------------------------------|
-| `w(t)`          | Measured gripper width | m     | —       | `w(t) = q_finger1 + q_finger2` from `/franka_gripper/joint_states` |
-| `ẇ(t)`          | Gripper width velocity | m/s   | —       | `ẇ(t) = (w(t) - w(t-Δt)) / Δt`                                    |
-| `w_cmd`         | Commanded width        | m     | —       | Target width from the CLOSING command                               |
-| `v_stall`       | Stall velocity threshold | m/s | 0.003   | Below this speed, fingers are considered stalled                    |
-| `ε_w`           | Directional width gap  | m     | 0.002   | Minimum gap above target to confirm early blockage                  |
-| `w_min`         | Minimum width guard    | m     | 0.002   | Reject contact at gripper mechanical limit                          |
-| `T_gripper_hold`| Gripper debounce time  | s     | 0.10    | Duration conditions must hold continuously                          |
-
-#### Gripper Stall Condition (Directional)
-
-GripperContact is TRUE when **all three** conditions hold continuously for `T_gripper_hold` seconds:
+Once baseline statistics are computed (`baseline_armed = true`), the controller checks every sample during CLOSING:
 
 ```
-  1. Stall:              |ẇ(t)| < v_stall
-
-  2. Directional gap:    (w(t) - w_cmd) > ε_w        ← signed, NOT absolute value
-
-  3. Not fully closed:   w(t) > w_min
+  Contact condition:   x(t)  >  θ       where θ = μ + kσ
 ```
 
-**Why directional?** The previous `|w - w_cmd|` check caused false positives when the gripper reached its target normally (velocity → 0, but w ≈ w_cmd so no real contact). The signed condition `(w - w_cmd) > ε_w` ensures w(t) > w_cmd, meaning the gripper stopped **before** reaching its target because an object blocked the fingers. The `w_min` guard prevents false contact when the gripper reaches its mechanical limit.
-
-### Fusion and Latching
-
-CONTACT is declared when **either** detector fires:
+**Debounce**: A single sample exceeding `θ` is not sufficient. The signal must remain above `θ` **continuously** for `T_hold` seconds. If `x(t)` drops below `θ` at any point, the debounce timer resets to zero.
 
 ```
-  CONTACT = GripperContact OR ArmContact
+  Let t₀ = first time x(t) > θ
+
+  CONTACT declared when:   x(t) > θ   ∀ t ∈ [t₀, t₀ + T_hold]
 ```
 
-Once CONTACT is declared, it is **latched** — the detectors stop evaluating. A new trial (publishing BASELINE) is required to re-arm detection. The CONTACT log identifies which detector triggered.
+In other words: `x(t)` must exceed `θ` without interruption for `T_hold` consecutive seconds.
+
+**Optional slope gate** (disabled by default, `use_slope_gate: false`): When enabled, contact additionally requires the signal to be **rising**:
+
+```
+  dx       x(t) - x(t - Δt)
+  ── (t) = ─────────────────  >  slope_min
+  dt              Δt
+```
+
+Where `Δt = slope_dt`. This filters out slow drift that might cross `θ` without actual contact.
+
+### Step 3: Latching
+
+Once CONTACT is declared, it is **latched** — the detector cannot return to CLOSING. This prevents oscillation at the contact boundary. A new trial (publishing BASELINE) is required to re-arm the detector.
 
 ## Phase 2: UPLIFT Trajectory Mathematics
 
@@ -392,18 +370,14 @@ The **velocity profile** (first derivative) is:
 |----------------------------|--------|---------|------------------------------------------------|
 | `arm_id`                   | string | `panda` | Robot arm identifier                           |
 | `publish_rate`             | double | `250.0` | State data publish rate [Hz]                   |
+| `enable_contact_detector`  | bool   | `true`  | Enable Phase 2 contact detection               |
 | `T_base`                   | double | `0.7`   | Baseline collection duration [s]               |
 | `N_min`                    | int    | `50`    | Minimum samples before arming detection        |
-| `enable_arm_contact`       | bool   | `true`  | Enable arm-based contact detector              |
-| `k_sigma`                  | double | `3.0`   | Threshold multiplier (theta = mu + k*sigma)    |
-| `delta_min`                | double | `0.3`   | Minimum absolute rise above mu [Nm]            |
-| `T_arm_hold`               | double | `0.10`  | Arm detector debounce hold time [s]            |
-| `enable_gripper_contact`   | bool   | `true`  | Enable gripper-based contact detector          |
-| `v_stall`                  | double | `0.003` | Gripper stall velocity threshold [m/s]         |
-| `epsilon_w`                | double | `0.002` | Directional width gap threshold [m]            |
-| `w_min`                    | double | `0.002` | Minimum width guard (mechanical limit) [m]     |
-| `T_gripper_hold`           | double | `0.10`  | Gripper detector debounce hold time [s]        |
-| `stop_on_contact`          | bool   | `true`  | Cancel gripper action and hold width on CONTACT |
+| `k_sigma`                  | double | `5.0`   | Threshold multiplier (theta = mu + k*sigma)    |
+| `T_hold`                   | double | `0.12`  | Debounce hold time [s]                         |
+| `use_slope_gate`           | bool   | `false` | Enable slope gate (for drift false positives)  |
+| `slope_dt`                 | double | `0.02`  | Slope finite difference dt [s]                 |
+| `slope_min`                | double | `5.0`   | Minimum slope for contact [1/s]                |
 | `execute_gripper_actions`  | bool   | `true`  | Execute gripper actions (false = signal-only)   |
 | `closing_width`            | double | `0.04`  | Default width for MoveAction in CLOSING [m]    |
 | `closing_speed`            | double | `0.04`  | Default speed for MoveAction in CLOSING [m/s]  |
@@ -475,17 +449,11 @@ export_csv_on_stop: true
 detector_parameters:
   T_base: 0.7
   N_min: 50
-  arm_detector:
-    enabled: true
-    k_sigma: 3.0
-    delta_min: 0.3
-    T_arm_hold: 0.10
-  gripper_detector:
-    enabled: true
-    v_stall: 0.003
-    epsilon_w: 0.002
-    w_min: 0.002
-    T_gripper_hold: 0.10
+  k_sigma: 5.0
+  T_hold: 0.12
+  use_slope_gate: false
+  slope_dt: 0.02
+  slope_min: 5.0
 baseline_statistics:
   baseline_mu_tau_ext_norm: 0.342
   baseline_sigma_tau_ext_norm: 0.051
@@ -496,7 +464,7 @@ baseline_statistics:
 
 When `export_csv_on_stop` is `true` (default), the logger automatically reads back the rosbag after recording stops and writes a flattened CSV file using the C++ `rosbag::View` API. The export runs in a background thread so the stop operation returns immediately.
 
-The CSV contains one row per `KittingState` message (71 columns):
+The CSV contains one row per `KittingState` message (60 columns):
 
 | Group            | Columns                                                          |
 |------------------|------------------------------------------------------------------|
@@ -510,8 +478,6 @@ The CSV contains one row per `KittingState` message (71 columns):
 | EE velocity      | `ee_vx`, `ee_vy`, `ee_vz`, `ee_wx`, `ee_wy`, `ee_wz`           |
 | Gravity          | `gravity_1` ... `gravity_7`                                      |
 | Coriolis         | `coriolis_1` ... `coriolis_7`                                    |
-| Gripper          | `gripper_width`                                                  |
-| Contact diag.    | `baseline_mu`, `baseline_sigma`, `contact_threshold`, `arm_margin`, `arm_delta`, `gripper_cmd_width`, `gripper_velocity`, `arm_detector_active`, `gripper_detector_active`, `contact_detected` |
 
 `O_T_EE` (16 values) and `jacobian` (42 values) are not included in the CSV. They remain in the rosbag.
 
@@ -556,17 +522,6 @@ Only the parameters relevant to the command are used:
 | `ee_velocity`  | float64[6]   | End-effector velocity (J * dq) [m/s, rad/s]         |
 | `tau_ext_norm`  | float64      | Euclidean norm of `tau_ext`                          |
 | `wrench_norm`  | float64      | Euclidean norm of `wrench_ext`                       |
-| `gripper_width` | float64     | Measured gripper width (q_finger1 + q_finger2) [m]   |
-| `baseline_mu`   | float64     | Baseline mean of tau_ext_norm [Nm]                   |
-| `baseline_sigma` | float64    | Baseline std dev of tau_ext_norm [Nm]                |
-| `contact_threshold` | float64 | theta = mu + k * sigma [Nm]                          |
-| `arm_margin`    | float64     | tau_ext_norm − theta (>0 = above threshold) [Nm]     |
-| `arm_delta`     | float64     | tau_ext_norm − mu (absolute rise above baseline) [Nm]|
-| `gripper_cmd_width` | float64 | Commanded gripper target width w_cmd [m]             |
-| `gripper_velocity` | float64  | Finite-difference gripper velocity dw/dt [m/s]       |
-| `arm_detector_active` | bool  | True if arm detector condition is met this tick      |
-| `gripper_detector_active` | bool | True if gripper stall condition is met this tick  |
-| `contact_detected` | bool     | True once CONTACT is latched                         |
 
 ## Interfaces
 
@@ -584,7 +539,7 @@ When not executing UPLIFT, the controller operates in **passthrough mode**: it r
 - No dynamic memory allocation in `update()`
 - No blocking operations in `update()`
 - Model queries are only called at the publish rate, not every control tick
-- Hybrid contact detection uses only scalar arithmetic and atomic loads (no Eigen, no allocation)
+- Contact detection uses only scalar arithmetic (no Eigen, no allocation)
 - State publisher uses `trylock()` pattern (publish only on transition, non-blocking)
 - Gripper action clients use `sendGoal()` (non-blocking) from subscriber thread, never from `update()`
 - Action clients created with `spin_thread=true` for plugin context (no external spin required)
@@ -628,18 +583,8 @@ Move EE into table. **Expected**: clear increase in Fz, `wrench_norm`, `tau_ext_
 - STOP saves bag + metadata + CSV, ABORT deletes trial (no CSV)
 - Logger shutdown (Ctrl+C) automatically stops recording (equivalent to STOP)
 - CONTACT auto-stop works when `auto_stop_on_contact` is enabled
-- Hybrid CONTACT detection: arm torque OR gripper stall (independently debounced)
-- Finger contact on free objects triggers CONTACT via gripper stall detector (directional: w > w_cmd)
-- Gripper reaching target width normally does NOT trigger false CONTACT
-- Load transfer or constrained contact triggers CONTACT via arm torque detector
-- CONTACT log identifies which detector triggered (ARM or GRIPPER)
-- Gripper stops immediately on CONTACT when `stop_on_contact` is true (cancels active action, holds width)
-- No further gripper compression occurs after CONTACT (width remains constant until SECURE_GRASP)
-- Gripper stop is non-blocking (asynchronous via non-RT timer, does not block control loop)
-- `stop_on_contact: false` allows gripper to continue (testing mode)
-- If both detectors are disabled, controller refuses to start (FATAL)
 - Bag contains 5 topics: kitting_state_data, state, state_cmd, record_control, joint_states
-- CSV contains 71 flattened columns with correct state labels per row (includes gripper_width + 10 contact diagnostics)
+- CSV contains 60 flattened columns with correct state labels per row
 - CSV export does not block the ROS spin loop (runs in background thread)
 - metadata.yaml contains bag_filename, csv_filename, total_samples, start/stop times, and detector parameters
 - Publishing CLOSING on `state_cmd` triggers gripper MoveAction + state label
