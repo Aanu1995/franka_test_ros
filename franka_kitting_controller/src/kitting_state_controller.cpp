@@ -67,6 +67,9 @@ void KittingStateController::stateCallback(const std_msgs::String::ConstPtr& msg
   if (label == "BASELINE") {
     pending_phase_.store(GraspPhase::BASELINE, std::memory_order_relaxed);
     phase_changed_.store(true, std::memory_order_release);  // release: publishes pending_phase_
+    ROS_INFO("============================================================");
+    ROS_INFO("  [STATE]  >>  BASELINE  <<  Collecting reference signals");
+    ROS_INFO("============================================================");
   } else if (label == "UPLIFT" || label == "CONTACT" || label == "CLOSING" ||
              label == "SECURE_GRASP") {
     // Published by the controller itself or handled via state_cmd — ignore echo.
@@ -121,7 +124,10 @@ void KittingStateController::stateCmdCallback(
     pending_phase_.store(GraspPhase::CLOSING, std::memory_order_relaxed);
     phase_changed_.store(true, std::memory_order_release);
     publishStateLabel("CLOSING");
-    ROS_INFO("KittingStateController: State -> CLOSING");
+    ROS_INFO("============================================================");
+    ROS_INFO("  [STATE]  >>  CLOSING  <<  Gripper approaching object");
+    ROS_INFO("    width=%.4f m  speed=%.4f m/s", width, speed);
+    ROS_INFO("============================================================");
 
   } else if (cmd == "SECURE_GRASP") {
     if (current_phase_.load(std::memory_order_relaxed) == GraspPhase::SECURE_GRASP) {
@@ -158,7 +164,10 @@ void KittingStateController::stateCmdCallback(
     pending_phase_.store(GraspPhase::SECURE_GRASP, std::memory_order_relaxed);
     phase_changed_.store(true, std::memory_order_release);
     publishStateLabel("SECURE_GRASP");
-    ROS_INFO("KittingStateController: State -> SECURE_GRASP");
+    ROS_INFO("============================================================");
+    ROS_INFO("  [STATE]  >>  SECURE_GRASP  <<  Grasping object");
+    ROS_INFO("    width=%.4f m  force=%.1f N  speed=%.4f m/s", width, force, speed);
+    ROS_INFO("============================================================");
 
   } else if (cmd == "UPLIFT") {
     // --- Precondition: ignore if already executing UPLIFT ---
@@ -207,8 +216,10 @@ void KittingStateController::stateCmdCallback(
     pending_phase_.store(GraspPhase::UPLIFT, std::memory_order_relaxed);
     phase_changed_.store(true, std::memory_order_release);
     publishStateLabel("UPLIFT");
-    ROS_INFO("KittingStateController: State -> UPLIFT (distance=%.4fm, duration=%.2fs)",
-             distance, duration);
+    ROS_INFO("============================================================");
+    ROS_INFO("  [STATE]  >>  UPLIFT  <<  Cartesian micro-lift");
+    ROS_INFO("    distance=%.4f m  duration=%.2f s", distance, duration);
+    ROS_INFO("============================================================");
 
   } else {
     ROS_WARN("KittingStateController: Unknown command '%s' on state_cmd "
@@ -571,9 +582,11 @@ void KittingStateController::update(const ros::Time& time, const ros::Duration& 
               // CONTACT has no special initialization, so direct assignment is safe.
               current_phase_.store(GraspPhase::CONTACT, std::memory_order_relaxed);
               publishStateLabel("CONTACT");
-              ROS_INFO_STREAM("KittingStateController: CONTACT detected | tau_ext_norm="
-                              << tau_ext_norm << " threshold=" << contact_threshold_
-                              << " hold_time=" << hold_elapsed);
+              ROS_INFO("============================================================");
+              ROS_INFO("  [STATE]  >>  CONTACT  <<  Object contact detected!");
+              ROS_INFO("    tau_ext_norm=%.4f  threshold=%.4f  hold=%.3fs",
+                       tau_ext_norm, contact_threshold_, hold_elapsed);
+              ROS_INFO("============================================================");
             }
           }
         } else {
