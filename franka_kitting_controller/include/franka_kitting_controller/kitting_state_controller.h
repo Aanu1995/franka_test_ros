@@ -88,9 +88,11 @@ class KittingStateController
   realtime_tools::RealtimePublisher<std_msgs::String> state_publisher_;
 
   // --- Phase 2: Logger readiness gate ---
-  // The controller rejects all Phase 2 commands until the logger node publishes
-  // true on /kitting_phase2/logger_ready (latched topic).
-  // This enforces the documented launch order: Phase 1 first, then Phase 2.
+  // The controller rejects all Phase 2 commands until the logger node is running.
+  // Detection uses a latched topic (/kitting_phase2/logger_ready) plus a live
+  // publisher check (getNumPublishers > 0) at the point of use. This dual check
+  // prevents stale latched messages from a previous logger run and also detects
+  // logger shutdown mid-session.
   ros::Subscriber logger_ready_sub_;
   std::atomic<bool> logger_ready_{false};
   void loggerReadyCallback(const std_msgs::Bool::ConstPtr& msg);

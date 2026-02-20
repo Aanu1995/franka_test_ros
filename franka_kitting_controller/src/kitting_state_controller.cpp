@@ -58,11 +58,17 @@ std::array<double, 16> KittingStateController::computeUpliftPose(double elapsed)
 }
 
 void KittingStateController::loggerReadyCallback(const std_msgs::Bool::ConstPtr& msg) {
-  if (msg->data && !logger_ready_.load(std::memory_order_relaxed)) {
-    logger_ready_.store(true, std::memory_order_relaxed);
-    ROS_INFO("============================================================");
-    ROS_INFO("  [READY]  Phase 2 logger detected — commands now accepted");
-    ROS_INFO("============================================================");
+  // Only accept if the logger publisher is actually alive right now.
+  // A stale latched message from a previous logger run will still trigger this
+  // callback, but getNumPublishers() == 0 in that case because the original
+  // publisher is gone — the ROS master replays the latched message, not the node.
+  if (msg->data && logger_ready_sub_.getNumPublishers() > 0) {
+    if (!logger_ready_.load(std::memory_order_relaxed)) {
+      logger_ready_.store(true, std::memory_order_relaxed);
+      ROS_INFO("============================================================");
+      ROS_INFO("  [READY]  Phase 2 logger detected — commands now accepted");
+      ROS_INFO("============================================================");
+    }
   }
 }
 
@@ -77,9 +83,15 @@ void KittingStateController::stateCallback(const std_msgs::String::ConstPtr& msg
 
   // --- Guard: reject commands if the Phase 2 logger is not running ---
   // Ignore controller's own echo publications (they don't need the logger guard).
+  // Check both the flag AND that the logger publisher is currently alive
+  // (getNumPublishers > 0). This catches the case where the logger was running
+  // previously (setting logger_ready_ = true) but has since been shut down.
   if (label != "UPLIFT" && label != "CONTACT" && label != "CLOSING" &&
       label != "SECURE_GRASP") {
-    if (!logger_ready_.load(std::memory_order_relaxed)) {
+    if (!logger_ready_.load(std::memory_order_relaxed) ||
+        logger_ready_sub_.getNumPublishers() == 0) {
+      // Reset the flag if the logger went away
+      logger_ready_.store(false, std::memory_order_relaxed);
       ROS_WARN("KittingStateController: '%s' rejected — Phase 2 logger not detected. "
                "Launch the logger first:\n"
                "  roslaunch franka_kitting_controller kitting_phase2.launch "
@@ -122,7 +134,10 @@ void KittingStateController::stateCmdCallback(
   const std::string& cmd = msg->command;
 
   // --- Guard: reject commands if the Phase 2 logger is not running ---
-  if (!logger_ready_.load(std::memory_order_relaxed)) {
+  // Check both the flag AND that the logger publisher is currently alive.
+  if (!logger_ready_.load(std::memory_order_relaxed) ||
+      logger_ready_sub_.getNumPublishers() == 0) {
+    logger_ready_.store(false, std::memory_order_relaxed);
     ROS_WARN("KittingStateController: Command '%s' rejected — Phase 2 logger not detected. "
              "Launch the logger first:\n"
              "  roslaunch franka_kitting_controller kitting_phase2.launch "
