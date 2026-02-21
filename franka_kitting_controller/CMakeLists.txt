@@ -5,9 +5,7 @@ set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(catkin REQUIRED COMPONENTS
-  actionlib
   controller_interface
-  franka_gripper
   franka_hw
   hardware_interface
   message_generation
@@ -18,6 +16,8 @@ find_package(catkin REQUIRED COMPONENTS
   std_msgs
   topic_tools
 )
+
+find_package(Threads REQUIRED)
 
 find_package(Franka 0.9.0 QUIET)
 if(NOT Franka_FOUND)
@@ -37,9 +37,7 @@ catkin_package(
   INCLUDE_DIRS include
   LIBRARIES kitting_state_controller
   CATKIN_DEPENDS
-    actionlib
     controller_interface
-    franka_gripper
     franka_hw
     hardware_interface
     message_runtime
@@ -61,12 +59,12 @@ add_dependencies(kitting_state_controller
   ${${PROJECT_NAME}_EXPORTED_TARGETS}
   ${catkin_EXPORTED_TARGETS}
   ${PROJECT_NAME}_generate_messages_cpp
-  franka_gripper_generate_messages_cpp
 )
 
 target_link_libraries(kitting_state_controller
   ${Franka_LIBRARIES}
   ${catkin_LIBRARIES}
+  Threads::Threads
 )
 
 target_include_directories(kitting_state_controller SYSTEM PUBLIC
