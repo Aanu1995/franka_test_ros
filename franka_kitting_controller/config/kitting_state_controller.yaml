@@ -8,7 +8,6 @@ kitting_state_controller:
   T_base: 0.7 # Baseline collection duration [s]
   N_min: 50 # Minimum samples before enabling detection
   k_sigma: 5.0 # Threshold multiplier: theta = mu + k * sigma
-  delta_min: 0.5 # [Nm] Minimum absolute rise above mu (noise guard)
   T_hold: 0.12 # Debounce hold time [s]
   use_slope_gate: false # Optional slope gate (enable if drift false positives)
   slope_dt: 0.02 # Slope finite difference dt [s]

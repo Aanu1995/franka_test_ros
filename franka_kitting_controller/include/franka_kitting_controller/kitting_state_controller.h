@@ -135,7 +135,6 @@ class KittingStateController
   double T_base_{0.7};
   int N_min_{50};
   double k_sigma_{5.0};
-  double delta_min_{0.5};    // Minimum absolute rise above mu [Nm] (noise guard)
   double T_hold_{0.12};
   bool use_slope_gate_{false};
   double slope_dt_{0.02};

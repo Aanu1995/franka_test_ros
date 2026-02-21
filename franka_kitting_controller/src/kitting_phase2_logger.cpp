@@ -90,7 +90,6 @@ KittingPhase2Logger::KittingPhase2Logger()
   nh_.param(ctrl_ns + "T_base", T_base_, 0.7);
   nh_.param(ctrl_ns + "N_min", N_min_, 50);
   nh_.param(ctrl_ns + "k_sigma", k_sigma_, 5.0);
-  nh_.param(ctrl_ns + "delta_min", delta_min_, 0.5);
   nh_.param(ctrl_ns + "T_hold", T_hold_, 0.12);
   nh_.param(ctrl_ns + "use_slope_gate", use_slope_gate_, false);
   nh_.param(ctrl_ns + "slope_dt", slope_dt_, 0.02);
@@ -365,7 +364,6 @@ void KittingPhase2Logger::writeMetadata() {
   f << "  T_base: " << T_base_ << "\n";
   f << "  N_min: " << N_min_ << "\n";
   f << "  k_sigma: " << k_sigma_ << "\n";
-  f << "  delta_min: " << delta_min_ << "\n";
   f << "  T_hold: " << T_hold_ << "\n";
   f << "  use_slope_gate: " << (use_slope_gate_ ? "true" : "false") << "\n";
   f << "  slope_dt: " << slope_dt_ << "\n";
