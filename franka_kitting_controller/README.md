@@ -13,6 +13,7 @@ This controller runs inside the `ros_control` real-time loop provided by `franka
 - **Gripper telemetry**: finger width, max width, width velocity, commanded width, grasp state (from `franka::GripperState` via direct libfranka API)
 
 **Phase 2** adds:
+
 - 6-state grasp machine: `START` -> `BASELINE` -> `CLOSING` -> `CONTACT` -> `SECURE_GRASP` -> `UPLIFT`
 - Hybrid contact detection: arm external torque + gripper stall detection (OR logic)
 - Immediate gripper stop on contact: calls `franka::Gripper::stop()` to physically halt the motor
@@ -45,10 +46,10 @@ Phase 1 connects to the robot, starts `franka_control`, and spawns the `kitting_
 roslaunch franka_kitting_controller kitting_state_controller.launch robot_ip:=<ROBOT_IP>
 ```
 
-| Argument         | Default | Description               |
-|------------------|---------|---------------------------|
-| `robot_ip`       | (required) | Franka robot IP address |
-| `load_gripper`   | `false` | Load gripper driver (must be false — controller owns the gripper connection) |
+| Argument       | Default    | Description                                                                  |
+| -------------- | ---------- | ---------------------------------------------------------------------------- |
+| `robot_ip`     | (required) | Franka robot IP address                                                      |
+| `load_gripper` | `false`    | Load gripper driver (must be false — controller owns the gripper connection) |
 
 ### Phase 2: Launch the logger (requires Phase 1)
 
@@ -59,12 +60,12 @@ Phase 2 launches **only** the C++ rosbag recording manager. It does not start th
 roslaunch franka_kitting_controller kitting_phase2.launch object_name:=cup base_directory:=/data/kitting
 ```
 
-| Argument               | Default          | Description                              |
-|------------------------|------------------|------------------------------------------|
-| `base_directory`       | `~/kitting_bags` | Root directory for all trial data        |
-| `object_name`          | `default_object` | Object name for bag file naming          |
-| `auto_stop_on_contact` | `false`          | Auto-stop recording on CONTACT           |
-| `export_csv_on_stop`   | `true`           | Auto-export CSV when recording stops     |
+| Argument               | Default          | Description                          |
+| ---------------------- | ---------------- | ------------------------------------ |
+| `base_directory`       | `~/kitting_bags` | Root directory for all trial data    |
+| `object_name`          | `default_object` | Object name for bag file naming      |
+| `auto_stop_on_contact` | `false`          | Auto-stop recording on CONTACT       |
+| `export_csv_on_stop`   | `true`           | Auto-export CSV when recording stops |
 
 ## Phase 2: Interaction States
 
@@ -113,7 +114,7 @@ Detect first stable physical interaction. Published **automatically** by the con
 
 - Object touches gripper fingers — detected by **either** the arm or gripper detector
 - **Arm detection**: External torque norm exceeds threshold `x(t) > θ` continuously for `T_hold_arm` seconds (default 0.10 s)
-- **Gripper detection**: Width velocity drops below `stall_velocity_threshold` (0.008 m/s) while `(width - w_cmd) > width_gap_threshold` (0.002 m), sustained for `T_hold_gripper` seconds (computed dynamically from `closing_speed`; see [Dynamic Gripper Debounce Time](#dynamic-gripper-debounce-time-t_hold_gripper))
+- **Gripper detection**: Width velocity drops below `stall_velocity_threshold` (0.007 m/s) while `(width - w_cmd) > width_gap_threshold` (0.002 m), sustained for `T_hold_gripper` seconds (computed dynamically from `closing_speed`; see [Dynamic Gripper Debounce Time](#dynamic-gripper-debounce-time-t_hold_gripper))
 - **Immediate stop**: On contact, `franka::Gripper::stop()` is called via the read thread to physically halt the motor at the contact width
 - CONTACT is **latched** once detected — cannot return to CLOSING
 - `contact_source` records which detector fired: `"ARM"` or `"GRIPPER"`
@@ -140,13 +141,13 @@ Validate grasp robustness under load. The **controller internally executes** a s
 
 Recording and state labeling are independent concerns.
 
-| Topic                                    | Type                      | Direction  | Description                              |
-|------------------------------------------|---------------------------|------------|------------------------------------------|
-| `<ns>/kitting_state_data`                | KittingState              | Published  | Full state data at 250 Hz                |
-| `/kitting_phase2/state_cmd`              | KittingGripperCommand     | Subscribed | Commands with per-object gripper params  |
-| `/kitting_phase2/state`                  | std_msgs/String           | Pub/Sub    | State labels for offline segmentation    |
-| `/kitting_phase2/record_control`         | std_msgs/String           | Subscribed | Recording control: STOP, ABORT           |
-| `/kitting_phase2/logger_ready`           | std_msgs/Bool             | Subscribed | Latched readiness signal from logger node|
+| Topic                            | Type                  | Direction  | Description                               |
+| -------------------------------- | --------------------- | ---------- | ----------------------------------------- |
+| `<ns>/kitting_state_data`        | KittingState          | Published  | Full state data at 250 Hz                 |
+| `/kitting_phase2/state_cmd`      | KittingGripperCommand | Subscribed | Commands with per-object gripper params   |
+| `/kitting_phase2/state`          | std_msgs/String       | Pub/Sub    | State labels for offline segmentation     |
+| `/kitting_phase2/record_control` | std_msgs/String       | Subscribed | Recording control: STOP, ABORT            |
+| `/kitting_phase2/logger_ready`   | std_msgs/Bool         | Subscribed | Latched readiness signal from logger node |
 
 - `/kitting_phase2/state_cmd` — The **user** publishes a `KittingGripperCommand` with `command` field set to `CLOSING`, `SECURE_GRASP`, or `UPLIFT`, plus optional per-object parameters. Any parameter left at `0.0` falls back to the YAML config default. The **controller** executes the corresponding action (gripper move/grasp, or Cartesian micro-lift), publishes the state label on `/kitting_phase2/state`, and updates its internal state machine.
 - `/kitting_phase2/state` — The **user** publishes BASELINE here. The **controller** publishes CLOSING, SECURE_GRASP, UPLIFT (from `state_cmd`), and CONTACT (auto-detected). States are labels for offline analysis — they do NOT control recording.
@@ -157,8 +158,8 @@ Recording and state labeling are independent concerns.
 
 One rosbag per trial. **Recording starts automatically** when the logger node is launched — no START command is needed. The logger opens a new trial bag immediately on startup and records all configured topics.
 
-| Command | Action                                           |
-|---------|--------------------------------------------------|
+| Command | Action                                            |
+| ------- | ------------------------------------------------- |
 | `STOP`  | Close bag, save metadata, export CSV (if enabled) |
 | `ABORT` | Close bag, delete trial directory (no CSV)        |
 
@@ -183,7 +184,7 @@ rostopic pub /kitting_phase2/state_cmd franka_kitting_controller/KittingGripperC
 
 # CLOSING — override width and speed for a specific object
 rostopic pub /kitting_phase2/state_cmd franka_kitting_controller/KittingGripperCommand \
-  "{command: 'CLOSING', closing_width: 0.06, closing_speed: 0.02}" --once
+  "{command: 'CLOSING', closing_width: 0.01, closing_speed: 0.02}" --once
 
 # ... CONTACT is published by the controller automatically ...
 
@@ -230,19 +231,19 @@ Statistical thresholding on the external torque norm signal. Runs at 250 Hz insi
 
 #### Symbols
 
-| Symbol | Name                    | Unit  | Default | Description                                                                 |
-|--------|-------------------------|-------|---------|-----------------------------------------------------------------------------|
-| `x(t)` | Signal                  | Nm    | —       | External torque norm: `x(t) = \|\|τ_ext\|\| = √(Σ τ_ext_i²)` at time `t` |
-| `N`    | Sample count            | —     | —       | Number of baseline samples collected (must reach `N_min`)                  |
-| `μ`    | Baseline mean           | Nm    | —       | Average of `x(t)` during BASELINE — the system noise floor                |
-| `σ`    | Baseline std. deviation | Nm    | —       | Spread of `x(t)` during BASELINE — how much noise naturally fluctuates    |
-| `k`    | Sigma multiplier        | —     | 3.0     | Number of standard deviations above `μ` for the threshold                 |
-| `θ`    | Contact threshold       | Nm    | —       | Trigger level: `θ = μ + kσ`                                               |
-| `T_base` | Baseline duration     | s     | 0.7     | Minimum time to collect baseline samples                                   |
-| `N_min`  | Minimum sample count  | —     | 50      | Minimum samples before baseline statistics are valid                       |
-| `T_hold_arm` | Debounce hold time | s    | 0.10    | Duration `x(t)` must continuously exceed `θ` to declare contact           |
-| `dx/dt`  | Signal slope          | Nm/s  | —       | Time derivative of `x(t)`, used by optional slope gate                    |
-| `slope_min` | Minimum slope       | Nm/s  | 5.0     | Minimum `dx/dt` required for contact (only if slope gate enabled)         |
+| Symbol       | Name                    | Unit | Default | Description                                                              |
+| ------------ | ----------------------- | ---- | ------- | ------------------------------------------------------------------------ |
+| `x(t)`       | Signal                  | Nm   | —       | External torque norm: `x(t) = \|\|τ_ext\|\| = √(Σ τ_ext_i²)` at time `t` |
+| `N`          | Sample count            | —    | —       | Number of baseline samples collected (must reach `N_min`)                |
+| `μ`          | Baseline mean           | Nm   | —       | Average of `x(t)` during BASELINE — the system noise floor               |
+| `σ`          | Baseline std. deviation | Nm   | —       | Spread of `x(t)` during BASELINE — how much noise naturally fluctuates   |
+| `k`          | Sigma multiplier        | —    | 3.0     | Number of standard deviations above `μ` for the threshold                |
+| `θ`          | Contact threshold       | Nm   | —       | Trigger level: `θ = μ + kσ`                                              |
+| `T_base`     | Baseline duration       | s    | 0.7     | Minimum time to collect baseline samples                                 |
+| `N_min`      | Minimum sample count    | —    | 50      | Minimum samples before baseline statistics are valid                     |
+| `T_hold_arm` | Debounce hold time      | s    | 0.10    | Duration `x(t)` must continuously exceed `θ` to declare contact          |
+| `dx/dt`      | Signal slope            | Nm/s | —       | Time derivative of `x(t)`, used by optional slope gate                   |
+| `slope_min`  | Minimum slope           | Nm/s | 5.0     | Minimum `dx/dt` required for contact (only if slope gate enabled)        |
 
 #### Step 1: Baseline Collection (during BASELINE state)
 
@@ -265,6 +266,7 @@ Statistics are computed using a single-pass algorithm (no array storage):
 ```
 
 Where:
+
 - `μ` (mu) is the **mean** — average noise level when nothing is touching the robot
 - `σ` (sigma) is the **standard deviation** — how much that noise fluctuates
 - `θ` (theta) is the **threshold** — the trigger level `k` standard deviations above the mean
@@ -326,7 +328,7 @@ The `GripperData` struct `{width, max_width, width_dot, is_grasped, stamp}` is p
 During CLOSING, the controller checks every RT tick:
 
 ```
-  velocity_stalled = |w_dot| < stall_velocity_threshold    (default 0.008 m/s)
+  velocity_stalled = |w_dot| < stall_velocity_threshold    (default 0.007 m/s)
   width_gap_exists = (w - w_cmd) > width_gap_threshold     (default 0.002 m)
 
   stall_detected = velocity_stalled AND width_gap_exists
@@ -338,14 +340,14 @@ The **width gap check** is essential: without it, normal gripper completion (vel
 
 #### Symbols
 
-| Symbol | Name                      | Unit  | Default | Description                                                        |
-|--------|---------------------------|-------|---------|--------------------------------------------------------------------|
-| `w`    | Gripper width             | m     | —       | Current finger width (from `franka::GripperState.width`)          |
-| `w_dot`| Width velocity            | m/s   | —       | Finite difference of `w` between consecutive `readOnce()` calls  |
-| `w_cmd`| Commanded width           | m     | 0.01    | Target width for the active MoveAction (from CLOSING command)     |
-| `v_stall` | Stall velocity threshold | m/s | 0.008   | Speed below this is considered stalled                            |
-| `Δw`   | Width gap threshold       | m     | 0.002   | Minimum `(w - w_cmd)` to distinguish stall from normal completion |
-| `T_hold_gripper` | Debounce time    | s     | computed | Duration stall must persist to declare contact (see [Dynamic Gripper Debounce Time](#dynamic-gripper-debounce-time-t_hold_gripper)) |
+| Symbol           | Name                     | Unit | Default  | Description                                                                                                                         |
+| ---------------- | ------------------------ | ---- | -------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `w`              | Gripper width            | m    | —        | Current finger width (from `franka::GripperState.width`)                                                                            |
+| `w_dot`          | Width velocity           | m/s  | —        | Finite difference of `w` between consecutive `readOnce()` calls                                                                     |
+| `w_cmd`          | Commanded width          | m    | 0.01     | Target width for the active MoveAction (from CLOSING command)                                                                       |
+| `v_stall`        | Stall velocity threshold | m/s  | 0.007    | Speed below this is considered stalled                                                                                              |
+| `Δw`             | Width gap threshold      | m    | 0.002    | Minimum `(w - w_cmd)` to distinguish stall from normal completion                                                                   |
+| `T_hold_gripper` | Debounce time            | s    | computed | Duration stall must persist to declare contact (see [Dynamic Gripper Debounce Time](#dynamic-gripper-debounce-time-t_hold_gripper)) |
 
 ### Gripper Stop on Contact
 
@@ -371,33 +373,33 @@ Where `v` is the resolved `closing_speed` (YAML default or per-command override,
 
 #### Constants
 
-| Symbol             | Value     | Description                                              |
-|--------------------|-----------|----------------------------------------------------------|
-| `T_base_hold`      | 0.35 s    | Hold time intercept at zero speed                        |
-| `k_hold`           | 0.5 s/(m/s) | Linear slope: hold time increase per unit speed        |
-| `v_max`            | 0.10 m/s  | Hard cap on closing speed (speeds above this are clamped)|
+| Symbol        | Value       | Description                                               |
+| ------------- | ----------- | --------------------------------------------------------- |
+| `T_base_hold` | 0.35 s      | Hold time intercept at zero speed                         |
+| `k_hold`      | 0.5 s/(m/s) | Linear slope: hold time increase per unit speed           |
+| `v_max`       | 0.10 m/s    | Hard cap on closing speed (speeds above this are clamped) |
 
 #### Resulting Hold Times
 
-| `closing_speed` (m/s) | `T_hold_gripper` (s) | Notes                            |
-|------------------------|----------------------|----------------------------------|
-| 0.01                   | 0.355                |                                  |
-| 0.02                   | 0.360                | Verified experimentally          |
-| 0.04                   | 0.370                | Default speed, verified          |
-| 0.06                   | 0.380                | Verified experimentally          |
-| 0.08                   | 0.390                |                                  |
-| 0.10                   | 0.400                | Maximum speed, verified          |
-| > 0.10                 | 0.400                | Speed clamped to 0.10 m/s        |
+| `closing_speed` (m/s) | `T_hold_gripper` (s) | Notes                     |
+| --------------------- | -------------------- | ------------------------- |
+| 0.01                  | 0.355                |                           |
+| 0.02                  | 0.360                | Verified experimentally   |
+| 0.04                  | 0.370                | Default speed, verified   |
+| 0.06                  | 0.380                | Verified experimentally   |
+| 0.08                  | 0.390                |                           |
+| 0.10                  | 0.400                | Maximum speed, verified   |
+| > 0.10                | 0.400                | Speed clamped to 0.10 m/s |
 
 #### Experimental Validation
 
 The formula parameters were derived from physical experiments on the Franka Panda gripper:
 
-| `closing_speed` | Works     | Fails     | Formula gives |
-|-----------------|-----------|-----------|---------------|
-| 0.02 m/s        | 0.25 s    | 0.20 s    | 0.36 s        |
-| 0.04 m/s        | 0.35 s    | 0.31 s    | 0.37 s        |
-| 0.10 m/s        | 0.40 s    | 0.30 s    | 0.40 s        |
+| `closing_speed` | Works  | Fails  | Formula gives |
+| --------------- | ------ | ------ | ------------- |
+| 0.02 m/s        | 0.25 s | 0.20 s | 0.36 s        |
+| 0.04 m/s        | 0.35 s | 0.31 s | 0.37 s        |
+| 0.10 m/s        | 0.40 s | 0.30 s | 0.40 s        |
 
 All computed values are above the experimentally determined minimum working thresholds and below the 0.50 s danger threshold (where detection may be too late for fragile objects).
 
@@ -421,18 +423,18 @@ The UPLIFT state executes a smooth Cartesian micro-lift internally using cosine-
 
 ### Symbols
 
-| Symbol     | Name                      | Unit  | Default | Description                                                                 |
-|------------|---------------------------|-------|---------|-----------------------------------------------------------------------------|
-| `d`        | Uplift distance           | m     | 0.003   | Total upward displacement along the z-axis (max 0.01)                      |
-| `T`        | Uplift duration           | s     | 1.0     | Total time for the cosine-smoothed trajectory                              |
-| `t`        | Elapsed time              | s     | —       | Time since UPLIFT started, incremented by `Δt` (control period) each tick  |
-| `Δt`       | Control period            | s     | 0.001   | Time between consecutive `update()` calls (1 kHz)                          |
-| `s_raw`    | Normalized time           | —     | —       | Linear progress: `s_raw = min(t/T, 1)`, clamped to [0, 1]                 |
-| `s`        | Smoothed progress         | —     | —       | Cosine-smoothed: `s = ½(1 − cos(π · s_raw))`, maps [0,1] → [0,1]         |
-| `z₀`       | Start z-position          | m     | —       | z-translation of `O_T_EE_d` at the moment UPLIFT begins: `z₀ = O_T_EE_d[14]` |
-| `z(t)`     | Commanded z-position      | m     | —       | `z(t) = z₀ + s · d`                                                       |
-| `v(t)`     | Commanded z-velocity      | m/s   | —       | `v(t) = dz/dt = (π·d)/(2T) · sin(π·t/T)`                                 |
-| `O_T_EE_d` | Desired end-effector pose | —     | —       | 4×4 column-major homogeneous transform; index [14] = z-translation        |
+| Symbol     | Name                      | Unit | Default | Description                                                                  |
+| ---------- | ------------------------- | ---- | ------- | ---------------------------------------------------------------------------- |
+| `d`        | Uplift distance           | m    | 0.003   | Total upward displacement along the z-axis (max 0.01)                        |
+| `T`        | Uplift duration           | s    | 1.0     | Total time for the cosine-smoothed trajectory                                |
+| `t`        | Elapsed time              | s    | —       | Time since UPLIFT started, incremented by `Δt` (control period) each tick    |
+| `Δt`       | Control period            | s    | 0.001   | Time between consecutive `update()` calls (1 kHz)                            |
+| `s_raw`    | Normalized time           | —    | —       | Linear progress: `s_raw = min(t/T, 1)`, clamped to [0, 1]                    |
+| `s`        | Smoothed progress         | —    | —       | Cosine-smoothed: `s = ½(1 − cos(π · s_raw))`, maps [0,1] → [0,1]             |
+| `z₀`       | Start z-position          | m    | —       | z-translation of `O_T_EE_d` at the moment UPLIFT begins: `z₀ = O_T_EE_d[14]` |
+| `z(t)`     | Commanded z-position      | m    | —       | `z(t) = z₀ + s · d`                                                          |
+| `v(t)`     | Commanded z-velocity      | m/s  | —       | `v(t) = dz/dt = (π·d)/(2T) · sin(π·t/T)`                                     |
+| `O_T_EE_d` | Desired end-effector pose | —    | —       | 4×4 column-major homogeneous transform; index [14] = z-translation           |
 
 ### Trajectory Equation
 
@@ -460,14 +462,14 @@ The **velocity profile** (first derivative) is:
 
 ### Trajectory Properties
 
-| Property              | Mathematical expression              | Physical meaning                              |
-|-----------------------|--------------------------------------|-----------------------------------------------|
-| Position at `t = 0`   | `z(0) = z₀`                         | Starts at the current height                  |
-| Position at `t = T`   | `z(T) = z₀ + d`                     | Ends exactly `d` meters above start           |
-| Velocity at `t = 0`   | `dz/dt = 0`                         | Zero velocity at start (no step discontinuity)|
-| Velocity at `t = T`   | `dz/dt = 0`                         | Zero velocity at end (smooth stop)            |
-| Peak velocity         | `v_max = πd/(2T)` at `t = T/2`      | Maximum speed at the midpoint of the motion   |
-| Peak velocity (default) | `v_max = π·0.003/(2·1.0) ≈ 0.0047 m/s` | ~4.7 mm/s — well within Franka limits     |
+| Property                | Mathematical expression                | Physical meaning                               |
+| ----------------------- | -------------------------------------- | ---------------------------------------------- |
+| Position at `t = 0`     | `z(0) = z₀`                            | Starts at the current height                   |
+| Position at `t = T`     | `z(T) = z₀ + d`                        | Ends exactly `d` meters above start            |
+| Velocity at `t = 0`     | `dz/dt = 0`                            | Zero velocity at start (no step discontinuity) |
+| Velocity at `t = T`     | `dz/dt = 0`                            | Zero velocity at end (smooth stop)             |
+| Peak velocity           | `v_max = πd/(2T)` at `t = T/2`         | Maximum speed at the midpoint of the motion    |
+| Peak velocity (default) | `v_max = π·0.003/(2·1.0) ≈ 0.0047 m/s` | ~4.7 mm/s — well within Franka limits          |
 
 ### Execution Details
 
@@ -481,64 +483,65 @@ The **velocity profile** (first derivative) is:
 
 ### Safety Constraints
 
-| Constraint              | Symbol / Value     | Description                                                    |
-|-------------------------|--------------------|----------------------------------------------------------------|
+| Constraint              | Symbol / Value    | Description                                                   |
+| ----------------------- | ----------------- | ------------------------------------------------------------- |
 | Maximum closing speed   | `v ≤ 0.10 m/s`    | Hard clamp — speeds above 0.10 m/s are clamped with a warning |
 | Maximum uplift distance | `d ≤ 0.01 m`      | Hard clamp — any `d > 10 mm` is clamped with a warning        |
-| Minimum uplift distance | `d > 0`            | Zero or negative `d` is rejected                               |
-| Minimum uplift duration | `T > 0`            | Zero or negative `T` is rejected                               |
-| Maximum uplift velocity | `v_max = πd/(2T)`  | Bounded by the clamp on `d` and the minimum `T`               |
-| Precondition            | Configurable       | `require_secure_grasp: true` requires SECURE_GRASP state       |
-| Duplicate rejection     | —                  | UPLIFT is ignored while a trajectory is already active         |
-| BASELINE interruption   | —                  | BASELINE clears UPLIFT, returns to passthrough (with warning)  |
+| Minimum uplift distance | `d > 0`           | Zero or negative `d` is rejected                              |
+| Minimum uplift duration | `T > 0`           | Zero or negative `T` is rejected                              |
+| Maximum uplift velocity | `v_max = πd/(2T)` | Bounded by the clamp on `d` and the minimum `T`               |
+| Precondition            | Configurable      | `require_secure_grasp: true` requires SECURE_GRASP state      |
+| Duplicate rejection     | —                 | UPLIFT is ignored while a trajectory is already active        |
+| BASELINE interruption   | —                 | BASELINE clears UPLIFT, returns to passthrough (with warning) |
 
 ## Configuration
 
 ### Controller Parameters (`config/kitting_state_controller.yaml`)
 
-| Parameter                  | Type   | Default | Description                                    |
-|----------------------------|--------|---------|------------------------------------------------|
-| `arm_id`                   | string | `panda` | Robot arm identifier                           |
-| `publish_rate`             | double | `250.0` | State data publish rate [Hz]                   |
-| `enable_contact_detector`  | bool   | `true`  | Enable Phase 2 contact detection               |
-| `T_base`                   | double | `0.7`   | Baseline collection duration [s]               |
-| `N_min`                    | int    | `50`    | Minimum samples before arming detection        |
-| `k_sigma`                  | double | `3.0`   | Threshold multiplier (theta = mu + k*sigma)    |
-| `T_hold_arm`               | double | `0.10`  | Arm torque debounce hold time [s]              |
-| `use_slope_gate`           | bool   | `false` | Enable slope gate (for drift false positives)  |
-| `slope_dt`                 | double | `0.02`  | Slope finite difference dt [s]                 |
-| `slope_min`                | double | `5.0`   | Minimum slope for contact [1/s]                |
-| `stall_velocity_threshold` | double | `0.008` | Gripper speed below this = stalled [m/s]       |
-| `width_gap_threshold`      | double | `0.002` | Min gap (w - w_cmd) for stall detection [m]    |
-| `stop_on_contact`          | bool   | `true`  | Call `stop()` on contact detection             |
-| `enable_arm_contact`       | bool   | `false` | Enable arm torque contact detector             |
-| `enable_gripper_contact`   | bool   | `true`  | Enable gripper stall contact detector          |
-| `execute_gripper_actions`  | bool   | `true`  | Execute gripper actions (false = signal-only)   |
-| `closing_width`            | double | `0.01`  | Default width for MoveAction in CLOSING [m]    |
+| Parameter                  | Type   | Default | Description                                                         |
+| -------------------------- | ------ | ------- | ------------------------------------------------------------------- |
+| `arm_id`                   | string | `panda` | Robot arm identifier                                                |
+| `publish_rate`             | double | `250.0` | State data publish rate [Hz]                                        |
+| `enable_contact_detector`  | bool   | `true`  | Enable Phase 2 contact detection                                    |
+| `T_base`                   | double | `0.7`   | Baseline collection duration [s]                                    |
+| `N_min`                    | int    | `50`    | Minimum samples before arming detection                             |
+| `k_sigma`                  | double | `3.0`   | Threshold multiplier (theta = mu + k\*sigma)                        |
+| `T_hold_arm`               | double | `0.10`  | Arm torque debounce hold time [s]                                   |
+| `use_slope_gate`           | bool   | `false` | Enable slope gate (for drift false positives)                       |
+| `slope_dt`                 | double | `0.02`  | Slope finite difference dt [s]                                      |
+| `slope_min`                | double | `5.0`   | Minimum slope for contact [1/s]                                     |
+| `stall_velocity_threshold` | double | `0.007` | Gripper speed below this = stalled [m/s]                            |
+| `width_gap_threshold`      | double | `0.002` | Min gap (w - w_cmd) for stall detection [m]                         |
+| `stop_on_contact`          | bool   | `true`  | Call `stop()` on contact detection                                  |
+| `enable_arm_contact`       | bool   | `false` | Enable arm torque contact detector                                  |
+| `enable_gripper_contact`   | bool   | `true`  | Enable gripper stall contact detector                               |
+| `execute_gripper_actions`  | bool   | `true`  | Execute gripper actions (false = signal-only)                       |
+| `closing_width`            | double | `0.01`  | Default width for MoveAction in CLOSING [m]                         |
 | `closing_speed`            | double | `0.04`  | Default speed for MoveAction in CLOSING [m/s] (clamped to max 0.10) |
-| `grasp_width`              | double | `0.02`  | Default width for GraspAction [m]              |
-| `epsilon_inner`            | double | `0.005` | Default inner epsilon for GraspAction [m]      |
-| `epsilon_outer`            | double | `0.005` | Default outer epsilon for GraspAction [m]      |
-| `grasp_speed`              | double | `0.04`  | Default speed for GraspAction [m/s]            |
-| `grasp_force`              | double | `10.0`  | Default force for GraspAction [N]              |
-| `uplift_distance`          | double | `0.003` | Default upward displacement [m] (max 0.01)     |
-| `uplift_duration`          | double | `1.0`   | Cosine-smoothed motion duration [s]            |
-| `uplift_reference_frame`   | string | `world` | Reference frame for z-axis displacement        |
-| `require_secure_grasp`     | bool   | `true`  | Only allow UPLIFT from SECURE_GRASP state      |
+| `grasp_width`              | double | `0.02`  | Default width for GraspAction [m]                                   |
+| `epsilon_inner`            | double | `0.005` | Default inner epsilon for GraspAction [m]                           |
+| `epsilon_outer`            | double | `0.005` | Default outer epsilon for GraspAction [m]                           |
+| `grasp_speed`              | double | `0.04`  | Default speed for GraspAction [m/s]                                 |
+| `grasp_force`              | double | `10.0`  | Default force for GraspAction [N]                                   |
+| `uplift_distance`          | double | `0.003` | Default upward displacement [m] (max 0.01)                          |
+| `uplift_duration`          | double | `1.0`   | Cosine-smoothed motion duration [s]                                 |
+| `uplift_reference_frame`   | string | `world` | Reference frame for z-axis displacement                             |
+| `require_secure_grasp`     | bool   | `true`  | Only allow UPLIFT from SECURE_GRASP state                           |
 
 Gripper and UPLIFT parameters are **defaults**. They can be overridden per-command by setting non-zero values in the `KittingGripperCommand` message published on `/kitting_phase2/state_cmd`.
 
 ### Logger Parameters (`config/kitting_phase2_logger.yaml`)
 
-| Parameter              | Type        | Default              | Description                                  |
-|------------------------|-------------|----------------------|----------------------------------------------|
-| `base_directory`       | string      | `~/kitting_bags`     | Root directory for bag files                 |
-| `object_name`          | string      | `default_object`     | Object identifier for file naming            |
-| `auto_stop_on_contact` | bool        | `false`              | Auto-stop recording on CONTACT               |
-| `export_csv_on_stop`   | bool        | `true`               | Auto-export CSV when recording stops         |
-| `topics_to_record`     | string list | (see below)          | Topics recorded in rosbag                    |
+| Parameter              | Type        | Default          | Description                          |
+| ---------------------- | ----------- | ---------------- | ------------------------------------ |
+| `base_directory`       | string      | `~/kitting_bags` | Root directory for bag files         |
+| `object_name`          | string      | `default_object` | Object identifier for file naming    |
+| `auto_stop_on_contact` | bool        | `false`          | Auto-stop recording on CONTACT       |
+| `export_csv_on_stop`   | bool        | `true`           | Auto-export CSV when recording stops |
+| `topics_to_record`     | string list | (see below)      | Topics recorded in rosbag            |
 
 Default recorded topics:
+
 - `/kitting_state_controller/kitting_state_data`
 - `/kitting_phase2/state`
 - `/kitting_phase2/state_cmd`
@@ -589,7 +592,7 @@ detector_parameters:
   use_slope_gate: false
   slope_dt: 0.02
   slope_min: 5.0
-  stall_velocity_threshold: 0.008
+  stall_velocity_threshold: 0.007
   width_gap_threshold: 0.002
   T_hold_gripper: "computed: 0.35 + 0.5 * closing_speed"
   stop_on_contact: true
@@ -605,18 +608,18 @@ When `export_csv_on_stop` is `true` (default), the logger automatically reads ba
 
 The CSV contains one row per `KittingState` message (63 columns):
 
-| Group            | Columns                                                          |
-|------------------|------------------------------------------------------------------|
-| Time             | `timestamp_sec`, `timestamp_nsec`, `time_float`                  |
-| State            | `state_label` (most recent state at that timestamp)              |
-| Joint positions  | `q_1` ... `q_7`                                                  |
-| Joint velocities | `dq_1` ... `dq_7`                                                |
-| Joint torques    | `tau_J_1` ... `tau_J_7`                                          |
-| External torques | `tau_ext_1` ... `tau_ext_7`, `tau_ext_norm`                      |
-| Wrench           | `wrench_fx`, `wrench_fy`, `wrench_fz`, `wrench_tx`, `wrench_ty`, `wrench_tz`, `wrench_norm` |
-| EE velocity      | `ee_vx`, `ee_vy`, `ee_vz`, `ee_wx`, `ee_wy`, `ee_wz`           |
-| Gravity          | `gravity_1` ... `gravity_7`                                      |
-| Coriolis         | `coriolis_1` ... `coriolis_7`                                    |
+| Group            | Columns                                                                                              |
+| ---------------- | ---------------------------------------------------------------------------------------------------- |
+| Time             | `timestamp_sec`, `timestamp_nsec`, `time_float`                                                      |
+| State            | `state_label` (most recent state at that timestamp)                                                  |
+| Joint positions  | `q_1` ... `q_7`                                                                                      |
+| Joint velocities | `dq_1` ... `dq_7`                                                                                    |
+| Joint torques    | `tau_J_1` ... `tau_J_7`                                                                              |
+| External torques | `tau_ext_1` ... `tau_ext_7`, `tau_ext_norm`                                                          |
+| Wrench           | `wrench_fx`, `wrench_fy`, `wrench_fz`, `wrench_tx`, `wrench_ty`, `wrench_tz`, `wrench_norm`          |
+| EE velocity      | `ee_vx`, `ee_vy`, `ee_vz`, `ee_wx`, `ee_wy`, `ee_wz`                                                 |
+| Gravity          | `gravity_1` ... `gravity_7`                                                                          |
+| Coriolis         | `coriolis_1` ... `coriolis_7`                                                                        |
 | Gripper          | `gripper_width`, `gripper_width_dot`, `gripper_width_cmd`, `gripper_max_width`, `gripper_is_grasped` |
 
 `O_T_EE` (16 values) and `jacobian` (42 values) are not included in the CSV. They remain in the rosbag.
@@ -627,46 +630,47 @@ State labels are synchronized by iterating the bag chronologically: each signal 
 
 Per-object gripper command published on `/kitting_phase2/state_cmd`. Any parameter left at `0.0` (the ROS default for `float64`) falls back to the YAML config value loaded at startup. This lets you override only the parameters that differ for a particular object.
 
-| Field              | Type    | Description                                              |
-|--------------------|---------|----------------------------------------------------------|
-| `command`          | string  | `"CLOSING"`, `"SECURE_GRASP"`, or `"UPLIFT"`            |
-| `closing_width`    | float64 | Target width for MoveAction [m] (0 = use default)       |
-| `closing_speed`    | float64 | Speed for MoveAction [m/s] (0 = use default, max 0.10)  |
-| `grasp_width`      | float64 | Target width for GraspAction [m] (0 = use default)      |
-| `epsilon_inner`    | float64 | Inner epsilon for GraspAction [m] (0 = use default)     |
-| `epsilon_outer`    | float64 | Outer epsilon for GraspAction [m] (0 = use default)     |
-| `grasp_speed`      | float64 | Speed for GraspAction [m/s] (0 = use default)           |
-| `grasp_force`      | float64 | Force for GraspAction [N] (0 = use default)             |
-| `uplift_distance`  | float64 | Upward displacement [m] (0 = use default, max 0.01)     |
-| `uplift_duration`  | float64 | Duration of cosine-smoothed micro-lift [s] (0 = default)|
+| Field             | Type    | Description                                              |
+| ----------------- | ------- | -------------------------------------------------------- |
+| `command`         | string  | `"CLOSING"`, `"SECURE_GRASP"`, or `"UPLIFT"`             |
+| `closing_width`   | float64 | Target width for MoveAction [m] (0 = use default)        |
+| `closing_speed`   | float64 | Speed for MoveAction [m/s] (0 = use default, max 0.10)   |
+| `grasp_width`     | float64 | Target width for GraspAction [m] (0 = use default)       |
+| `epsilon_inner`   | float64 | Inner epsilon for GraspAction [m] (0 = use default)      |
+| `epsilon_outer`   | float64 | Outer epsilon for GraspAction [m] (0 = use default)      |
+| `grasp_speed`     | float64 | Speed for GraspAction [m/s] (0 = use default)            |
+| `grasp_force`     | float64 | Force for GraspAction [N] (0 = use default)              |
+| `uplift_distance` | float64 | Upward displacement [m] (0 = use default, max 0.01)      |
+| `uplift_duration` | float64 | Duration of cosine-smoothed micro-lift [s] (0 = default) |
 
 Only the parameters relevant to the command are used:
+
 - `CLOSING` uses `closing_width` and `closing_speed`
 - `SECURE_GRASP` uses `grasp_width`, `epsilon_inner`, `epsilon_outer`, `grasp_speed`, and `grasp_force`
 - `UPLIFT` uses `uplift_distance` and `uplift_duration`
 
 ## KittingState Message
 
-| Field          | Type         | Description                                          |
-|----------------|--------------|------------------------------------------------------|
-| `header`       | Header       | Timestamp and frame info                             |
-| `q`            | float64[7]   | Joint positions [rad]                                |
-| `dq`           | float64[7]   | Joint velocities [rad/s]                             |
-| `tau_J`        | float64[7]   | Measured joint torques [Nm]                          |
-| `tau_ext`      | float64[7]   | Estimated external joint torques [Nm]                |
-| `wrench_ext`   | float64[6]   | External wrench in base frame (Fx,Fy,Fz,Tx,Ty,Tz)  |
-| `O_T_EE`       | float64[16]  | EE pose in base frame (4x4 column-major)             |
-| `jacobian`     | float64[42]  | Zero Jacobian at EE (6x7 column-major)               |
-| `gravity`      | float64[7]   | Gravity torque vector [Nm]                           |
-| `coriolis`     | float64[7]   | Coriolis torque vector [Nm]                          |
-| `ee_velocity`  | float64[6]   | End-effector velocity (J * dq) [m/s, rad/s]         |
-| `tau_ext_norm`      | float64      | Euclidean norm of `tau_ext`                          |
-| `wrench_norm`       | float64      | Euclidean norm of `wrench_ext`                       |
-| `gripper_width`     | float64      | Gripper finger width [m] (from `franka::GripperState`) |
-| `gripper_width_dot` | float64      | Gripper width velocity (finite difference) [m/s]    |
-| `gripper_width_cmd` | float64      | Commanded closing width [m] (0 if not CLOSING)      |
-| `gripper_max_width` | float64      | Maximum gripper opening width [m] (from `franka::GripperState`) |
-| `gripper_is_grasped`| bool         | Firmware-level grasp detection (from `franka::GripperState`) |
+| Field                | Type        | Description                                                     |
+| -------------------- | ----------- | --------------------------------------------------------------- |
+| `header`             | Header      | Timestamp and frame info                                        |
+| `q`                  | float64[7]  | Joint positions [rad]                                           |
+| `dq`                 | float64[7]  | Joint velocities [rad/s]                                        |
+| `tau_J`              | float64[7]  | Measured joint torques [Nm]                                     |
+| `tau_ext`            | float64[7]  | Estimated external joint torques [Nm]                           |
+| `wrench_ext`         | float64[6]  | External wrench in base frame (Fx,Fy,Fz,Tx,Ty,Tz)               |
+| `O_T_EE`             | float64[16] | EE pose in base frame (4x4 column-major)                        |
+| `jacobian`           | float64[42] | Zero Jacobian at EE (6x7 column-major)                          |
+| `gravity`            | float64[7]  | Gravity torque vector [Nm]                                      |
+| `coriolis`           | float64[7]  | Coriolis torque vector [Nm]                                     |
+| `ee_velocity`        | float64[6]  | End-effector velocity (J \* dq) [m/s, rad/s]                    |
+| `tau_ext_norm`       | float64     | Euclidean norm of `tau_ext`                                     |
+| `wrench_norm`        | float64     | Euclidean norm of `wrench_ext`                                  |
+| `gripper_width`      | float64     | Gripper finger width [m] (from `franka::GripperState`)          |
+| `gripper_width_dot`  | float64     | Gripper width velocity (finite difference) [m/s]                |
+| `gripper_width_cmd`  | float64     | Commanded closing width [m] (0 if not CLOSING)                  |
+| `gripper_max_width`  | float64     | Maximum gripper opening width [m] (from `franka::GripperState`) |
+| `gripper_is_grasped` | bool        | Firmware-level grasp detection (from `franka::GripperState`)    |
 
 ## Interfaces
 
@@ -741,7 +745,7 @@ Move EE into table. **Expected**: clear increase in Fz, `wrench_norm`, `tau_ext_
 - CSV export does not block the ROS spin loop (runs in background thread)
 - metadata.yaml contains bag_filename, csv_filename, total_samples, start/stop times, and detector parameters
 - Hybrid contact detection: arm torque OR gripper stall, first trigger wins
-- Gripper stall detection: velocity < threshold AND width gap > threshold for T_hold_gripper (computed: 0.35 + 0.5 * closing_speed)
+- Gripper stall detection: velocity < threshold AND width gap > threshold for T_hold_gripper (computed: 0.35 + 0.5 \* closing_speed)
 - Free closing (no object): width reaches w_cmd, gap ~0 → no false CONTACT
 - Object contact: width stalls before w_cmd, w_dot ~0, gap > threshold → CONTACT (gripper)
 - Arm disturbance during CLOSING: tau_ext_norm > theta → CONTACT (arm)
