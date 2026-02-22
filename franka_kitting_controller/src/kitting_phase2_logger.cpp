@@ -244,9 +244,10 @@ void KittingPhase2Logger::startTrial() {
     return;
   }
 
-  // Timestamp
+  // Timestamp (localtime_r is thread-safe, unlike std::localtime)
   auto now = std::time(nullptr);
-  auto tm = *std::localtime(&now);
+  struct tm tm;
+  localtime_r(&now, &tm);
   std::ostringstream ts;
   ts << std::put_time(&tm, "%Y%m%d_%H%M%S");
   start_time_str_ = ts.str();
@@ -291,9 +292,10 @@ void KittingPhase2Logger::stopTrial() {
 
   is_recording_ = false;
 
-  // Record stop timestamp
+  // Record stop timestamp (localtime_r is thread-safe)
   auto now = std::time(nullptr);
-  auto tm = *std::localtime(&now);
+  struct tm tm;
+  localtime_r(&now, &tm);
   std::ostringstream ts;
   ts << std::put_time(&tm, "%Y%m%d_%H%M%S");
   stop_time_str_ = ts.str();

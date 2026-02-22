@@ -26,7 +26,7 @@ constexpr double KittingStateController::kGripperHoldBase;
 constexpr double KittingStateController::kGripperHoldSlope;
 constexpr double KittingStateController::kMaxUpliftDistance;
 
-std::string KittingStateController::phaseToString(GraspPhase phase) {
+const char* KittingStateController::phaseToString(GraspPhase phase) {
   switch (phase) {
     case GraspPhase::START:
       return "START";
@@ -151,6 +151,16 @@ void KittingStateController::gripperReadLoop() {
           ROS_WARN_STREAM("KittingStateController: stop() failed: " << ex.what());
         }
         stop_requested_.store(false, std::memory_order_relaxed);
+      }
+
+      // Publish baseline statistics to parameter server (deferred from RT thread).
+      // The acquire-load ensures we see the baseline_mu_/sigma_/threshold_ values
+      // written by the RT thread before its release-store of this flag.
+      if (baseline_params_pending_.load(std::memory_order_acquire)) {
+        ros::param::set("/kitting_state_controller/baseline_mu", baseline_mu_);
+        ros::param::set("/kitting_state_controller/baseline_sigma", baseline_sigma_);
+        ros::param::set("/kitting_state_controller/contact_threshold", contact_threshold_);
+        baseline_params_pending_.store(false, std::memory_order_relaxed);
       }
     } catch (const franka::Exception& ex) {
       ROS_ERROR_STREAM_THROTTLE(1.0, "KittingStateController: readOnce() failed: " << ex.what());
@@ -680,7 +690,7 @@ void KittingStateController::applyPendingPhaseTransition() {
     prev_tau_ext_valid_ = false;
     gripper_stall_active_ = false;
     gripper_stop_sent_ = false;
-    contact_source_.clear();
+    contact_source_ = "";
     uplift_active_.store(false, std::memory_order_relaxed);
     uplift_elapsed_ = 0.0;
   }
@@ -692,7 +702,7 @@ void KittingStateController::applyPendingPhaseTransition() {
     rt_T_hold_gripper_ = computeGripperHoldTime(rt_closing_v_cmd_);
     gripper_stall_active_ = false;
     gripper_stop_sent_ = false;
-    contact_source_.clear();
+    contact_source_ = "";
     ROS_INFO("  [CLOSING]  T_hold_gripper=%.3fs (from speed=%.4f m/s)",
              rt_T_hold_gripper_, rt_closing_v_cmd_);
   }
@@ -758,10 +768,9 @@ void KittingStateController::runContactDetection(const ros::Time& time,
         contact_threshold_ = baseline_mu_ + k_sigma_ * baseline_sigma_;
         baseline_armed_ = true;
 
-        // Publish to param server so the logger can include in metadata
-        ros::param::set("/kitting_state_controller/baseline_mu", baseline_mu_);
-        ros::param::set("/kitting_state_controller/baseline_sigma", baseline_sigma_);
-        ros::param::set("/kitting_state_controller/contact_threshold", contact_threshold_);
+        // Signal the gripper read thread to publish baseline params (RT-safe: atomic store only).
+        // The actual ros::param::set() calls happen in gripperReadLoop() (non-RT).
+        baseline_params_pending_.store(true, std::memory_order_release);
 
         ROS_INFO_STREAM("KittingStateController: Baseline computed | N=" << baseline_n_
                         << " mu=" << baseline_mu_ << " sigma=" << baseline_sigma_

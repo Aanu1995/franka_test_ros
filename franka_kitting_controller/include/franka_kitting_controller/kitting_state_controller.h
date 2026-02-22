@@ -202,6 +202,7 @@ class KittingStateController
   double baseline_mu_{0.0};
   double baseline_sigma_{0.0};
   double contact_threshold_{0.0};  // theta = mu + k * sigma
+  std::atomic<bool> baseline_params_pending_{false};  // RT → read thread: publish params
 
   // Arm debounce state
   ros::Time exceed_start_time_;
@@ -211,7 +212,7 @@ class KittingStateController
   ros::Time gripper_stall_start_time_;
   bool gripper_stall_active_{false};
   bool gripper_stop_sent_{false};
-  std::string contact_source_;  // "ARM" or "GRIPPER" — records which detector fired
+  const char* contact_source_{""};  // "ARM" or "GRIPPER" — records which detector fired (RT-safe)
 
   // RT-local copies of CLOSING command parameters — snapshotted when CLOSING begins.
   // Written by subscriber (stateCmdCallback) via release/acquire on phase_changed_.
@@ -267,8 +268,8 @@ class KittingStateController
   /// Publish a state label string exactly once per transition.
   void publishStateLabel(const std::string& label);
 
-  /// Convert enum to string.
-  static std::string phaseToString(GraspPhase phase);
+  /// Convert enum to string literal (RT-safe, no allocation).
+  static const char* phaseToString(GraspPhase phase);
 
   // --- update() decomposition helpers (RT-safe, no locks, no allocation) ---
 
