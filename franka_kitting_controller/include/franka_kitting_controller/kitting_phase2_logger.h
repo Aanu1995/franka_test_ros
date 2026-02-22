@@ -54,7 +54,7 @@ class KittingPhase2Logger {
 
   // Detector params (read from parameter server for metadata)
   double T_base_, k_sigma_, slope_dt_, slope_min_;
-  double T_hold_arm_, T_hold_gripper_;
+  double T_hold_arm_;
   double stall_velocity_threshold_, width_gap_threshold_;
   int N_min_;
   bool use_slope_gate_, enable_arm_contact_, enable_gripper_contact_;

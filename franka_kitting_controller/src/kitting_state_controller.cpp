@@ -65,6 +65,11 @@ void KittingStateController::requestGripperStop(const char* source) {
   }
 }
 
+double KittingStateController::computeGripperHoldTime(double closing_speed) {
+  double clamped = std::min(std::max(closing_speed, 0.0), kMaxClosingSpeed);
+  return kGripperHoldBase + kGripperHoldSlope * clamped;
+}
+
 void KittingStateController::loggerReadyCallback(const std_msgs::Bool::ConstPtr& msg) {
   // Only accept if the logger publisher is actually alive right now.
   // A stale latched message from a previous logger run will still trigger this
@@ -297,6 +302,13 @@ void KittingStateController::stateCmdCallback(
     double width = (msg->closing_width > 0.0) ? msg->closing_width : closing_width_;
     double speed = (msg->closing_speed > 0.0) ? msg->closing_speed : closing_speed_;
 
+    // Clamp closing speed to safety limit
+    if (speed > kMaxClosingSpeed) {
+      ROS_WARN("KittingStateController: closing_speed %.4f exceeds max %.4f, clamping",
+               speed, kMaxClosingSpeed);
+      speed = kMaxClosingSpeed;
+    }
+
     // Queue gripper move command (non-blocking — executed by command thread)
     if (execute_gripper_actions_) {
       GripperCommand gripper_cmd;
@@ -446,7 +458,6 @@ bool KittingStateController::init(hardware_interface::RobotHW* robot_hw,
   // --- Gripper contact detection parameters ---
   node_handle.param("stall_velocity_threshold", stall_velocity_threshold_, 0.005);
   node_handle.param("width_gap_threshold", width_gap_threshold_, 0.002);
-  node_handle.param("T_hold_gripper", T_hold_gripper_, 0.10);
   node_handle.param("stop_on_contact", stop_on_contact_, true);
   node_handle.param("enable_arm_contact", enable_arm_contact_, true);
   node_handle.param("enable_gripper_contact", enable_gripper_contact_, true);
@@ -458,13 +469,18 @@ bool KittingStateController::init(hardware_interface::RobotHW* robot_hw,
                    << " k_sigma=" << k_sigma_ << " T_hold_arm=" << T_hold_arm_
                    << " | GRIPPER: " << (enable_gripper_contact_ ? "ON" : "OFF")
                    << " stall_vel=" << stall_velocity_threshold_
-                   << " gap=" << width_gap_threshold_ << " T_hold_grip=" << T_hold_gripper_
+                   << " gap=" << width_gap_threshold_ << " T_hold_grip=dynamic(speed)"
                    << " | stop_on_contact=" << (stop_on_contact_ ? "true" : "false"));
 
   // --- Phase 2: Gripper default parameters (overridable per-command via KittingGripperCommand) ---
   node_handle.param("execute_gripper_actions", execute_gripper_actions_, true);
   node_handle.param("closing_width", closing_width_, 0.04);
   node_handle.param("closing_speed", closing_speed_, 0.04);
+  if (closing_speed_ > kMaxClosingSpeed) {
+    ROS_WARN("KittingStateController: closing_speed %.4f exceeds max %.4f, clamping",
+             closing_speed_, kMaxClosingSpeed);
+    closing_speed_ = kMaxClosingSpeed;
+  }
   node_handle.param("grasp_width", grasp_width_, 0.02);
   node_handle.param("epsilon_inner", epsilon_inner_, 0.005);
   node_handle.param("epsilon_outer", epsilon_outer_, 0.005);
@@ -666,9 +682,12 @@ void KittingStateController::applyPendingPhaseTransition() {
   if (new_phase == GraspPhase::CLOSING) {
     rt_closing_w_cmd_ = closing_w_cmd_;
     rt_closing_v_cmd_ = closing_v_cmd_;
+    rt_T_hold_gripper_ = computeGripperHoldTime(rt_closing_v_cmd_);
     gripper_stall_active_ = false;
     gripper_stop_sent_ = false;
     contact_source_.clear();
+    ROS_INFO("  [CLOSING]  T_hold_gripper=%.3fs (from speed=%.4f m/s)",
+             rt_T_hold_gripper_, rt_closing_v_cmd_);
   }
 
   // Handle UPLIFT start: capture current desired pose, snapshot params, reset timer
@@ -810,14 +829,14 @@ void KittingStateController::runContactDetection(const ros::Time& time,
       bool width_gap_exists = ((w - rt_closing_w_cmd_) > width_gap_threshold_);
       bool stall_detected = velocity_stalled && width_gap_exists;
 
-      // Debounce: require sustained stall for T_hold_gripper seconds
+      // Debounce: require sustained stall for rt_T_hold_gripper_ seconds (speed-dependent)
       if (stall_detected) {
         if (!gripper_stall_active_) {
           gripper_stall_active_ = true;
           gripper_stall_start_time_ = time;
         } else {
           double hold_elapsed = (time - gripper_stall_start_time_).toSec();
-          if (hold_elapsed >= T_hold_gripper_) {
+          if (hold_elapsed >= rt_T_hold_gripper_) {
             contact_latched_ = true;
             contact_source_ = "GRIPPER";
             current_phase_.store(GraspPhase::CONTACT, std::memory_order_relaxed);

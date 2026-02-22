@@ -189,7 +189,6 @@ class KittingStateController
   // --- Gripper contact detection parameters ---
   double stall_velocity_threshold_{0.005};  // [m/s] Speed below this = stalled
   double width_gap_threshold_{0.002};       // [m] Min gap: (w - w_cmd) > this
-  double T_hold_gripper_{0.10};             // [s] Gripper stall debounce time
   bool stop_on_contact_{true};              // Call stop() on contact
 
   // Baseline statistics (computed during BASELINE phase)
@@ -220,6 +219,7 @@ class KittingStateController
   double closing_v_cmd_{0.04};     // Resolved speed for active MoveAction
   double rt_closing_w_cmd_{0.04};  // RT-local copy
   double rt_closing_v_cmd_{0.04};  // RT-local copy
+  double rt_T_hold_gripper_{0.35}; // Computed from rt_closing_v_cmd_ when CLOSING starts
 
   // Slope gate state
   double prev_tau_ext_norm_{0.0};
@@ -250,6 +250,15 @@ class KittingStateController
   std::string uplift_reference_frame_{"world"};
   bool require_secure_grasp_{true};
   static constexpr double kMaxUpliftDistance{0.01};
+
+  // --- Closing speed safety limit + dynamic gripper hold time ---
+  static constexpr double kMaxClosingSpeed{0.10};    // [m/s] Hard cap on closing speed
+  static constexpr double kGripperHoldBase{0.35};     // [s] Hold time intercept at zero speed
+  static constexpr double kGripperHoldSlope{0.5};     // [s/(m/s)] Linear slope
+
+  /// Compute gripper stall debounce time from closing speed.
+  /// Formula: T_hold = 0.35 + 0.5 * clamp(speed, 0, 0.10)
+  static double computeGripperHoldTime(double closing_speed);
 
   /// Compute cosine-smoothed uplift pose for the current elapsed time.
   /// Uses rt_uplift_distance_ and rt_uplift_duration_ (RT-local copies).

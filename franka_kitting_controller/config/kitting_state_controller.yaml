@@ -16,7 +16,7 @@ kitting_state_controller:
   # Phase 2: Gripper contact detection parameters
   stall_velocity_threshold: 0.005 # [m/s] Speed below this = stalled
   width_gap_threshold: 0.002 # [m] Min gap: (w - w_cmd) > this to distinguish stall from completion
-  T_hold_gripper: 0.10 # [s] Gripper stall debounce hold time
+  # T_hold_gripper: computed dynamically as 0.35 + 0.5 * closing_speed (no config needed)
   stop_on_contact: true # Call gripper stop() on contact detection
   enable_arm_contact: true # Enable arm torque contact detector (requires enable_contact_detector)
   enable_gripper_contact: true # Enable gripper stall contact detector (requires enable_contact_detector)
