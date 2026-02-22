@@ -399,7 +399,7 @@ void KittingStateController::stateCmdCallback(
         current_phase_.load(std::memory_order_relaxed) != GraspPhase::SECURE_GRASP) {
       ROS_WARN("KittingStateController: UPLIFT rejected — require_secure_grasp is true "
                "but current state is %s (expected SECURE_GRASP)",
-               phaseToString(current_phase_.load(std::memory_order_relaxed)).c_str());
+               phaseToString(current_phase_.load(std::memory_order_relaxed)));
       return;
     }
 
@@ -983,7 +983,7 @@ void KittingStateController::update(const ros::Time& time, const ros::Duration& 
                  phase == GraspPhase::SECURE_GRASP ||
                  phase == GraspPhase::UPLIFT)) {
         ROS_INFO("  [SIGNAL]  %s  |  x(t)=%.4f  theta=%.4f  margin=+%.4f",
-                 phaseToString(phase).c_str(),
+                 phaseToString(phase),
                  tau_ext_norm, contact_threshold_,
                  tau_ext_norm - contact_threshold_);
       }
