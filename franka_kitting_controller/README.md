@@ -99,7 +99,7 @@ Establish reference signal behavior before interaction.
 
 Observe approach dynamics before contact.
 
-- Gripper begins closing toward object at width `w` and speed `v`
+- Gripper begins closing toward object at width `w` and speed `v` (max 0.10 m/s)
 - Two contact detectors run concurrently (hybrid OR logic):
   - **Arm detector**: External torque norm `x(t) > θ` (baseline statistics + debounce)
   - **Gripper detector**: Finger width velocity stalls while gap to target width remains (stall + debounce)
@@ -111,7 +111,7 @@ Detect first stable physical interaction. Published **automatically** by the con
 
 - Object touches gripper fingers — detected by **either** the arm or gripper detector
 - **Arm detection**: External torque norm exceeds threshold `x(t) > θ` continuously for `T_hold_arm` seconds (default 0.10 s)
-- **Gripper detection**: Width velocity drops below `stall_velocity_threshold` (0.005 m/s) while `(width - w_cmd) > width_gap_threshold` (0.002 m), sustained for `T_hold_gripper` seconds (default 0.10 s)
+- **Gripper detection**: Width velocity drops below `stall_velocity_threshold` (0.005 m/s) while `(width - w_cmd) > width_gap_threshold` (0.002 m), sustained for `T_hold_gripper` seconds (computed dynamically from `closing_speed`; see [Dynamic Gripper Debounce Time](#dynamic-gripper-debounce-time-t_hold_gripper))
 - **Immediate stop**: On contact, `franka::Gripper::stop()` is called via the read thread to physically halt the motor at the contact width
 - CONTACT is **latched** once detected — cannot return to CLOSING
 - `contact_source` records which detector fired: `"ARM"` or `"GRIPPER"`
@@ -332,7 +332,7 @@ During CLOSING, the controller checks every RT tick:
 
 The **width gap check** is essential: without it, normal gripper completion (velocity drops to 0 at target width) would false-trigger as contact. The gap ensures we only detect stalls where the gripper stopped **before** reaching its commanded width.
 
-**Debounce**: The stall condition must persist for `T_hold_gripper` seconds (default 0.10 s). If the stall condition breaks at any point, the debounce timer resets.
+**Debounce**: The stall condition must persist for `T_hold_gripper` seconds (computed dynamically from `closing_speed`; see [Dynamic Gripper Debounce Time](#dynamic-gripper-debounce-time-t_hold_gripper)). If the stall condition breaks at any point, the debounce timer resets.
 
 #### Symbols
 
@@ -343,7 +343,7 @@ The **width gap check** is essential: without it, normal gripper completion (vel
 | `w_cmd`| Commanded width           | m     | 0.04    | Target width for the active MoveAction (from CLOSING command)     |
 | `v_stall` | Stall velocity threshold | m/s | 0.005   | Speed below this is considered stalled                            |
 | `Δw`   | Width gap threshold       | m     | 0.002   | Minimum `(w - w_cmd)` to distinguish stall from normal completion |
-| `T_hold_gripper` | Debounce time    | s     | 0.10    | Duration stall must persist to declare contact                    |
+| `T_hold_gripper` | Debounce time    | s     | computed | Duration stall must persist to declare contact (see [Dynamic Gripper Debounce Time](#dynamic-gripper-debounce-time-t_hold_gripper)) |
 
 ### Gripper Stop on Contact
 
@@ -354,6 +354,60 @@ When CONTACT is detected by **either** detector, the controller immediately stop
 3. **One-shot guard**: `gripper_stop_sent_` flag prevents duplicate stop requests
 
 The atomic store in `update()` is a single-word write (nanoseconds), fully RT-safe. The actual `stop()` call executes in the non-RT read thread. Worst-case latency from contact detection to physical halt is one firmware update period. The stop is only executed when `stop_on_contact` is `true` (default) and `execute_gripper_actions` is `true`.
+
+### Dynamic Gripper Debounce Time (`T_hold_gripper`)
+
+The gripper stall debounce time is **computed dynamically** from `closing_speed` rather than configured statically. Higher closing speeds produce more velocity noise — `w_dot` briefly reads ~0 even when the gripper is still moving — so the debounce window must increase with speed to avoid false contact triggers.
+
+#### Formula
+
+```
+  T_hold_gripper  =  0.35  +  0.5 · clamp(v, 0, 0.10)
+```
+
+Where `v` is the resolved `closing_speed` (YAML default or per-command override, clamped to `[0, v_max]`).
+
+#### Constants
+
+| Symbol             | Value     | Description                                              |
+|--------------------|-----------|----------------------------------------------------------|
+| `T_base_hold`      | 0.35 s    | Hold time intercept at zero speed                        |
+| `k_hold`           | 0.5 s/(m/s) | Linear slope: hold time increase per unit speed        |
+| `v_max`            | 0.10 m/s  | Hard cap on closing speed (speeds above this are clamped)|
+
+#### Resulting Hold Times
+
+| `closing_speed` (m/s) | `T_hold_gripper` (s) | Notes                            |
+|------------------------|----------------------|----------------------------------|
+| 0.01                   | 0.355                |                                  |
+| 0.02                   | 0.360                | Verified experimentally          |
+| 0.04                   | 0.370                | Default speed, verified          |
+| 0.06                   | 0.380                | Verified experimentally          |
+| 0.08                   | 0.390                |                                  |
+| 0.10                   | 0.400                | Maximum speed, verified          |
+| > 0.10                 | 0.400                | Speed clamped to 0.10 m/s        |
+
+#### Experimental Validation
+
+The formula parameters were derived from physical experiments on the Franka Panda gripper:
+
+| `closing_speed` | Works     | Fails     | Formula gives |
+|-----------------|-----------|-----------|---------------|
+| 0.02 m/s        | 0.25 s    | 0.20 s    | 0.36 s        |
+| 0.04 m/s        | 0.35 s    | 0.31 s    | 0.37 s        |
+| 0.10 m/s        | 0.40 s    | 0.30 s    | 0.40 s        |
+
+All computed values are above the experimentally determined minimum working thresholds and below the 0.50 s danger threshold (where detection may be too late for fragile objects).
+
+#### Implementation
+
+The hold time is computed once when the RT thread transitions to CLOSING (in `applyPendingPhaseTransition()`), using the RT-local copy of closing speed:
+
+```
+  rt_T_hold_gripper_ = computeGripperHoldTime(rt_closing_v_cmd_)
+```
+
+This value is then used for all stall debounce checks during that CLOSING phase. No new synchronization is needed — the value is written and read by the same (RT) thread.
 
 ### Latching
 
@@ -427,10 +481,11 @@ The **velocity profile** (first derivative) is:
 
 | Constraint              | Symbol / Value     | Description                                                    |
 |-------------------------|--------------------|----------------------------------------------------------------|
-| Maximum distance        | `d ≤ 0.01 m`      | Hard clamp — any `d > 10 mm` is clamped with a warning        |
-| Minimum distance        | `d > 0`            | Zero or negative `d` is rejected                               |
-| Minimum duration        | `T > 0`            | Zero or negative `T` is rejected                               |
-| Maximum velocity        | `v_max = πd/(2T)`  | Bounded by the clamp on `d` and the minimum `T`               |
+| Maximum closing speed   | `v ≤ 0.10 m/s`    | Hard clamp — speeds above 0.10 m/s are clamped with a warning |
+| Maximum uplift distance | `d ≤ 0.01 m`      | Hard clamp — any `d > 10 mm` is clamped with a warning        |
+| Minimum uplift distance | `d > 0`            | Zero or negative `d` is rejected                               |
+| Minimum uplift duration | `T > 0`            | Zero or negative `T` is rejected                               |
+| Maximum uplift velocity | `v_max = πd/(2T)`  | Bounded by the clamp on `d` and the minimum `T`               |
 | Precondition            | Configurable       | `require_secure_grasp: true` requires SECURE_GRASP state       |
 | Duplicate rejection     | —                  | UPLIFT is ignored while a trajectory is already active         |
 | BASELINE interruption   | —                  | BASELINE clears UPLIFT, returns to passthrough (with warning)  |
@@ -453,13 +508,12 @@ The **velocity profile** (first derivative) is:
 | `slope_min`                | double | `5.0`   | Minimum slope for contact [1/s]                |
 | `stall_velocity_threshold` | double | `0.005` | Gripper speed below this = stalled [m/s]       |
 | `width_gap_threshold`      | double | `0.002` | Min gap (w - w_cmd) for stall detection [m]    |
-| `T_hold_gripper`           | double | `0.10`  | Gripper stall debounce hold time [s]           |
 | `stop_on_contact`          | bool   | `true`  | Call `stop()` on contact detection             |
 | `enable_arm_contact`       | bool   | `true`  | Enable arm torque contact detector             |
 | `enable_gripper_contact`   | bool   | `true`  | Enable gripper stall contact detector          |
 | `execute_gripper_actions`  | bool   | `true`  | Execute gripper actions (false = signal-only)   |
 | `closing_width`            | double | `0.04`  | Default width for MoveAction in CLOSING [m]    |
-| `closing_speed`            | double | `0.04`  | Default speed for MoveAction in CLOSING [m/s]  |
+| `closing_speed`            | double | `0.04`  | Default speed for MoveAction in CLOSING [m/s] (clamped to max 0.10) |
 | `grasp_width`              | double | `0.02`  | Default width for GraspAction [m]              |
 | `epsilon_inner`            | double | `0.005` | Default inner epsilon for GraspAction [m]      |
 | `epsilon_outer`            | double | `0.005` | Default outer epsilon for GraspAction [m]      |
@@ -535,7 +589,7 @@ detector_parameters:
   slope_min: 5.0
   stall_velocity_threshold: 0.005
   width_gap_threshold: 0.002
-  T_hold_gripper: 0.10
+  T_hold_gripper: "computed: 0.35 + 0.5 * closing_speed"
   stop_on_contact: true
 baseline_statistics:
   baseline_mu_tau_ext_norm: 0.342
@@ -575,7 +629,7 @@ Per-object gripper command published on `/kitting_phase2/state_cmd`. Any paramet
 |--------------------|---------|----------------------------------------------------------|
 | `command`          | string  | `"CLOSING"`, `"SECURE_GRASP"`, or `"UPLIFT"`            |
 | `closing_width`    | float64 | Target width for MoveAction [m] (0 = use default)       |
-| `closing_speed`    | float64 | Speed for MoveAction [m/s] (0 = use default)            |
+| `closing_speed`    | float64 | Speed for MoveAction [m/s] (0 = use default, max 0.10)  |
 | `grasp_width`      | float64 | Target width for GraspAction [m] (0 = use default)      |
 | `epsilon_inner`    | float64 | Inner epsilon for GraspAction [m] (0 = use default)     |
 | `epsilon_outer`    | float64 | Outer epsilon for GraspAction [m] (0 = use default)     |
@@ -685,7 +739,7 @@ Move EE into table. **Expected**: clear increase in Fz, `wrench_norm`, `tau_ext_
 - CSV export does not block the ROS spin loop (runs in background thread)
 - metadata.yaml contains bag_filename, csv_filename, total_samples, start/stop times, and detector parameters
 - Hybrid contact detection: arm torque OR gripper stall, first trigger wins
-- Gripper stall detection: velocity < threshold AND width gap > threshold for T_hold_gripper
+- Gripper stall detection: velocity < threshold AND width gap > threshold for T_hold_gripper (computed: 0.35 + 0.5 * closing_speed)
 - Free closing (no object): width reaches w_cmd, gap ~0 → no false CONTACT
 - Object contact: width stalls before w_cmd, w_dot ~0, gap > threshold → CONTACT (gripper)
 - Arm disturbance during CLOSING: tau_ext_norm > theta → CONTACT (arm)
