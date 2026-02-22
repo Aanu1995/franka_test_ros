@@ -178,7 +178,13 @@ void KittingStateController::gripperCommandLoop() {
                  cmd.width, cmd.speed, cmd.force, success ? "OK" : "FAIL");
       }
     } catch (const franka::Exception& ex) {
-      ROS_ERROR_STREAM("KittingStateController: Gripper command failed: " << ex.what());
+      // stop() aborts the in-flight move()/grasp(), which throws "command aborted".
+      // This is expected after contact detection — log as INFO, not ERROR.
+      if (gripper_stop_sent_) {
+        ROS_INFO("KittingStateController: Gripper command aborted by contact stop (expected)");
+      } else {
+        ROS_ERROR_STREAM("KittingStateController: Gripper command failed: " << ex.what());
+      }
     }
     cmd_executing_.store(false, std::memory_order_relaxed);
   }
@@ -946,6 +952,15 @@ void KittingStateController::update(const ros::Time& time, const ros::Duration& 
                  tau_ext_norm, contact_threshold_,
                  tau_ext_norm - contact_threshold_);
       }
+    }
+
+    // Gripper velocity logger — 10 Hz during CLOSING for speed profile debugging
+    if (phase == GraspPhase::CLOSING && gripper_log_trigger_()) {
+      ROS_INFO("  [GRIP]  w=%.5f  w_dot=%.6f m/s  gap=%.5f  %s",
+               gripper_snapshot.width,
+               gripper_snapshot.width_dot,
+               gripper_snapshot.width - rt_closing_w_cmd_,
+               (std::abs(gripper_snapshot.width_dot) < stall_velocity_threshold_) ? "SLOW" : "ok");
     }
 
     if (kitting_publisher_.trylock()) {

@@ -229,6 +229,9 @@ class KittingStateController
   // Slow-rate logger for contact signal monitoring (2 Hz — readable in terminal)
   franka_hw::TriggerRate signal_log_trigger_{2.0};
 
+  // Faster gripper velocity logger (10 Hz — for debugging gripper speed profile)
+  franka_hw::TriggerRate gripper_log_trigger_{10.0};
+
   // --- UPLIFT trajectory state (RT-thread owned, except uplift_active_) ---
   std::atomic<bool> uplift_active_{false};  // Read by subscriber (duplicate guard), written by RT
   double uplift_elapsed_{0.0};
