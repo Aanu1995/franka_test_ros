@@ -257,6 +257,33 @@ class KittingStateController
 
   /// Convert enum to string.
   static std::string phaseToString(GraspPhase phase);
+
+  // --- update() decomposition helpers (RT-safe, no locks, no allocation) ---
+
+  /// Apply a pending phase transition from the subscriber thread.
+  void applyPendingPhaseTransition();
+
+  /// Generate and send the Cartesian pose command for this tick (1kHz).
+  void updateCartesianCommand(const ros::Duration& period);
+
+  /// Run Phase 2 contact detection (BASELINE collection + CLOSING detectors).
+  void runContactDetection(const ros::Time& time,
+                           double tau_ext_norm,
+                           const GripperData& gripper_snapshot);
+
+  /// Populate KittingState message fields. Called inside trylock() guard.
+  void fillKittingStateMsg(const ros::Time& time,
+                           const franka::RobotState& robot_state,
+                           const std::array<double, 42>& jacobian,
+                           const std::array<double, 7>& gravity,
+                           const std::array<double, 7>& coriolis,
+                           const std::array<double, 6>& ee_velocity,
+                           double tau_ext_norm, double wrench_norm,
+                           const GripperData& gripper_snapshot,
+                           GraspPhase phase);
+
+  /// Request the read thread to call stop(). RT-safe (atomic store only).
+  void requestGripperStop(const char* source);
 };
 
 }  // namespace franka_kitting_controller

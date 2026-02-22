@@ -85,15 +85,20 @@ KittingPhase2Logger::KittingPhase2Logger()
         "/joint_states"};
   }
 
-  // Detector params for metadata
+  // Detector params for metadata (read from controller namespace)
   std::string ctrl_ns = "/kitting_state_controller/";
   nh_.param(ctrl_ns + "T_base", T_base_, 0.7);
   nh_.param(ctrl_ns + "N_min", N_min_, 50);
-  nh_.param(ctrl_ns + "k_sigma", k_sigma_, 5.0);
-  nh_.param(ctrl_ns + "T_hold", T_hold_, 0.12);
+  nh_.param(ctrl_ns + "k_sigma", k_sigma_, 3.0);
+  nh_.param(ctrl_ns + "T_hold_arm", T_hold_arm_, 0.10);
+  nh_.param(ctrl_ns + "T_hold_gripper", T_hold_gripper_, 0.10);
   nh_.param(ctrl_ns + "use_slope_gate", use_slope_gate_, false);
   nh_.param(ctrl_ns + "slope_dt", slope_dt_, 0.02);
   nh_.param(ctrl_ns + "slope_min", slope_min_, 5.0);
+  nh_.param(ctrl_ns + "stall_velocity_threshold", stall_velocity_threshold_, 0.005);
+  nh_.param(ctrl_ns + "width_gap_threshold", width_gap_threshold_, 0.002);
+  nh_.param(ctrl_ns + "enable_arm_contact", enable_arm_contact_, true);
+  nh_.param(ctrl_ns + "enable_gripper_contact", enable_gripper_contact_, true);
 
   // --- Subscribe to record control (STOP, ABORT) ---
   record_control_sub_ = nh_.subscribe(
@@ -191,6 +196,9 @@ void KittingPhase2Logger::topicCallback(
   if (is_recording_ && bag_) {
     try {
       bag_->write(topic, now, *msg);
+      if (topic == "/kitting_state_controller/kitting_state_data") {
+        total_samples_++;
+      }
     } catch (const rosbag::BagIOException& e) {
       ROS_ERROR_THROTTLE(1.0, "KittingPhase2Logger: Failed to write to bag: %s", e.what());
     }
@@ -243,6 +251,8 @@ void KittingPhase2Logger::startTrial() {
   std::ostringstream ts;
   ts << std::put_time(&tm, "%Y%m%d_%H%M%S");
   start_time_str_ = ts.str();
+
+  total_samples_ = 0;
 
   // Bag filename
   std::ostringstream bag_ss;
@@ -301,10 +311,14 @@ void KittingPhase2Logger::stopTrial() {
   ROS_INFO("KittingPhase2Logger: Recording stopped (trial %d) -> %s",
            trial_number_, trial_dir_.c_str());
 
-  // Launch CSV export in background thread (non-blocking)
+  // Launch CSV export in background thread (non-blocking, joined on shutdown)
   if (export_csv_on_stop_) {
+    if (csv_export_thread_.joinable()) {
+      csv_export_thread_.join();
+    }
     std::string bag_path_copy = bag_path_;
-    std::thread(&KittingPhase2Logger::exportCsv, this, bag_path_copy, csv_path).detach();
+    csv_export_thread_ = std::thread(&KittingPhase2Logger::exportCsv, this,
+                                      bag_path_copy, csv_path);
   }
 }
 
@@ -364,10 +378,15 @@ void KittingPhase2Logger::writeMetadata() {
   f << "  T_base: " << T_base_ << "\n";
   f << "  N_min: " << N_min_ << "\n";
   f << "  k_sigma: " << k_sigma_ << "\n";
-  f << "  T_hold: " << T_hold_ << "\n";
+  f << "  T_hold_arm: " << T_hold_arm_ << "\n";
+  f << "  T_hold_gripper: " << T_hold_gripper_ << "\n";
   f << "  use_slope_gate: " << (use_slope_gate_ ? "true" : "false") << "\n";
   f << "  slope_dt: " << slope_dt_ << "\n";
   f << "  slope_min: " << slope_min_ << "\n";
+  f << "  enable_arm_contact: " << (enable_arm_contact_ ? "true" : "false") << "\n";
+  f << "  enable_gripper_contact: " << (enable_gripper_contact_ ? "true" : "false") << "\n";
+  f << "  stall_velocity_threshold: " << stall_velocity_threshold_ << "\n";
+  f << "  width_gap_threshold: " << width_gap_threshold_ << "\n";
 
   double mu = 0, sigma = 0, theta = 0;
   bool has_mu = nh_.getParam("/kitting_state_controller/baseline_mu", mu);
@@ -422,6 +441,8 @@ void KittingPhase2Logger::exportCsv(const std::string& bag_path,
     csv << ",ee_vx,ee_vy,ee_vz,ee_wx,ee_wy,ee_wz";
     for (int i = 1; i <= 7; ++i) csv << ",gravity_" << i;
     for (int i = 1; i <= 7; ++i) csv << ",coriolis_" << i;
+    csv << ",gripper_width,gripper_width_dot,gripper_width_cmd"
+           ",gripper_max_width,gripper_is_grasped";
     csv << "\n";
 
     // Set high precision for floating point
@@ -475,6 +496,13 @@ void KittingPhase2Logger::exportCsv(const std::string& bag_path,
         // coriolis[7]
         for (size_t i = 0; i < 7; ++i) csv << "," << ks->coriolis[i];
 
+        // gripper state
+        csv << "," << ks->gripper_width
+            << "," << ks->gripper_width_dot
+            << "," << ks->gripper_width_cmd
+            << "," << ks->gripper_max_width
+            << "," << (ks->gripper_is_grasped ? 1 : 0);
+
         csv << "\n";
         sample_count++;
       }
@@ -482,9 +510,6 @@ void KittingPhase2Logger::exportCsv(const std::string& bag_path,
 
     csv.close();
     bag.close();
-
-    // Update total_samples_ (safe: metadata already written, this is informational)
-    total_samples_ = sample_count;
 
     ROS_INFO("KittingPhase2Logger: CSV export complete | %d samples -> %s",
              sample_count, csv_path.c_str());
@@ -497,10 +522,16 @@ void KittingPhase2Logger::exportCsv(const std::string& bag_path,
 }
 
 void KittingPhase2Logger::onShutdown() {
-  std::lock_guard<std::mutex> lock(trial_mutex_);
-  if (is_recording_) {
-    ROS_INFO("KittingPhase2Logger: Shutdown - saving trial %d", trial_number_);
-    stopTrial();
+  {
+    std::lock_guard<std::mutex> lock(trial_mutex_);
+    if (is_recording_) {
+      ROS_INFO("KittingPhase2Logger: Shutdown - saving trial %d", trial_number_);
+      stopTrial();
+    }
+  }
+  // Join outside mutex — exportCsv doesn't need trial_mutex_
+  if (csv_export_thread_.joinable()) {
+    csv_export_thread_.join();
   }
 }
 
