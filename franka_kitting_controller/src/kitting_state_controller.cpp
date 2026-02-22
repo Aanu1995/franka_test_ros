@@ -19,6 +19,13 @@
 
 namespace franka_kitting_controller {
 
+// C++14 requires out-of-line definitions for static constexpr members
+// that are ODR-used (e.g. passed by reference to std::min/std::max).
+constexpr double KittingStateController::kMaxClosingSpeed;
+constexpr double KittingStateController::kGripperHoldBase;
+constexpr double KittingStateController::kGripperHoldSlope;
+constexpr double KittingStateController::kMaxUpliftDistance;
+
 std::string KittingStateController::phaseToString(GraspPhase phase) {
   switch (phase) {
     case GraspPhase::START:
