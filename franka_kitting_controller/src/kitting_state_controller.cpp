@@ -88,6 +88,17 @@ void KittingStateController::loggerReadyCallback(const std_msgs::Bool::ConstPtr&
       ROS_INFO("============================================================");
       ROS_INFO("  [READY]  Phase 2 logger detected — commands now accepted");
       ROS_INFO("============================================================");
+
+      // Auto-open gripper to prepare for new trial
+      if (execute_gripper_actions_) {
+        double max_w = gripper_data_buf_.readFromNonRT()->max_width;
+        GripperCommand open_cmd;
+        open_cmd.type = GripperCommandType::MOVE;
+        open_cmd.width = max_w;
+        open_cmd.speed = 0.1;
+        queueGripperCommand(open_cmd);
+        ROS_INFO("  [GRIPPER]  Auto-open queued: move(width=%.4f, speed=0.1)", max_w);
+      }
     }
   }
 }

@@ -14,16 +14,16 @@ kitting_state_controller:
   slope_min: 5.0 # Minimum slope for contact [1/s]
 
   # Phase 2: Gripper contact detection parameters
-  stall_velocity_threshold: 0.005 # [m/s] Speed below this = stalled
+  stall_velocity_threshold: 0.008 # [m/s] Speed below this = stalled
   width_gap_threshold: 0.002 # [m] Min gap: (w - w_cmd) > this to distinguish stall from completion
   # T_hold_gripper: computed dynamically as 0.35 + 0.5 * closing_speed (no config needed)
   stop_on_contact: true # Call gripper stop() on contact detection
-  enable_arm_contact: true # Enable arm torque contact detector (requires enable_contact_detector)
+  enable_arm_contact: false # Enable arm torque contact detector (requires enable_contact_detector)
   enable_gripper_contact: true # Enable gripper stall contact detector (requires enable_contact_detector)
 
   # Phase 2: Gripper default parameters (overridable per-command via KittingGripperCommand)
   execute_gripper_actions: true # Set false for signal-only testing mode
-  closing_width: 0.04 # [m] Default width for MoveAction in CLOSING
+  closing_width: 0.01 # [m] Default width for MoveAction in CLOSING
   closing_speed: 0.04 # [m/s] Default speed for MoveAction in CLOSING
   grasp_width: 0.02 # [m] Default width for GraspAction in SECURE_GRASP
   epsilon_inner: 0.005 # [m] Default inner epsilon for GraspAction
