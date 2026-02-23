@@ -363,11 +363,6 @@ void KittingStateController::stateCmdCallback(
     ROS_INFO("============================================================");
 
   } else if (cmd == "SECURE_GRASP") {
-    if (current_phase_.load(std::memory_order_relaxed) == GraspPhase::SECURE_GRASP) {
-      ROS_DEBUG("KittingStateController: Already in SECURE_GRASP, ignoring duplicate");
-      return;
-    }
-
     // Resolve per-command parameters (0 = use YAML default)
     double width = (msg->grasp_width > 0.0) ? msg->grasp_width : grasp_width_;
     double eps_in = (msg->epsilon_inner > 0.0) ? msg->epsilon_inner : epsilon_inner_;
@@ -399,19 +394,21 @@ void KittingStateController::stateCmdCallback(
     ROS_INFO("============================================================");
 
   } else if (cmd == "UPLIFT") {
-    // --- Precondition: ignore if already executing UPLIFT ---
-    if (uplift_active_.load(std::memory_order_relaxed)) {
-      ROS_DEBUG("KittingStateController: UPLIFT already active, ignoring duplicate");
-      return;
+    // --- Precondition: require SECURE_GRASP or UPLIFT state if configured ---
+    if (require_secure_grasp_) {
+      GraspPhase cur = current_phase_.load(std::memory_order_relaxed);
+      if (cur != GraspPhase::SECURE_GRASP && cur != GraspPhase::UPLIFT) {
+        ROS_WARN("KittingStateController: UPLIFT rejected — require_secure_grasp is true "
+                 "but current state is %s (expected SECURE_GRASP or UPLIFT)",
+                 phaseToString(cur));
+        return;
+      }
     }
 
-    // --- Precondition: require SECURE_GRASP state if configured ---
-    if (require_secure_grasp_ &&
-        current_phase_.load(std::memory_order_relaxed) != GraspPhase::SECURE_GRASP) {
-      ROS_WARN("KittingStateController: UPLIFT rejected — require_secure_grasp is true "
-               "but current state is %s (expected SECURE_GRASP)",
-               phaseToString(current_phase_.load(std::memory_order_relaxed)));
-      return;
+    // If UPLIFT is already active, stop current trajectory so it restarts from current position
+    if (uplift_active_.load(std::memory_order_relaxed)) {
+      uplift_active_.store(false, std::memory_order_relaxed);
+      ROS_INFO("KittingStateController: Restarting UPLIFT from current position");
     }
 
     // --- Resolve per-command parameters (0 = use YAML default) ---
@@ -718,9 +715,8 @@ void KittingStateController::applyPendingPhaseTransition() {
              rt_T_hold_gripper_, rt_closing_v_cmd_);
   }
 
-  // Handle UPLIFT start: capture current desired pose, snapshot params, reset timer
-  if (new_phase == GraspPhase::UPLIFT &&
-      !uplift_active_.load(std::memory_order_relaxed)) {
+  // Handle UPLIFT start (or restart): capture current desired pose, snapshot params, reset timer
+  if (new_phase == GraspPhase::UPLIFT) {
     uplift_start_pose_ = cartesian_pose_handle_->getRobotState().O_T_EE_d;
     uplift_z_start_ = uplift_start_pose_[14];
     uplift_elapsed_ = 0.0;

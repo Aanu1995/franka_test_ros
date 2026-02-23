@@ -126,6 +126,7 @@ Characterize stable object compression.
 - Gripper applies force `F` via GraspAction to width `w` with tolerance `ε_inner`/`ε_outer`
 - External torque `x(t)` stabilizes with reduced variance compared to CONTACT transient
 - Stable force distribution indicates object is securely held
+- **Repeatable**: Can be re-sent with different parameters (e.g., higher force) — each command queues a new grasp action
 
 ### UPLIFT
 
@@ -136,6 +137,7 @@ Validate grasp robustness under load. The **controller internally executes** a s
 - Only z-translation of `O_T_EE_d[14]` is modified — orientation and x/y unchanged
 - Object weight transfers to gripper; `x(t)` shows predictable change if grasp is secure
 - Parameters `d` and `T` configurable via YAML defaults or per-command overrides
+- **Repeatable**: Can be re-sent with different parameters (e.g., greater distance) — restarts the trajectory from the current position
 
 ### Topics
 
@@ -490,8 +492,7 @@ The **velocity profile** (first derivative) is:
 | Minimum uplift distance | `d > 0`           | Zero or negative `d` is rejected                              |
 | Minimum uplift duration | `T > 0`           | Zero or negative `T` is rejected                              |
 | Maximum uplift velocity | `v_max = πd/(2T)` | Bounded by the clamp on `d` and the minimum `T`               |
-| Precondition            | Configurable      | `require_secure_grasp: true` requires SECURE_GRASP state      |
-| Duplicate rejection     | —                 | UPLIFT is ignored while a trajectory is already active        |
+| Precondition            | Configurable      | `require_secure_grasp: true` requires SECURE_GRASP or UPLIFT state |
 | BASELINE interruption   | —                 | BASELINE clears UPLIFT, returns to passthrough (with warning) |
 
 ## Configuration
@@ -757,13 +758,14 @@ Move EE into table. **Expected**: clear increase in Fz, `wrench_norm`, `tau_ext_
 - Publishing UPLIFT on `state_cmd` triggers internal Cartesian micro-lift + state label
 - UPLIFT moves robot upward by `uplift_distance` over `uplift_duration` with cosine smoothing
 - UPLIFT orientation remains unchanged throughout the motion
-- UPLIFT is rejected if `require_secure_grasp` is true and current state is not SECURE_GRASP
+- UPLIFT is rejected if `require_secure_grasp` is true and current state is not SECURE_GRASP or UPLIFT
 - UPLIFT distance is clamped to 10 mm maximum (with warning)
-- Duplicate UPLIFT commands are ignored while UPLIFT is active
+- Repeat UPLIFT restarts trajectory from current position with new parameters
 - BASELINE during UPLIFT clears the active motion and returns to passthrough
 - Per-command gripper/UPLIFT parameters override YAML defaults when non-zero
 - Parameters left at 0.0 fall back to YAML config values
-- Duplicate CLOSING/SECURE_GRASP commands are ignored
+- Duplicate CLOSING commands are ignored
+- SECURE_GRASP and UPLIFT commands can be re-sent with new parameters (e.g., higher force or greater distance)
 - Controller holds position (passthrough) when not executing UPLIFT — no drift or jerk
 - Gripper connection failure at init returns false (controller not loaded)
 - Controller destructor joins gripper threads cleanly on unload
