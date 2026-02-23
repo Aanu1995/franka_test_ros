@@ -523,7 +523,7 @@ bool KittingStateController::init(hardware_interface::RobotHW* robot_hw,
   node_handle.param("f_max", fr_f_max_, 15.0);
   node_handle.param("uplift_distance", fr_uplift_distance_, 0.003);
   node_handle.param("lift_speed", fr_lift_speed_, 0.01);
-  node_handle.param("uplift_hold", fr_uplift_hold_, 0.5);
+  node_handle.param("uplift_hold", fr_uplift_hold_, 0.6);
   node_handle.param("grasp_speed", fr_grasp_speed_, 0.02);
   node_handle.param("epsilon", fr_epsilon_, 0.008);
   node_handle.param("stabilization", fr_stabilization_, 0.3);
@@ -567,8 +567,8 @@ bool KittingStateController::init(hardware_interface::RobotHW* robot_hw,
                    << " speed=" << fr_lift_speed_ << " hold=" << fr_uplift_hold_
                    << " | grasp: speed=" << fr_grasp_speed_ << " eps=" << fr_epsilon_
                    << " | stab=" << fr_stabilization_
-                   << " | slip: tau_drop=" << fr_slip_tau_drop_
-                   << " width_change=" << fr_slip_width_change_);
+                   << " | slip: drop_thresh=" << fr_slip_tau_drop_
+                   << " width_thresh=" << fr_slip_width_change_);
 
   // --- Direct gripper connection via libfranka ---
   if (execute_gripper_actions_) {
@@ -1009,19 +1009,21 @@ void KittingStateController::fillKittingStateMsg(
 
 void KittingStateController::runInternalTransitions(const ros::Time& time,
                                                      double tau_ext_norm,
+                                                     double wrench_norm,
                                                      const GripperData& gripper_snapshot) {
   switch (current_state_.load(std::memory_order_relaxed)) {
-    case GraspState::GRASPING:  tickGrasping(time, tau_ext_norm, gripper_snapshot); break;
-    case GraspState::UPLIFT:    tickUplift(time, tau_ext_norm, gripper_snapshot);   break;
-    case GraspState::EVALUATE:  tickEvaluate(time, tau_ext_norm, gripper_snapshot); break;
-    case GraspState::DOWNLIFT:  tickDownlift(time, tau_ext_norm, gripper_snapshot); break;
-    case GraspState::SETTLING:  tickSettling(time, tau_ext_norm, gripper_snapshot); break;
+    case GraspState::GRASPING:  tickGrasping(time, tau_ext_norm, wrench_norm, gripper_snapshot); break;
+    case GraspState::UPLIFT:    tickUplift(time, tau_ext_norm, wrench_norm, gripper_snapshot);   break;
+    case GraspState::EVALUATE:  tickEvaluate(time, tau_ext_norm, wrench_norm, gripper_snapshot); break;
+    case GraspState::DOWNLIFT:  tickDownlift(time, tau_ext_norm, wrench_norm, gripper_snapshot); break;
+    case GraspState::SETTLING:  tickSettling(time, tau_ext_norm, wrench_norm, gripper_snapshot); break;
     default: break;
   }
 }
 
 void KittingStateController::tickGrasping(const ros::Time& time,
                                            double tau_ext_norm,
+                                           double wrench_norm,
                                            const GripperData& gripper_snapshot) {
   // First tick after entering GRASPING: initialize phase timer
   if (!fr_grasping_phase_initialized_) {
@@ -1063,19 +1065,24 @@ void KittingStateController::tickGrasping(const ros::Time& time,
     }
     fr_grasp_stabilizing_ = true;
     fr_grasp_stabilize_start_ = time;
+    fr_pre_sum_ = 0.0;
+    fr_pre_sum_sq_ = 0.0;
+    fr_pre_count_ = 0;
     return;
   }
 
-  // Step 3: Post-grasp stabilization delay
+  // Step 3: Post-grasp stabilization delay + W_pre accumulation
   double stab_elapsed = (time - fr_grasp_stabilize_start_).toSec();
+  fr_pre_sum_ += wrench_norm;
+  fr_pre_sum_sq_ += wrench_norm * wrench_norm;
+  fr_pre_count_++;
   if (stab_elapsed < rt_fr_stabilization_) {
     return;
   }
 
   ROS_INFO("    Grasp force applied: %.2f N (iteration %d)", fr_f_current_, fr_iteration_);
 
-  // Step 4: Record reference signals before UPLIFT
-  fr_tau_before_ = tau_ext_norm;
+  // Step 4: Record reference width before UPLIFT
   fr_width_before_uplift_ = gripper_snapshot.width;
 
   // Step 5: Initialize UPLIFT trajectory
@@ -1090,67 +1097,103 @@ void KittingStateController::tickGrasping(const ros::Time& time,
   current_state_.store(GraspState::UPLIFT, std::memory_order_relaxed);
   publishStateLabel("UPLIFT");
   logStateTransition("UPLIFT", "Micro-lift starting");
-  ROS_INFO("    iter=%d  F=%.1f N  tau_before=%.4f  width_before=%.4f  "
+  ROS_INFO("    iter=%d  F=%.1f N  width_before=%.4f  "
            "distance=%.4f  duration=%.2f",
-           fr_iteration_, fr_f_current_, fr_tau_before_, fr_width_before_uplift_,
+           fr_iteration_, fr_f_current_, fr_width_before_uplift_,
            rt_fr_uplift_distance_, rt_uplift_duration_);
 }
 
 void KittingStateController::tickUplift(const ros::Time& time,
-                                         double tau_ext_norm,
+                                         double /* tau_ext_norm */,
+                                         double /* wrench_norm */,
                                          const GripperData& gripper_snapshot) {
   if (uplift_active_.load(std::memory_order_relaxed)) {
     return;  // Trajectory still running
   }
 
   fr_phase_start_time_ = time;
-  fr_tau_min_during_ = tau_ext_norm;
+  fr_early_sum_ = 0.0;
+  fr_early_count_ = 0;
+  fr_late_sum_ = 0.0;
+  fr_late_count_ = 0;
   fr_max_width_during_eval_ = gripper_snapshot.width;
 
   current_state_.store(GraspState::EVALUATE, std::memory_order_relaxed);
   publishStateLabel("EVALUATE");
-  logStateTransition("EVALUATE", "Hold + slip detection");
-  ROS_INFO("    hold=%.2fs", rt_fr_uplift_hold_);
+  logStateTransition("EVALUATE", "Hold + load-transfer slip detection");
+  ROS_INFO("    early=0.3s  late=0.3s  (total hold=0.6s)  W_pre samples=%d", fr_pre_count_);
 }
 
 void KittingStateController::tickEvaluate(const ros::Time& time,
-                                           double tau_ext_norm,
+                                           double /* tau_ext_norm */,
+                                           double wrench_norm,
                                            const GripperData& gripper_snapshot) {
+  static constexpr double kEarlyEnd = 0.3;  // W_hold_early [0, 0.3) s
+  static constexpr double kLateEnd  = 0.6;  // W_hold_late  [0.3, 0.6) s
+
   double elapsed = (time - fr_phase_start_time_).toSec();
   double gw = gripper_snapshot.width;
 
-  // Continuously track slip signals during hold
-  if (tau_ext_norm < fr_tau_min_during_) {
-    fr_tau_min_during_ = tau_ext_norm;
-  }
+  // Track max gripper width over entire hold
   if (gw > fr_max_width_during_eval_) {
     fr_max_width_during_eval_ = gw;
   }
 
-  if (elapsed < rt_fr_uplift_hold_) {
-    return;  // Still in hold period
+  // Accumulate early window [0, 0.3)
+  if (elapsed < kEarlyEnd) {
+    fr_early_sum_ += wrench_norm;
+    fr_early_count_++;
+    return;
   }
 
-  // Evaluate immediately after hold
-  double tau_drop = 0.0;
-  if (fr_tau_before_ > 1e-6) {
-    tau_drop = (fr_tau_before_ - fr_tau_min_during_) / fr_tau_before_;
+  // Accumulate late window [0.3, 0.6)
+  if (elapsed < kLateEnd) {
+    fr_late_sum_ += wrench_norm;
+    fr_late_count_++;
+    return;
   }
+
+  // --- Compute metrics after both windows complete ---
+  double mu_pre = (fr_pre_count_ > 0) ? fr_pre_sum_ / fr_pre_count_ : 0.0;
+  double sigma_pre = 0.0;
+  if (fr_pre_count_ > 1) {
+    double var = fr_pre_sum_sq_ / fr_pre_count_ - mu_pre * mu_pre;
+    sigma_pre = std::sqrt(std::max(var, 0.0));
+  }
+  double mu_early = (fr_early_count_ > 0) ? fr_early_sum_ / fr_early_count_ : 0.0;
+  double mu_late  = (fr_late_count_ > 0)  ? fr_late_sum_ / fr_late_count_   : 0.0;
+
+  // Gate 1: Load transfer confirmation
+  double delta_F = mu_early - mu_pre;
+  bool load_transfer = delta_F > std::max(3.0 * sigma_pre, 1.0);
+
+  // Gate 2: Drop ratio
+  constexpr double kEpsilon = 1e-6;
+  double drop_ratio = (mu_early - mu_late) / std::max(mu_early, kEpsilon);
+
+  // Width change (existing criterion)
   double width_change = fr_max_width_during_eval_ - fr_width_before_uplift_;
 
-  bool slip = (tau_drop > rt_fr_slip_tau_drop_) ||
-              (width_change > rt_fr_slip_width_change_);
+  // Final decision: SECURE requires all gates pass
+  bool secure = load_transfer &&
+                (drop_ratio <= rt_fr_slip_tau_drop_) &&
+                (width_change <= rt_fr_slip_width_change_);
+  bool slip = !secure;
 
-  ROS_INFO("  [EVALUATE]  tau_drop=%.3f (thresh=%.3f)  width_change=%.4f (thresh=%.4f)  %s",
-           tau_drop, rt_fr_slip_tau_drop_, width_change, rt_fr_slip_width_change_,
-           slip ? "SLIP" : "STABLE");
+  ROS_INFO("  [EVALUATE]  mu_pre=%.3f  sigma_pre=%.3f  mu_early=%.3f  mu_late=%.3f  "
+           "delta_F=%.3f  load_xfer=%s  drop=%.3f (thresh=%.3f)  "
+           "width_change=%.4f (thresh=%.4f)  %s",
+           mu_pre, sigma_pre, mu_early, mu_late,
+           delta_F, load_transfer ? "YES" : "NO", drop_ratio, rt_fr_slip_tau_drop_,
+           width_change, rt_fr_slip_width_change_,
+           slip ? "SLIP" : "SECURE");
 
   if (!slip) {
     current_state_.store(GraspState::SUCCESS, std::memory_order_relaxed);
     publishStateLabel("SUCCESS");
-    logStateTransition("SUCCESS", "Stable grasp confirmed");
-    ROS_INFO("    F=%.1f N  iter=%d  tau_drop=%.3f  width_change=%.4f",
-             fr_f_current_, fr_iteration_, tau_drop, width_change);
+    logStateTransition("SUCCESS", "Secure grasp confirmed");
+    ROS_INFO("    F=%.1f N  iter=%d  delta_F=%.3f  drop=%.3f  width_change=%.4f",
+             fr_f_current_, fr_iteration_, delta_F, drop_ratio, width_change);
   } else {
     // Initialize DOWNLIFT trajectory
     downlift_start_pose_ = cartesian_pose_handle_->getRobotState().O_T_EE_d;
@@ -1163,13 +1206,15 @@ void KittingStateController::tickEvaluate(const ros::Time& time,
     current_state_.store(GraspState::DOWNLIFT, std::memory_order_relaxed);
     publishStateLabel("DOWNLIFT");
     logStateTransition("DOWNLIFT", "Returning before force increment");
-    ROS_INFO("    distance=%.4f m  duration=%.2f s",
+    ROS_INFO("    %s  distance=%.4f m  duration=%.2f s",
+             load_transfer ? "Drop detected" : "No load transfer",
              rt_downlift_distance_, rt_downlift_duration_);
   }
 }
 
 void KittingStateController::tickDownlift(const ros::Time& time,
                                            double /* tau_ext_norm */,
+                                           double /* wrench_norm */,
                                            const GripperData& /* gripper_snapshot */) {
   if (downlift_active_.load(std::memory_order_relaxed)) {
     return;  // Trajectory still running
@@ -1184,6 +1229,7 @@ void KittingStateController::tickDownlift(const ros::Time& time,
 
 void KittingStateController::tickSettling(const ros::Time& time,
                                            double /* tau_ext_norm */,
+                                           double /* wrench_norm */,
                                            const GripperData& /* gripper_snapshot */) {
   double elapsed = (time - fr_phase_start_time_).toSec();
   if (elapsed < rt_fr_stabilization_) {
@@ -1255,7 +1301,7 @@ void KittingStateController::update(const ros::Time& time, const ros::Duration& 
       if (fr_state == GraspState::GRASPING || fr_state == GraspState::UPLIFT ||
           fr_state == GraspState::EVALUATE || fr_state == GraspState::DOWNLIFT ||
           fr_state == GraspState::SETTLING) {
-        runInternalTransitions(time, tau_ext_norm, gripper_snapshot);
+        runInternalTransitions(time, tau_ext_norm, wrench_norm, gripper_snapshot);
       }
     }
 

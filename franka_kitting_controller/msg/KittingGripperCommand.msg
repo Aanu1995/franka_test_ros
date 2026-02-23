@@ -43,5 +43,5 @@ float64 fr_uplift_hold       # [s]   Hold at top; evaluation runs immediately af
 float64 fr_grasp_speed       # [m/s] Gripper speed for ramp grasps (0 = use default 0.02)
 float64 fr_epsilon           # [m]   Epsilon for ramp grasps, same for inner/outer (0 = use default 0.008)
 float64 fr_stabilization     # [s]   Post-grasp/post-downlift settle time (0 = use default 0.3)
-float64 fr_slip_tau_drop     # Fractional tau_ext_norm drop threshold (0 = use default 0.20)
+float64 fr_slip_tau_drop     # Drop ratio threshold (mu_early-mu_late)/mu_early (0 = use default 0.20)
 float64 fr_slip_width_change # [m]   Width change threshold for slip (0 = use default 0.001)

@@ -36,9 +36,9 @@ kitting_state_controller:
   f_max: 15.0 # [N] Maximum force (FAILED if exceeded)
   uplift_distance: 0.003 # [m] Micro-uplift distance per iteration
   lift_speed: 0.01 # [m/s] Lift speed for both UPLIFT and DOWNLIFT
-  uplift_hold: 0.5 # [s] Hold at top; evaluation performed immediately after
-  stabilization: 0.3 # [s] Post-grasp and post-downlift settle time
-  slip_tau_drop: 0.20 # Fractional tau_ext_norm drop threshold for slip
+  uplift_hold: 0.6 # [s] Hold at top; early (0–0.3s) + late (0.3–0.6s) windows
+  stabilization: 0.3 # [s] Post-grasp settle time (also W_pre window for slip baseline)
+  slip_tau_drop: 0.20 # Drop ratio threshold for slip (mu_early−mu_late)/mu_early
   slip_width_change: 0.001 # [m] Width change threshold for slip
 
   # Recording / Logger parameters (used by launch file, see kitting_state_controller.launch)

@@ -165,13 +165,13 @@ Validate grasp robustness under load. **Auto-triggered** by the controller after
 
 Assess grasp stability at the lifted position. **Auto-triggered** after UPLIFT completes.
 
-- Holds position for `fr_uplift_hold` seconds (default 0.5 s) while tracking slip signals
-- Continuously tracks minimum `tau_ext_norm` and maximum gripper width during hold
-- After hold, evaluates two slip criteria (OR logic):
-  - **Torque drop**: `(tau_before - tau_min_during) / tau_before > fr_slip_tau_drop` (default 0.20)
-  - **Width change**: `max_width_during - width_before > fr_slip_width_change` (default 0.001 m)
-- If **no slip**: transitions to SUCCESS (see [Slip Detection](#grasp-slip-detection) for formulas and decision logic)
-- If **slip detected**: transitions to DOWNLIFT to retry with higher force
+- Holds position for 0.6 s total: early window (0–0.3 s) + late window (0.3–0.6 s)
+- Uses `wrench_norm` (Cartesian external wrench) for load-transfer slip detection
+- Two-gate evaluation (see [Slip Detection](#grasp-slip-detection-load-transfer-drop-metric)):
+  - **Gate 1**: Load transfer confirmation — `delta_F > max(3*sigma_pre, 1.0)`
+  - **Gate 2**: Drop ratio + width change thresholds
+- If **secure** (both gates pass): transitions to SUCCESS
+- If **slip** (either gate fails): transitions to DOWNLIFT to retry with higher force
 
 ### DOWNLIFT
 
@@ -498,89 +498,132 @@ This value is then used for all stall debounce checks during that CLOSING state.
 
 Once CONTACT is declared by either detector, it is **latched** — both detectors stop evaluating. This prevents oscillation at the contact boundary. Restarting the controller is required to re-arm the detectors.
 
-## Grasp: Slip Detection
+## Grasp: Slip Detection (Load-Transfer Drop Metric)
 
-After each UPLIFT, the controller evaluates whether the object slipped during the lift. Two independent slip criteria are checked (OR logic) — if either triggers, the grasp is retried with higher force.
+After each UPLIFT, the controller evaluates grasp quality using a two-gate load-transfer approach. Uses `wrench_norm` (Cartesian external wrench norm, in Newtons) rather than joint torques for direct physical interpretability.
 
-### Reference Signals
+### Time Windows
 
-Just before UPLIFT begins (end of `tickGrasping()`), the controller records two reference values:
+The slip evaluation uses three time windows across the grasp-lift-hold sequence:
 
-| Symbol           | Description                                      | Source              |
-| ---------------- | ------------------------------------------------ | ------------------- |
-| `tau_before`     | External torque norm at the moment before lift    | `tau_ext_norm`      |
-| `width_before`   | Gripper finger width at the moment before lift    | `gripper_snapshot.width` |
-
-### Tracking During Hold
-
-During the `fr_uplift_hold` period (default 0.5 s) at the lifted position, the controller continuously tracks:
-
-| Symbol                | Description                                          |
-| --------------------- | ---------------------------------------------------- |
-| `tau_min_during`      | Minimum `tau_ext_norm` observed during the hold      |
-| `max_width_during`    | Maximum gripper width observed during the hold       |
-
-A dropping torque norm suggests the object is slipping (load decreasing). An increasing gripper width suggests the fingers are opening (object pushing them apart).
-
-### Slip Formulas
-
-After the hold period completes:
+| Window         | Duration | When                        | Signal           | Purpose                     |
+| -------------- | -------- | --------------------------- | ---------------- | --------------------------- |
+| **W_pre**      | 0.3 s    | Post-grasp stabilization    | `wrench_norm`    | Baseline before lift        |
+| **W_hold_early** | 0.3 s  | First 0.3 s of EVALUATE     | `wrench_norm`    | Loaded reference after lift |
+| **W_hold_late**  | 0.3 s  | Next 0.3 s of EVALUATE      | `wrench_norm`    | Late hold for drop check   |
 
 ```
-  tau_drop     = (tau_before - tau_min_during) / tau_before
-  width_change = max_width_during - width_before
-
-  slip = (tau_drop > fr_slip_tau_drop) OR (width_change > fr_slip_width_change)
+  GRASPING (stab.)       UPLIFT         EVALUATE (0.6 s hold)
+  ├── W_pre [0.3 s]      [lift]         ├── W_hold_early [0–0.3 s)
+  │   mu_pre, sigma_pre                 └── W_hold_late  [0.3–0.6 s)
+  │                                          mu_early, mu_late
 ```
 
-| Symbol                | Default | Description                                            |
-| --------------------- | ------- | ------------------------------------------------------ |
-| `fr_slip_tau_drop`    | 0.20    | Fractional torque drop threshold (0.20 = 20% drop)    |
-| `fr_slip_width_change`| 0.001 m | Gripper width increase threshold                       |
+### Gate 1: Load Transfer Confirmation
 
-### Decision
+Verify the object weight is actually on the gripper after lifting:
 
 ```
-  If slip  → DOWNLIFT → SETTLING → GRASPING (retry with F += f_step)
-  If stable → SUCCESS
+  mu_pre    = mean(wrench_norm over W_pre)
+  sigma_pre = std(wrench_norm over W_pre)
+  mu_early  = mean(wrench_norm over W_hold_early)
+
+  delta_F = mu_early - mu_pre
+
+  Load transfer confirmed if:  delta_F > max(3 * sigma_pre, 1.0)
 ```
+
+The `3 * sigma_pre` threshold adapts to sensor noise. The `1.0` N floor prevents declaring load transfer from noise alone. If load transfer is NOT confirmed, the grasp is treated as unstable (SLIP) regardless of the drop ratio.
+
+### Gate 2: Drop Ratio (Slip During Hold)
+
+If load transfer is confirmed, check whether the wrench dropped during the hold:
+
+```
+  mu_late = mean(wrench_norm over W_hold_late)
+
+  drop_ratio = (mu_early - mu_late) / max(mu_early, 1e-6)
+```
+
+A positive `drop_ratio` means the wrench decreased from the early to late window, suggesting the object is slipping out. Additionally, gripper width increase is tracked:
+
+```
+  width_change = max_width_during_hold - width_before_uplift
+```
+
+### Final Decision
+
+```
+  SECURE if:  load_transfer confirmed
+              AND drop_ratio <= fr_slip_tau_drop  (default 0.20)
+              AND width_change <= fr_slip_width_change  (default 0.001 m)
+
+  SLIP otherwise → DOWNLIFT → SETTLING → GRASPING (retry with F += f_step)
+```
+
+| Parameter              | Default | Description                                           |
+| ---------------------- | ------- | ----------------------------------------------------- |
+| `fr_slip_tau_drop`     | 0.20    | Drop ratio threshold (0.20 = 20% wrench drop)        |
+| `fr_slip_width_change` | 0.001 m | Gripper width increase threshold                      |
 
 ### Example Log Output
 
-After each evaluation, the controller logs the actual values vs thresholds:
+Secure grasp (load transfer confirmed, no drop):
 
 ```
-  Grasp force applied: 3.00 N (iteration 0)
-  ============================================================
-    [STATE]  >>  UPLIFT  <<  Micro-lift starting
-  ============================================================
-    [STATE]  >>  EVALUATE  <<  Hold + slip detection
-  [EVALUATE]  tau_drop=0.150 (thresh=0.200)  width_change=0.0003 (thresh=0.0010)  STABLE
-  ============================================================
-    [STATE]  >>  SUCCESS  <<  Stable grasp confirmed
-  ============================================================
+  [EVALUATE]  mu_pre=3.210  sigma_pre=0.142  mu_early=5.834  mu_late=5.712
+              delta_F=2.624  load_xfer=YES  drop=0.021 (thresh=0.200)
+              width_change=0.0002 (thresh=0.0010)  SECURE
 ```
 
-In this example:
-- `tau_drop=0.150` — torque norm dropped 15%, below the 20% threshold
-- `width_change=0.0003` — gripper opened 0.3 mm, below the 1.0 mm threshold
-- **Verdict: STABLE → SUCCESS**
+- `delta_F=2.624` > `max(3*0.142, 1.0)` = 1.0 → load transfer confirmed
+- `drop=0.021` (2.1%) < 0.20 → no significant drop
+- **Verdict: SECURE → SUCCESS**
 
-A slip example would show:
+Slip detected — load transferred but object slipped during hold:
 
 ```
-  [EVALUATE]  tau_drop=0.250 (thresh=0.200)  width_change=0.0012 (thresh=0.0010)  SLIP
-  ============================================================
-    [STATE]  >>  DOWNLIFT  <<  Returning before force increment
-  ============================================================
-    [STATE]  >>  SETTLING  <<  Post-downlift stabilization
-  Grasp force applied: 5.00 N (iteration 1)
-  ============================================================
-    [STATE]  >>  UPLIFT  <<  Micro-lift starting
-  ============================================================
+  [EVALUATE]  mu_pre=3.180  sigma_pre=0.138  mu_early=5.920  mu_late=4.510
+              delta_F=2.740  load_xfer=YES  drop=0.238 (thresh=0.200)
+              width_change=0.0014 (thresh=0.0010)  SLIP
 ```
 
-Here both criteria exceeded their thresholds (25% > 20%, 1.2 mm > 1.0 mm), so the controller retries with incremented force (3 + 2 = 5 N).
+- `delta_F=2.740` > `max(0.414, 1.0)` = 1.0 → load transfer confirmed (object was lifted)
+- `drop=0.238` (23.8%) > 0.20 → wrench dropped during hold (object sliding out)
+- `width_change=0.0014` > 0.001 → gripper opened 1.4 mm (fingers pushed apart)
+- **Verdict: SLIP → DOWNLIFT → retry with more force**
+
+Failed load transfer (object not lifted):
+
+```
+  [EVALUATE]  mu_pre=3.210  sigma_pre=0.142  mu_early=3.352  mu_late=3.298
+              delta_F=0.142  load_xfer=NO  drop=0.016 (thresh=0.200)
+              width_change=0.0001 (thresh=0.0010)  SLIP
+```
+
+- `delta_F=0.142` < `max(0.426, 1.0)` = 1.0 → load transfer NOT confirmed
+- Drop ratio and width are fine, but Gate 1 failed — object weight never appeared on the gripper
+- **Verdict: SLIP → DOWNLIFT → retry with more force**
+
+### How to Read the Log
+
+| Field | What it tells you |
+| ----- | ----------------- |
+| `mu_pre` | Baseline wrench at table level (before lift) |
+| `sigma_pre` | Sensor noise during baseline — higher means noisier signal |
+| `mu_early` | Wrench right after lift — should be much higher than `mu_pre` if object is lifted |
+| `mu_late` | Wrench later in hold — should stay close to `mu_early` if no slip |
+| `delta_F` | How much wrench increased from lift; must exceed `max(3*sigma_pre, 1.0)` |
+| `load_xfer` | YES/NO — did the object weight actually transfer to the gripper? |
+| `drop` | Fractional wrench decrease during hold; > 0.20 means slip |
+| `width_change` | How much the gripper opened during hold; > 0.001 m means slip |
+| `SECURE/SLIP` | Final verdict — SECURE needs all three checks to pass |
+
+**Quick diagnostic guide:**
+- `load_xfer=NO` → object not gripped or too light; increase force
+- `load_xfer=YES` + `drop > thresh` → object slipping out during hold; increase force
+- `load_xfer=YES` + `width_change > thresh` → fingers opening; increase force
+- `load_xfer=YES` + `drop` and `width` both within thresholds → **SECURE grasp**
 
 ## Grasp: UPLIFT / DOWNLIFT Trajectory Mathematics
 
@@ -688,9 +731,9 @@ The **velocity profile** (first derivative) is:
 | `f_max`                    | double | `15.0`  | Maximum force — FAILED if exceeded [N]                              |
 | `uplift_distance`          | double | `0.003` | Micro-uplift distance per iteration [m] (max 0.01)                  |
 | `lift_speed`               | double | `0.01`  | Lift speed for UPLIFT and DOWNLIFT [m/s]                            |
-| `uplift_hold`              | double | `0.5`   | Hold time at top for evaluation [s]                                 |
-| `stabilization`            | double | `0.3`   | Post-grasp and post-downlift settle time [s]                        |
-| `slip_tau_drop`            | double | `0.20`  | Fractional tau_ext_norm drop threshold for slip                     |
+| `uplift_hold`              | double | `0.6`   | Hold time: early (0–0.3 s) + late (0.3–0.6 s) windows [s]          |
+| `stabilization`            | double | `0.3`   | Post-grasp settle time; also W_pre baseline window [s]              |
+| `slip_tau_drop`            | double | `0.20`  | Drop ratio threshold: (mu_early−mu_late)/mu_early                   |
 | `slip_width_change`        | double | `0.001` | Width change threshold for slip [m]                                 |
 
 Gripper and GRASPING parameters are **defaults**. They can be overridden per-command by setting non-zero values in the `KittingGripperCommand` message published on `/kitting_controller/state_cmd`.
@@ -798,11 +841,11 @@ Per-object command published on `/kitting_controller/state_cmd`. Any float64 par
 | `f_max`                | float64 | Maximum force — FAILED if exceeded [N] (0 = use default 15.0)                      |
 | `fr_uplift_distance`   | float64 | Micro-uplift distance per iteration [m] (0 = use default 0.003, max 0.01)          |
 | `fr_lift_speed`        | float64 | Lift speed for UPLIFT and DOWNLIFT [m/s] (0 = use default 0.01)                    |
-| `fr_uplift_hold`       | float64 | Hold time at top for evaluation [s] (0 = use default 0.5)                          |
+| `fr_uplift_hold`       | float64 | Hold time at top for evaluation [s] (0 = use default 0.6)                          |
 | `fr_grasp_speed`       | float64 | Gripper speed for ramp GraspAction [m/s] (0 = use default 0.02)                    |
 | `fr_epsilon`           | float64 | Epsilon for ramp GraspAction, inner and outer [m] (0 = use default 0.008)          |
 | `fr_stabilization`     | float64 | Post-grasp and post-downlift settle time [s] (0 = use default 0.3)                 |
-| `fr_slip_tau_drop`     | float64 | Fractional tau_ext_norm drop threshold for slip (0 = use default 0.20)             |
+| `fr_slip_tau_drop`     | float64 | Drop ratio threshold (mu_early−mu_late)/mu_early (0 = use default 0.20)            |
 | `fr_slip_width_change` | float64 | Width change threshold for slip [m] (0 = use default 0.001)                        |
 
 Only the parameters relevant to the command are used:

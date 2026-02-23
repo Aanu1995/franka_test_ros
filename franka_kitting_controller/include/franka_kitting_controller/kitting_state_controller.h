@@ -282,7 +282,7 @@ class KittingStateController
   double fr_f_max_{15.0};
   double fr_uplift_distance_{0.003};
   double fr_lift_speed_{0.01};
-  double fr_uplift_hold_{0.5};
+  double fr_uplift_hold_{0.6};
   double fr_grasp_speed_{0.02};
   double fr_epsilon_{0.008};        // Single epsilon (inner == outer)
   double fr_stabilization_{0.3};
@@ -297,7 +297,7 @@ class KittingStateController
   double rt_fr_f_max_{15.0};
   double rt_fr_uplift_distance_{0.003};
   double rt_fr_lift_speed_{0.01};
-  double rt_fr_uplift_hold_{0.5};
+  double rt_fr_uplift_hold_{0.6};
   double rt_fr_grasp_speed_{0.02};
   double rt_fr_epsilon_{0.008};
   double rt_fr_stabilization_{0.3};
@@ -312,7 +312,7 @@ class KittingStateController
   double staging_fr_f_max_{15.0};
   double staging_fr_uplift_distance_{0.003};
   double staging_fr_lift_speed_{0.01};
-  double staging_fr_uplift_hold_{0.5};
+  double staging_fr_uplift_hold_{0.6};
   double staging_fr_grasp_speed_{0.02};
   double staging_fr_epsilon_{0.008};
   double staging_fr_stabilization_{0.3};
@@ -331,9 +331,14 @@ class KittingStateController
   ros::Time fr_grasp_stabilize_start_;       // Timer for post-grasp stabilization
   bool fr_grasp_stabilizing_{false};         // In post-grasp stabilization phase
 
-  // EVALUATE data (hold period with continuous signal tracking)
-  double fr_tau_before_{0.0};           // tau_ext_norm sampled before UPLIFT
-  double fr_tau_min_during_{std::numeric_limits<double>::max()};  // Minimum tau_ext_norm during EVALUATE hold
+  // Load-transfer slip detection (wrench_norm accumulators)
+  double fr_pre_sum_{0.0};              // W_pre: Σ wrench_norm
+  double fr_pre_sum_sq_{0.0};           // W_pre: Σ wrench_norm² (for σ_pre)
+  int    fr_pre_count_{0};              // W_pre: sample count
+  double fr_early_sum_{0.0};            // W_hold_early: Σ wrench_norm
+  int    fr_early_count_{0};            // W_hold_early: sample count
+  double fr_late_sum_{0.0};             // W_hold_late: Σ wrench_norm
+  int    fr_late_count_{0};             // W_hold_late: sample count
   double fr_width_before_uplift_{0.0};  // Gripper width before UPLIFT
   double fr_max_width_during_eval_{0.0}; // Maximum gripper width during EVALUATE hold
 
@@ -391,7 +396,7 @@ class KittingStateController
   /// Run internal force ramp transitions (GRASPING→UPLIFT→EVALUATE→...).
   /// Called at 250Hz from update(). Drives all internal state transitions.
   void runInternalTransitions(const ros::Time& time,
-                              double tau_ext_norm,
+                              double tau_ext_norm, double wrench_norm,
                               const GripperData& gripper_snapshot);
 
   /// Request a deferred grasp command from the RT thread.
@@ -443,15 +448,15 @@ class KittingStateController
 
   // --- runInternalTransitions decomposition ---
   void tickGrasping(const ros::Time& time, double tau_ext_norm,
-                    const GripperData& gripper_snapshot);
+                    double wrench_norm, const GripperData& gripper_snapshot);
   void tickUplift(const ros::Time& time, double tau_ext_norm,
-                  const GripperData& gripper_snapshot);
+                  double wrench_norm, const GripperData& gripper_snapshot);
   void tickEvaluate(const ros::Time& time, double tau_ext_norm,
-                    const GripperData& gripper_snapshot);
+                    double wrench_norm, const GripperData& gripper_snapshot);
   void tickDownlift(const ros::Time& time, double tau_ext_norm,
-                    const GripperData& gripper_snapshot);
+                    double wrench_norm, const GripperData& gripper_snapshot);
   void tickSettling(const ros::Time& time, double tau_ext_norm,
-                    const GripperData& gripper_snapshot);
+                    double wrench_norm, const GripperData& gripper_snapshot);
 };
 
 }  // namespace franka_kitting_controller
