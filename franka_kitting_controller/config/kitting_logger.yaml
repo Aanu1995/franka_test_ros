@@ -1,0 +1,9 @@
+base_directory: "~/kitting_bags"
+object_name: "default_object"
+export_csv_on_stop: true
+topics_to_record:
+    - /kitting_state_controller/kitting_state_data
+    - /kitting_controller/state
+    - /kitting_controller/state_cmd
+    - /kitting_controller/record_control
+    - /joint_states

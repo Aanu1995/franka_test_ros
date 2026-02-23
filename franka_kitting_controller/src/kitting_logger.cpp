@@ -1,6 +1,6 @@
 // Copyright (c) 2024
 // Use of this source code is governed by the Apache-2.0 license, see LICENSE
-#include <franka_kitting_controller/kitting_phase2_logger.h>
+#include <franka_kitting_controller/kitting_logger.h>
 
 #include <algorithm>
 #include <ctime>
@@ -62,7 +62,7 @@ static void rmrf(const std::string& path) {
 // Construction
 // ============================================================================
 
-KittingPhase2Logger::KittingPhase2Logger()
+KittingLogger::KittingLogger()
     : private_nh_("~") {
   // --- Load parameters ---
   private_nh_.param<std::string>("base_directory", base_directory_, "~/kitting_bags");
@@ -74,14 +74,14 @@ KittingPhase2Logger::KittingPhase2Logger()
   }
 
   private_nh_.param<std::string>("object_name", object_name_, "default_object");
-  private_nh_.param("auto_stop_on_contact", auto_stop_on_contact_, false);
   private_nh_.param("export_csv_on_stop", export_csv_on_stop_, true);
 
   if (!private_nh_.getParam("topics_to_record", topics_to_record_)) {
     topics_to_record_ = {
         "/kitting_state_controller/kitting_state_data",
-        "/kitting_phase2/state",
-        "/kitting_phase2/record_control",
+        "/kitting_controller/state",
+        "/kitting_controller/state_cmd",
+        "/kitting_controller/record_control",
         "/joint_states"};
   }
 
@@ -92,7 +92,6 @@ KittingPhase2Logger::KittingPhase2Logger()
   nh_.param(ctrl_ns + "k_sigma", k_sigma_, 3.0);
   nh_.param(ctrl_ns + "T_hold_arm", T_hold_arm_, 0.10);
   nh_.param(ctrl_ns + "use_slope_gate", use_slope_gate_, false);
-  nh_.param(ctrl_ns + "slope_dt", slope_dt_, 0.02);
   nh_.param(ctrl_ns + "slope_min", slope_min_, 5.0);
   nh_.param(ctrl_ns + "stall_velocity_threshold", stall_velocity_threshold_, 0.005);
   nh_.param(ctrl_ns + "width_gap_threshold", width_gap_threshold_, 0.002);
@@ -101,42 +100,36 @@ KittingPhase2Logger::KittingPhase2Logger()
 
   // --- Subscribe to record control (STOP, ABORT) ---
   record_control_sub_ = nh_.subscribe(
-      "/kitting_phase2/record_control", 10,
-      &KittingPhase2Logger::recordControlCallback, this);
-
-  // --- Subscribe to state labels (for auto-stop on CONTACT) ---
-  state_sub_ = nh_.subscribe(
-      "/kitting_phase2/state", 10,
-      &KittingPhase2Logger::stateCallback, this);
+      "/kitting_controller/record_control", 10,
+      &KittingLogger::recordControlCallback, this);
 
   // --- Subscribe to all data topics using ShapeShifter (always subscribed) ---
   for (const auto& topic : topics_to_record_) {
     auto sub = nh_.subscribe<topic_tools::ShapeShifter>(
         topic, 100,
-        boost::bind(&KittingPhase2Logger::topicCallback, this, _1, topic));
+        boost::bind(&KittingLogger::topicCallback, this, _1, topic));
     topic_subs_.push_back(sub);
   }
 
   // --- Publish latched logger_ready signal ---
-  // The controller gates Phase 2 commands behind this signal.
+  // The controller gates Grasp commands behind this signal.
   // Latched = new subscribers immediately receive the last published message.
   logger_ready_pub_ = nh_.advertise<std_msgs::Bool>(
-      "/kitting_phase2/logger_ready", 1, true /* latched */);
+      "/kitting_controller/logger_ready", 1, true /* latched */);
   std_msgs::Bool ready_msg;
   ready_msg.data = true;
   logger_ready_pub_.publish(ready_msg);
 
   // --- Auto-start recording on launch ---
   // Recording begins immediately when the logger node starts.
-  // No need to publish START on /kitting_phase2/record_control.
+  // No need to publish START on /kitting_controller/record_control.
   {
     std::lock_guard<std::mutex> lock(trial_mutex_);
     startTrial();
   }
 
-  ROS_INFO("KittingPhase2Logger: Ready | base_dir=%s object=%s auto_stop=%s csv_export=%s",
+  ROS_INFO("KittingLogger: Ready | base_dir=%s object=%s csv_export=%s",
            base_directory_.c_str(), object_name_.c_str(),
-           auto_stop_on_contact_ ? "true" : "false",
            export_csv_on_stop_ ? "true" : "false");
 }
 
@@ -144,7 +137,7 @@ KittingPhase2Logger::KittingPhase2Logger()
 // Callbacks
 // ============================================================================
 
-void KittingPhase2Logger::recordControlCallback(const std_msgs::String::ConstPtr& msg) {
+void KittingLogger::recordControlCallback(const std_msgs::String::ConstPtr& msg) {
   std::string cmd = msg->data;
   cmd.erase(0, cmd.find_first_not_of(" \t\n\r"));
   cmd.erase(cmd.find_last_not_of(" \t\n\r") + 1);
@@ -153,40 +146,25 @@ void KittingPhase2Logger::recordControlCallback(const std_msgs::String::ConstPtr
 
   if (cmd == "STOP") {
     if (!is_recording_) {
-      ROS_DEBUG("KittingPhase2Logger: Not recording, ignoring STOP");
+      ROS_DEBUG("KittingLogger: Not recording, ignoring STOP");
       return;
     }
     stopTrial();
 
   } else if (cmd == "ABORT") {
     if (!is_recording_) {
-      ROS_DEBUG("KittingPhase2Logger: Not recording, ignoring ABORT");
+      ROS_DEBUG("KittingLogger: Not recording, ignoring ABORT");
       return;
     }
     abortTrial();
 
   } else {
-    ROS_WARN("KittingPhase2Logger: Unknown command '%s' on record_control "
+    ROS_WARN("KittingLogger: Unknown command '%s' on record_control "
              "(expected STOP or ABORT)", cmd.c_str());
   }
 }
 
-void KittingPhase2Logger::stateCallback(const std_msgs::String::ConstPtr& msg) {
-  std::string state = msg->data;
-  state.erase(0, state.find_first_not_of(" \t\n\r"));
-  state.erase(state.find_last_not_of(" \t\n\r") + 1);
-
-  // Auto-stop recording on CONTACT detection (optional)
-  if (auto_stop_on_contact_ && state == "CONTACT") {
-    std::lock_guard<std::mutex> lock(trial_mutex_);
-    if (is_recording_) {
-      ROS_INFO("KittingPhase2Logger: Auto-stopping recording on CONTACT detection");
-      stopTrial();
-    }
-  }
-}
-
-void KittingPhase2Logger::topicCallback(
+void KittingLogger::topicCallback(
     const topic_tools::ShapeShifter::ConstPtr& msg,
     const std::string& topic) {
   ros::Time now = ros::Time::now();
@@ -199,7 +177,7 @@ void KittingPhase2Logger::topicCallback(
         total_samples_++;
       }
     } catch (const rosbag::BagIOException& e) {
-      ROS_ERROR_THROTTLE(1.0, "KittingPhase2Logger: Failed to write to bag: %s", e.what());
+      ROS_ERROR_THROTTLE(1.0, "KittingLogger: Failed to write to bag: %s", e.what());
     }
   }
 }
@@ -208,7 +186,7 @@ void KittingPhase2Logger::topicCallback(
 // Trial management
 // ============================================================================
 
-int KittingPhase2Logger::nextTrialNumber(const std::string& obj_dir) const {
+int KittingLogger::nextTrialNumber(const std::string& obj_dir) const {
   DIR* dir = opendir(obj_dir.c_str());
   if (!dir) return 1;
 
@@ -227,7 +205,7 @@ int KittingPhase2Logger::nextTrialNumber(const std::string& obj_dir) const {
   return max_n + 1;
 }
 
-void KittingPhase2Logger::startTrial() {
+void KittingLogger::startTrial() {
   // Caller must hold trial_mutex_
 
   // Directory: <base>/<object>/trial_NNN/
@@ -240,7 +218,7 @@ void KittingPhase2Logger::startTrial() {
   trial_dir_ = trial_ss.str();
 
   if (!mkdirp(trial_dir_)) {
-    ROS_ERROR("KittingPhase2Logger: Failed to create directory: %s", trial_dir_.c_str());
+    ROS_ERROR("KittingLogger: Failed to create directory: %s", trial_dir_.c_str());
     return;
   }
 
@@ -267,16 +245,16 @@ void KittingPhase2Logger::startTrial() {
     bag_ = std::make_unique<rosbag::Bag>();
     bag_->open(bag_path_, rosbag::bagmode::Write);
     is_recording_ = true;
-    ROS_INFO("KittingPhase2Logger: Recording started (trial %d) -> %s",
+    ROS_INFO("KittingLogger: Recording started (trial %d) -> %s",
              trial_number_, bag_path_.c_str());
   } catch (const rosbag::BagException& e) {
-    ROS_ERROR("KittingPhase2Logger: Failed to open bag: %s", e.what());
+    ROS_ERROR("KittingLogger: Failed to open bag: %s", e.what());
     bag_.reset();
     rmrf(trial_dir_);
   }
 }
 
-void KittingPhase2Logger::stopTrial() {
+void KittingLogger::stopTrial() {
   // Caller must hold trial_mutex_
   if (!is_recording_) return;
 
@@ -285,7 +263,7 @@ void KittingPhase2Logger::stopTrial() {
     try {
       bag_->close();
     } catch (const rosbag::BagException& e) {
-      ROS_WARN("KittingPhase2Logger: Error closing bag: %s", e.what());
+      ROS_WARN("KittingLogger: Error closing bag: %s", e.what());
     }
     bag_.reset();
   }
@@ -309,7 +287,7 @@ void KittingPhase2Logger::stopTrial() {
 
   writeMetadata();
 
-  ROS_INFO("KittingPhase2Logger: Recording stopped (trial %d) -> %s",
+  ROS_INFO("KittingLogger: Recording stopped (trial %d) -> %s",
            trial_number_, trial_dir_.c_str());
 
   // Launch CSV export in background thread (non-blocking, joined on shutdown)
@@ -318,12 +296,12 @@ void KittingPhase2Logger::stopTrial() {
       csv_export_thread_.join();
     }
     std::string bag_path_copy = bag_path_;
-    csv_export_thread_ = std::thread(&KittingPhase2Logger::exportCsv, this,
+    csv_export_thread_ = std::thread(&KittingLogger::exportCsv, this,
                                       bag_path_copy, csv_path);
   }
 }
 
-void KittingPhase2Logger::abortTrial() {
+void KittingLogger::abortTrial() {
   // Caller must hold trial_mutex_
   if (!is_recording_) return;
 
@@ -332,23 +310,23 @@ void KittingPhase2Logger::abortTrial() {
     try {
       bag_->close();
     } catch (const rosbag::BagException& e) {
-      ROS_WARN("KittingPhase2Logger: Error closing bag: %s", e.what());
+      ROS_WARN("KittingLogger: Error closing bag: %s", e.what());
     }
     bag_.reset();
   }
 
   is_recording_ = false;
-  ROS_INFO("KittingPhase2Logger: Recording ABORTED (trial %d) - deleting %s",
+  ROS_INFO("KittingLogger: Recording ABORTED (trial %d) - deleting %s",
            trial_number_, trial_dir_.c_str());
   rmrf(trial_dir_);
 }
 
-void KittingPhase2Logger::writeMetadata() {
+void KittingLogger::writeMetadata() {
   // Caller must hold trial_mutex_
   std::string meta_path = trial_dir_ + "/metadata.yaml";
   std::ofstream f(meta_path);
   if (!f.is_open()) {
-    ROS_ERROR("KittingPhase2Logger: Failed to write metadata: %s", meta_path.c_str());
+    ROS_ERROR("KittingLogger: Failed to write metadata: %s", meta_path.c_str());
     return;
   }
 
@@ -372,7 +350,6 @@ void KittingPhase2Logger::writeMetadata() {
     f << "  - " << t << "\n";
   }
 
-  f << "auto_stop_on_contact: " << (auto_stop_on_contact_ ? "true" : "false") << "\n";
   f << "export_csv_on_stop: " << (export_csv_on_stop_ ? "true" : "false") << "\n";
 
   f << "detector_parameters:\n";
@@ -382,7 +359,6 @@ void KittingPhase2Logger::writeMetadata() {
   f << "  T_hold_arm: " << T_hold_arm_ << "\n";
   f << "  T_hold_gripper: \"computed: 0.35 + 0.5 * closing_speed\"\n";
   f << "  use_slope_gate: " << (use_slope_gate_ ? "true" : "false") << "\n";
-  f << "  slope_dt: " << slope_dt_ << "\n";
   f << "  slope_min: " << slope_min_ << "\n";
   f << "  enable_arm_contact: " << (enable_arm_contact_ ? "true" : "false") << "\n";
   f << "  enable_gripper_contact: " << (enable_gripper_contact_ ? "true" : "false") << "\n";
@@ -400,16 +376,16 @@ void KittingPhase2Logger::writeMetadata() {
   f << "  contact_threshold_theta: " << (has_theta ? std::to_string(theta) : "null") << "\n";
 
   f.close();
-  ROS_INFO("KittingPhase2Logger: Metadata written -> %s", meta_path.c_str());
+  ROS_INFO("KittingLogger: Metadata written -> %s", meta_path.c_str());
 }
 
 // ============================================================================
 // CSV export (runs in background thread)
 // ============================================================================
 
-void KittingPhase2Logger::exportCsv(const std::string& bag_path,
+void KittingLogger::exportCsv(const std::string& bag_path,
                                     const std::string& csv_path) {
-  ROS_INFO("KittingPhase2Logger: CSV export starting -> %s", csv_path.c_str());
+  ROS_INFO("KittingLogger: CSV export starting -> %s", csv_path.c_str());
 
   try {
     // Open bag for reading
@@ -419,13 +395,13 @@ void KittingPhase2Logger::exportCsv(const std::string& bag_path,
     // Create view over kitting_state_data and state topics
     std::vector<std::string> query_topics = {
         "/kitting_state_controller/kitting_state_data",
-        "/kitting_phase2/state"};
+        "/kitting_controller/state"};
     rosbag::View view(bag, rosbag::TopicQuery(query_topics));
 
     // Open CSV file
     std::ofstream csv(csv_path);
     if (!csv.is_open()) {
-      ROS_ERROR("KittingPhase2Logger: Failed to open CSV: %s", csv_path.c_str());
+      ROS_ERROR("KittingLogger: Failed to open CSV: %s", csv_path.c_str());
       bag.close();
       return;
     }
@@ -457,7 +433,7 @@ void KittingPhase2Logger::exportCsv(const std::string& bag_path,
       const std::string& topic = m.getTopic();
 
       // Update state label
-      if (topic == "/kitting_phase2/state") {
+      if (topic == "/kitting_controller/state") {
         auto state_msg = m.instantiate<std_msgs::String>();
         if (state_msg) {
           current_state = state_msg->data;
@@ -512,21 +488,21 @@ void KittingPhase2Logger::exportCsv(const std::string& bag_path,
     csv.close();
     bag.close();
 
-    ROS_INFO("KittingPhase2Logger: CSV export complete | %d samples -> %s",
+    ROS_INFO("KittingLogger: CSV export complete | %d samples -> %s",
              sample_count, csv_path.c_str());
 
   } catch (const rosbag::BagException& e) {
-    ROS_ERROR("KittingPhase2Logger: CSV export failed: %s", e.what());
+    ROS_ERROR("KittingLogger: CSV export failed: %s", e.what());
   } catch (const std::exception& e) {
-    ROS_ERROR("KittingPhase2Logger: CSV export failed: %s", e.what());
+    ROS_ERROR("KittingLogger: CSV export failed: %s", e.what());
   }
 }
 
-void KittingPhase2Logger::onShutdown() {
+void KittingLogger::onShutdown() {
   {
     std::lock_guard<std::mutex> lock(trial_mutex_);
     if (is_recording_) {
-      ROS_INFO("KittingPhase2Logger: Shutdown - saving trial %d", trial_number_);
+      ROS_INFO("KittingLogger: Shutdown - saving trial %d", trial_number_);
       stopTrial();
     }
   }
@@ -536,7 +512,7 @@ void KittingPhase2Logger::onShutdown() {
   }
 }
 
-void KittingPhase2Logger::run() {
+void KittingLogger::run() {
   ros::AsyncSpinner spinner(4);
   spinner.start();
   ros::waitForShutdown();
@@ -546,8 +522,8 @@ void KittingPhase2Logger::run() {
 }  // namespace franka_kitting_controller
 
 int main(int argc, char** argv) {
-  ros::init(argc, argv, "kitting_phase2_logger");
-  franka_kitting_controller::KittingPhase2Logger logger;
+  ros::init(argc, argv, "kitting_logger");
+  franka_kitting_controller::KittingLogger logger;
   logger.run();
   return 0;
 }

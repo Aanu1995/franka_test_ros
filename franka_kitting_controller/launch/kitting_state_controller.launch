@@ -3,6 +3,12 @@
   <arg name="robot_ip" />
   <arg name="load_gripper" default="false" />
 
+  <!-- Recording parameters -->
+  <arg name="record" default="false" />
+  <arg name="base_directory" default="~/kitting_bags" />
+  <arg name="object_name" default="default_object" />
+  <arg name="export_csv_on_stop" default="true" />
+
   <include file="$(find franka_control)/launch/franka_control.launch">
     <arg name="robot_ip" value="$(arg robot_ip)" />
     <arg name="load_gripper" value="$(arg load_gripper)" />
@@ -10,5 +16,20 @@
 
   <rosparam command="load" file="$(find franka_kitting_controller)/config/kitting_state_controller.yaml" />
   <param name="kitting_state_controller/robot_ip" value="$(arg robot_ip)" />
-  <node name="controller_spawner" pkg="controller_manager" type="spawner" respawn="false" output="screen" args="kitting_state_controller"/>
+  <param name="kitting_state_controller/require_logger" value="$(arg record)" />
+  <node name="controller_spawner" pkg="controller_manager" type="spawner"
+        respawn="false" output="screen" args="kitting_state_controller"/>
+
+  <!-- Logger node — only when record:=true -->
+  <group if="$(arg record)">
+    <node name="kitting_logger" pkg="franka_kitting_controller"
+          type="kitting_logger" output="screen">
+      <rosparam command="load"
+                file="$(find franka_kitting_controller)/config/kitting_logger.yaml"
+                subst_value="true" />
+      <param name="base_directory" value="$(arg base_directory)" />
+      <param name="object_name" value="$(arg object_name)" />
+      <param name="export_csv_on_stop" value="$(arg export_csv_on_stop)" />
+    </node>
+  </group>
 </launch>

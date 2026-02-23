@@ -32,11 +32,11 @@
 
 namespace franka_kitting_controller {
 
-/// Grasp states for Phase 2 data collection.
+/// Grasp states for Grasp data collection.
 /// Controller starts in START — no baseline collection, no contact detection,
 /// just Cartesian passthrough and state data publishing. The grasp state machine
-/// begins when the user explicitly publishes BASELINE on /kitting_phase2/state.
-enum class GraspPhase {
+/// begins when the user explicitly publishes BASELINE on /kitting_controller/state_cmd.
+enum class GraspState {
   START,          // Initial state: controller running, awaiting BASELINE command
   BASELINE,
   CLOSING,
@@ -68,7 +68,7 @@ struct GripperData {
 };
 
 /**
- * Controller that publishes comprehensive robot state, implements Phase 2
+ * Controller that publishes comprehensive robot state, implements Grasp
  * contact detection with a 6-state machine, and executes Cartesian micro-lift
  * (UPLIFT) internally.
  *
@@ -76,13 +76,13 @@ struct GripperData {
  * The Cartesian pose interface is used for UPLIFT micro-lift execution. In all other
  * states, the controller operates in passthrough mode (holds current position).
  *
- * Phase 2 topics:
- *   /kitting_phase2/state_cmd [subscribed]  KittingGripperCommand (CLOSING, SECURE_GRASP, UPLIFT)
+ * Grasp topics:
+ *   /kitting_controller/state_cmd [subscribed]  KittingGripperCommand (BASELINE, CLOSING, SECURE_GRASP, UPLIFT)
  *                                           with per-object parameters (0 = use YAML default)
- *   /kitting_phase2/state     [subscribed]  State labels from user (BASELINE)
- *                              [published]  CONTACT (auto), CLOSING, SECURE_GRASP, UPLIFT (from state_cmd)
+ *   /kitting_controller/state     [published]   State labels: all states echoed here (BASELINE, CLOSING,
+ *                                           CONTACT, SECURE_GRASP, UPLIFT). No user input on this topic.
  *
- * Recording is controlled separately via /kitting_phase2/record_control
+ * Recording is controlled separately via /kitting_controller/record_control
  * (handled by the logger node, not the controller).
  */
 class KittingStateController
@@ -105,28 +105,25 @@ class KittingStateController
   franka_hw::FrankaPoseCartesianInterface* cartesian_pose_interface_{nullptr};
   std::unique_ptr<franka_hw::FrankaCartesianPoseHandle> cartesian_pose_handle_;
 
-  // --- Phase 1: State data publisher ---
+  // --- State data publisher ---
   realtime_tools::RealtimePublisher<franka_kitting_controller::KittingState> kitting_publisher_;
   franka_hw::TriggerRate rate_trigger_{250.0};
 
-  // --- Phase 2: State label publisher ---
+  // --- Grasp: State label publisher ---
   realtime_tools::RealtimePublisher<std_msgs::String> state_publisher_;
 
-  // --- Phase 2: Logger readiness gate ---
-  // The controller rejects all Phase 2 commands until the logger node is running.
-  // Detection uses a latched topic (/kitting_phase2/logger_ready) plus a live
+  // --- Grasp: Logger readiness gate ---
+  // The controller rejects all Grasp commands until the logger node is running.
+  // Detection uses a latched topic (/kitting_controller/logger_ready) plus a live
   // publisher check (getNumPublishers > 0) at the point of use. This dual check
   // prevents stale latched messages from a previous logger run and also detects
   // logger shutdown mid-session.
+  bool require_logger_{true};
   ros::Subscriber logger_ready_sub_;
   std::atomic<bool> logger_ready_{false};
   void loggerReadyCallback(const std_msgs::Bool::ConstPtr& msg);
 
-  // --- Phase 2: State subscriber (listens to /kitting_phase2/state) ---
-  ros::Subscriber state_sub_;
-  void stateCallback(const std_msgs::String::ConstPtr& msg);
-
-  // --- Phase 2: Command subscriber (listens to /kitting_phase2/state_cmd) ---
+  // --- Grasp: Command subscriber (listens to /kitting_controller/state_cmd) ---
   ros::Subscriber state_cmd_sub_;
   void stateCmdCallback(const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg);
 
@@ -153,7 +150,7 @@ class KittingStateController
   // Gripper data buffer (read thread → RT update)
   realtime_tools::RealtimeBuffer<GripperData> gripper_data_buf_;
 
-  // --- Phase 2: Gripper default parameters (overridable per-command) ---
+  // --- Grasp: Gripper default parameters (overridable per-command) ---
   bool execute_gripper_actions_{true};
   double closing_width_{0.04};
   double closing_speed_{0.04};
@@ -164,17 +161,17 @@ class KittingStateController
   double grasp_force_{10.0};
 
   // State machine — cross-thread synchronization
-  // current_phase_: read by subscriber thread (precondition checks), written by RT thread.
-  // pending_phase_: written by subscriber thread, read by RT thread.
-  // phase_changed_: the synchronization flag — release on write, acquire on read.
-  //   All stores before the release-store of phase_changed_ are visible to the RT thread
-  //   after its acquire-load of phase_changed_ returns true.
-  std::atomic<GraspPhase> current_phase_{GraspPhase::START};
-  std::atomic<GraspPhase> pending_phase_{GraspPhase::START};
-  std::atomic<bool> phase_changed_{false};
+  // current_state_: read by subscriber thread (precondition checks), written by RT thread.
+  // pending_state_: written by subscriber thread, read by RT thread.
+  // state_changed_: synchronization flag — release on write, acquire on read.
+  //   All stores before the release-store of state_changed_ are visible to the RT thread
+  //   after its acquire-load of state_changed_ returns true.
+  std::atomic<GraspState> current_state_{GraspState::START};
+  std::atomic<GraspState> pending_state_{GraspState::START};
+  std::atomic<bool> state_changed_{false};
   bool contact_latched_{false};
 
-  // --- Phase 2: Arm contact detector parameters ---
+  // --- Grasp: Arm contact detector parameters ---
   bool enable_contact_detector_{true};
   bool enable_arm_contact_{true};
   bool enable_gripper_contact_{true};
@@ -183,7 +180,6 @@ class KittingStateController
   double k_sigma_{3.0};
   double T_hold_arm_{0.10};
   bool use_slope_gate_{false};
-  double slope_dt_{0.02};
   double slope_min_{5.0};
 
   // --- Gripper contact detection parameters ---
@@ -191,13 +187,13 @@ class KittingStateController
   double width_gap_threshold_{0.002};       // [m] Min gap: (w - w_cmd) > this
   bool stop_on_contact_{true};              // Call stop() on contact
 
-  // Baseline statistics (computed during BASELINE phase)
+  // Baseline statistics (computed during BASELINE state)
   double baseline_sum_{0.0};
   double baseline_sum_sq_{0.0};
   int baseline_n_{0};
   ros::Time baseline_start_time_;
   bool baseline_collecting_{false};
-  bool baseline_armed_{false};  // True once baseline stats are computed
+  std::atomic<bool> baseline_armed_{false};  // True once baseline stats are computed
 
   double baseline_mu_{0.0};
   double baseline_sigma_{0.0};
@@ -211,11 +207,14 @@ class KittingStateController
   // Gripper debounce state (RT-thread owned)
   ros::Time gripper_stall_start_time_;
   bool gripper_stall_active_{false};
-  bool gripper_stop_sent_{false};
+  std::atomic<bool> gripper_stop_sent_{false};  // Written by RT, read by command thread
   const char* contact_source_{""};  // "ARM" or "GRIPPER" — records which detector fired (RT-safe)
+  std::atomic<double> contact_width_{0.0};  // Gripper width at CONTACT — default grasp_width for SECURE_GRASP
+  bool baseline_awaiting_gripper_{false}; // Wait for gripper open before baseline collection
+  ros::Time baseline_gripper_wait_start_; // Timestamp when gripper open wait started
 
   // RT-local copies of CLOSING command parameters — snapshotted when CLOSING begins.
-  // Written by subscriber (stateCmdCallback) via release/acquire on phase_changed_.
+  // Written by subscriber (stateCmdCallback), synchronized via release/acquire on state_changed_.
   double closing_w_cmd_{0.04};     // Resolved target width for active MoveAction
   double closing_v_cmd_{0.04};     // Resolved speed for active MoveAction
   double rt_closing_w_cmd_{0.04};  // RT-local copy
@@ -248,7 +247,6 @@ class KittingStateController
   // Written by subscriber thread (stateCmdCallback), read by RT thread only via rt_ copies.
   double uplift_distance_{0.003};
   double uplift_duration_{1.0};
-  std::string uplift_reference_frame_{"world"};
   bool require_secure_grasp_{true};
   static constexpr double kMaxUpliftDistance{0.01};
 
@@ -269,17 +267,17 @@ class KittingStateController
   void publishStateLabel(const std::string& label);
 
   /// Convert enum to string literal (RT-safe, no allocation).
-  static const char* phaseToString(GraspPhase phase);
+  static const char* stateToString(GraspState state);
 
   // --- update() decomposition helpers (RT-safe, no locks, no allocation) ---
 
-  /// Apply a pending phase transition from the subscriber thread.
-  void applyPendingPhaseTransition();
+  /// Apply a pending state transition from the subscriber thread.
+  void applyPendingStateTransition();
 
   /// Generate and send the Cartesian pose command for this tick (1kHz).
   void updateCartesianCommand(const ros::Duration& period);
 
-  /// Run Phase 2 contact detection (BASELINE collection + CLOSING detectors).
+  /// Run Grasp contact detection (BASELINE collection + CLOSING detectors).
   void runContactDetection(const ros::Time& time,
                            double tau_ext_norm,
                            const GripperData& gripper_snapshot);
@@ -293,7 +291,7 @@ class KittingStateController
                            const std::array<double, 6>& ee_velocity,
                            double tau_ext_norm, double wrench_norm,
                            const GripperData& gripper_snapshot,
-                           GraspPhase phase);
+                           GraspState state);
 
   /// Request the read thread to call stop(). RT-safe (atomic store only).
   void requestGripperStop(const char* source);

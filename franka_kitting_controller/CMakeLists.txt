@@ -75,30 +75,30 @@ target_include_directories(kitting_state_controller PUBLIC
   include
 )
 
-## Phase 2 logger executable (standalone node)
-add_executable(kitting_phase2_logger
-  src/kitting_phase2_logger.cpp
+## Logger executable (standalone node)
+add_executable(kitting_logger
+  src/kitting_logger.cpp
 )
 
-add_dependencies(kitting_phase2_logger
+add_dependencies(kitting_logger
   ${${PROJECT_NAME}_EXPORTED_TARGETS}
   ${catkin_EXPORTED_TARGETS}
   ${PROJECT_NAME}_generate_messages_cpp
 )
 
-target_link_libraries(kitting_phase2_logger
+target_link_libraries(kitting_logger
   ${catkin_LIBRARIES}
 )
 
-target_include_directories(kitting_phase2_logger SYSTEM PUBLIC
+target_include_directories(kitting_logger SYSTEM PUBLIC
   ${catkin_INCLUDE_DIRS}
 )
-target_include_directories(kitting_phase2_logger PUBLIC
+target_include_directories(kitting_logger PUBLIC
   include
 )
 
 ## Installation
-install(TARGETS kitting_state_controller kitting_phase2_logger
+install(TARGETS kitting_state_controller kitting_logger
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}

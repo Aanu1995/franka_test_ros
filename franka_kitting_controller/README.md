@@ -1,6 +1,6 @@
 # franka_kitting_controller
 
-Real-time state acquisition and Cartesian micro-lift controller for the Franka Panda with Phase 2 hybrid contact detection and rosbag data collection. Reads all robot state, model, Cartesian, and gripper signals, publishes them as a single `KittingState` message, autonomously detects contact using dual arm torque + gripper stall detection (OR logic), immediately stops the gripper on contact via `franka::Gripper::stop()`, and executes smooth Cartesian micro-lift (UPLIFT) internally. Claims `FrankaPoseCartesianInterface` for Cartesian pose control. Gripper operations use the libfranka `franka::Gripper` API directly (no dependency on `franka_gripper` ROS package).
+Real-time state acquisition and Cartesian micro-lift controller for the Franka Panda with hybrid contact detection and rosbag data collection. Reads all robot state, model, Cartesian, and gripper signals, publishes them as a single `KittingState` message, autonomously detects contact using dual arm torque + gripper stall detection (OR logic), immediately stops the gripper on contact via `franka::Gripper::stop()`, and executes smooth Cartesian micro-lift (UPLIFT) internally. Claims `FrankaPoseCartesianInterface` for Cartesian pose control. Gripper operations use the libfranka `franka::Gripper` API directly (no dependency on `franka_gripper` ROS package).
 
 ## Overview
 
@@ -12,7 +12,7 @@ This controller runs inside the `ros_control` real-time loop provided by `franka
 - **Derived metrics**: external torque norm, wrench norm, end-effector velocity
 - **Gripper telemetry**: finger width, max width, width velocity, commanded width, grasp state (from `franka::GripperState` via direct libfranka API)
 
-**Phase 2** adds:
+**Grasp** adds:
 
 - 6-state grasp machine: `START` -> `BASELINE` -> `CLOSING` -> `CONTACT` -> `SECURE_GRASP` -> `UPLIFT`
 - Hybrid contact detection: arm external torque + gripper stall detection (OR logic)
@@ -38,9 +38,9 @@ catkin build franka_kitting_controller
 
 ## Usage
 
-### Phase 1: Launch the controller (required first)
+### Launch the controller
 
-Phase 1 connects to the robot, starts `franka_control`, and spawns the `kitting_state_controller`. This must be running before Phase 2.
+Connects to the robot, starts `franka_control`, and spawns the `kitting_state_controller`.
 
 ```bash
 roslaunch franka_kitting_controller kitting_state_controller.launch robot_ip:=<ROBOT_IP>
@@ -51,25 +51,26 @@ roslaunch franka_kitting_controller kitting_state_controller.launch robot_ip:=<R
 | `robot_ip`     | (required) | Franka robot IP address                                                      |
 | `load_gripper` | `false`    | Load gripper driver (must be false — controller owns the gripper connection) |
 
-### Phase 2: Launch the logger (requires Phase 1)
+### Recording (optional)
 
-Phase 2 launches **only** the C++ rosbag recording manager. It does not start the robot or the controller — it depends on Phase 1 already running. When the controller detects the logger, it **automatically opens the gripper** to its maximum width (`max_width` from firmware) at 0.1 m/s to prepare for a new trial.
+To enable rosbag recording, pass `record:=true` to the same launch command. The logger node starts automatically alongside the controller — no separate launch needed.
 
 ```bash
-# In a separate terminal (Phase 1 must already be running)
-roslaunch franka_kitting_controller kitting_phase2.launch object_name:=cup base_directory:=/data/kitting
+# With recording
+roslaunch franka_kitting_controller kitting_state_controller.launch robot_ip:=<ROBOT_IP> \
+  record:=true object_name:=cup base_directory:=/data/kitting
 ```
 
-| Argument               | Default          | Description                          |
-| ---------------------- | ---------------- | ------------------------------------ |
-| `base_directory`       | `~/kitting_bags` | Root directory for all trial data    |
-| `object_name`          | `default_object` | Object name for bag file naming      |
-| `auto_stop_on_contact` | `false`          | Auto-stop recording on CONTACT       |
-| `export_csv_on_stop`   | `true`           | Auto-export CSV when recording stops |
+| Argument             | Default          | Description                          |
+| -------------------- | ---------------- | ------------------------------------ |
+| `record`             | `false`          | Enable rosbag recording              |
+| `base_directory`     | `~/kitting_bags` | Root directory for all trial data    |
+| `object_name`        | `default_object` | Object name for bag file naming      |
+| `export_csv_on_stop` | `true`           | Auto-export CSV when recording stops |
 
-## Phase 2: Interaction States
+## Grasp: Interaction States
 
-Six interaction states structure grasp execution into measurable phases. The controller starts in `START` and waits for the user to publish `BASELINE` before any Phase 2 activity begins. States are published on `/kitting_phase2/state` for signal labeling and offline analysis. Recording starts automatically when the logger is launched and continues through all state transitions.
+Six interaction states structure the grasp execution sequence. The controller starts in `START` and waits for the user to publish `BASELINE` before any Grasp activity begins. States are published on `/kitting_controller/state` for signal labeling and offline analysis. If recording is enabled (`record:=true`), recording starts automatically and continues through all state transitions.
 
 ```
 START -> BASELINE -> CLOSING -> CONTACT -> SECURE_GRASP -> UPLIFT
@@ -80,23 +81,23 @@ START -> BASELINE -> CLOSING -> CONTACT -> SECURE_GRASP -> UPLIFT
 Initial state after the controller is launched. No baseline collection, no contact detection — just Cartesian passthrough (hold position) and state data publishing at 250 Hz.
 
 - Controller is running and publishing `KittingState` data
-- No Phase 2 activity: no baseline statistics, no gripper commands accepted
-- **All commands are rejected** until the Phase 2 logger is running (see below)
-- Even after the logger is detected, all commands on `/kitting_phase2/state_cmd` are rejected until `BASELINE` is published
-- Transition: launch the Phase 2 logger, then publish `BASELINE` on `/kitting_phase2/state`
+- No Grasp activity: no baseline statistics, no gripper commands accepted
+- All commands on `/kitting_controller/state_cmd` are rejected until `BASELINE` is published
+- If `record:=true`, commands are also gated until the logger node is ready
+- Transition: publish `BASELINE` on `/kitting_controller/state_cmd`
 
-**Logger readiness gate**: The controller subscribes to `/kitting_phase2/logger_ready` (a latched `std_msgs/Bool` topic published by the logger node). Until this signal is received, **all state commands are rejected** with a warning instructing the user to launch the Phase 2 logger first. This enforces the documented two-step launch sequence and prevents data collection without a running logger.
-
-**Auto-open**: When the logger is first detected, the controller automatically queues `move(max_width, 0.1)` to fully open the gripper, preparing it for a new trial. The `max_width` value is read from `franka::GripperState` (firmware-reported maximum opening). This bypasses the START state guard because it uses the internal gripper command queue directly, not the `state_cmd` topic.
+**Logger readiness gate** (only when `record:=true`): The controller subscribes to `/kitting_controller/logger_ready` (a latched `std_msgs/Bool` topic published by the logger node). Until this signal is received, all state commands are rejected. When `record:=false` (default), this gate is skipped and commands are accepted immediately.
 
 ### BASELINE
 
-Establish reference signal behavior before interaction.
+Establish reference signal behavior before interaction. Published via `/kitting_controller/state_cmd` with `command: "BASELINE"`.
 
-- Gripper fully open, end-effector stationary, no object contact
+- **Optional gripper open**: If `open_gripper: true`, the gripper opens to `open_width` (or `max_width` from firmware if not specified) at 0.1 m/s. Baseline collection waits 3 seconds for the gripper to finish opening before starting
+- End-effector stationary, no object contact
 - External torque norm `x(t) = ||τ_ext||` reflects system noise only
 - Collects `N` samples over `T_base` seconds (default 0.7 s)
 - Computes baseline mean `μ`, standard deviation `σ`, and contact threshold `θ = μ + kσ`
+- BASELINE is a one-shot state — publish once from START to begin the grasp sequence
 
 ### CLOSING
 
@@ -118,12 +119,15 @@ Detect first stable physical interaction. Published **automatically** by the con
 - **Immediate stop**: On contact, `franka::Gripper::stop()` is called via the read thread to physically halt the motor at the contact width
 - CONTACT is **latched** once detected — cannot return to CLOSING
 - `contact_source` records which detector fired: `"ARM"` or `"GRIPPER"`
+- `contact_width` saves the gripper width at the moment of contact — used as the default `grasp_width` in SECURE_GRASP
 
 ### SECURE_GRASP
 
 Characterize stable object compression.
 
-- Gripper applies force `F` via GraspAction to width `w` with tolerance `ε_inner`/`ε_outer`
+- Gripper applies force `F` via GraspAction to width `w` with tolerance `ε` (or `ε_inner`/`ε_outer`)
+- `grasp_width` defaults to the width captured at CONTACT (no need to specify unless overriding)
+- `epsilon` field sets both `ε_inner` and `ε_outer` (or set them individually for advanced use)
 - External torque `x(t)` stabilizes with reduced variance compared to CONTACT transient
 - Stable force distribution indicates object is securely held
 - **Repeatable**: Can be re-sent with different parameters (e.g., higher force) — each command queues a new grasp action
@@ -146,15 +150,15 @@ Recording and state labeling are independent concerns.
 | Topic                            | Type                  | Direction  | Description                               |
 | -------------------------------- | --------------------- | ---------- | ----------------------------------------- |
 | `<ns>/kitting_state_data`        | KittingState          | Published  | Full state data at 250 Hz                 |
-| `/kitting_phase2/state_cmd`      | KittingGripperCommand | Subscribed | Commands with per-object gripper params   |
-| `/kitting_phase2/state`          | std_msgs/String       | Pub/Sub    | State labels for offline segmentation     |
-| `/kitting_phase2/record_control` | std_msgs/String       | Subscribed | Recording control: STOP, ABORT            |
-| `/kitting_phase2/logger_ready`   | std_msgs/Bool         | Subscribed | Latched readiness signal from logger node |
+| `/kitting_controller/state_cmd`      | KittingGripperCommand | Subscribed | All commands: BASELINE, CLOSING, SECURE_GRASP, UPLIFT |
+| `/kitting_controller/state`          | std_msgs/String       | Published  | State labels for offline segmentation     |
+| `/kitting_controller/record_control` | std_msgs/String       | Subscribed | Recording control: STOP, ABORT            |
+| `/kitting_controller/logger_ready`   | std_msgs/Bool         | Subscribed | Latched readiness signal from logger node |
 
-- `/kitting_phase2/state_cmd` — The **user** publishes a `KittingGripperCommand` with `command` field set to `CLOSING`, `SECURE_GRASP`, or `UPLIFT`, plus optional per-object parameters. Any parameter left at `0.0` falls back to the YAML config default. The **controller** executes the corresponding action (gripper move/grasp, or Cartesian micro-lift), publishes the state label on `/kitting_phase2/state`, and updates its internal state machine.
-- `/kitting_phase2/state` — The **user** publishes BASELINE here. The **controller** publishes CLOSING, SECURE_GRASP, UPLIFT (from `state_cmd`), and CONTACT (auto-detected). States are labels for offline analysis — they do NOT control recording.
-- `/kitting_phase2/record_control` — The **user** publishes STOP or ABORT to end recording. Recording starts automatically when the logger launches — no START command is needed. The **logger** subscribes to this topic.
-- `/kitting_phase2/logger_ready` — The **logger** publishes `true` (latched) on startup. The **controller** subscribes and gates all Phase 2 commands behind this signal. If the logger is not running, BASELINE and all `state_cmd` commands are rejected.
+- `/kitting_controller/state_cmd` — The **user** publishes a `KittingGripperCommand` with `command` field set to `BASELINE`, `CLOSING`, `SECURE_GRASP`, or `UPLIFT`, plus optional per-object parameters. Any float64 parameter left at `0.0` falls back to the YAML config default. The **controller** executes the corresponding action, publishes the state label on `/kitting_controller/state`, and updates its internal state machine.
+- `/kitting_controller/state` — The **controller** publishes BASELINE, CLOSING, SECURE_GRASP, UPLIFT, and CONTACT (auto-detected). States are labels for offline analysis — they do NOT control recording.
+- `/kitting_controller/record_control` — The **user** publishes STOP or ABORT to end recording. Recording starts automatically when the logger launches — no START command is needed. The **logger** subscribes to this topic.
+- `/kitting_controller/logger_ready` — The **logger** publishes `true` (latched) on startup. When `record:=true`, the **controller** subscribes and gates Grasp commands behind this signal. When `record:=false`, this topic is not used.
 
 ### Recording
 
@@ -169,55 +173,59 @@ One rosbag per trial. **Recording starts automatically** when the logger node is
 - **ABORT** is ignored if not recording.
 - If the logger node is shut down (Ctrl+C), recording is automatically stopped (equivalent to STOP).
 
-If `auto_stop_on_contact` is enabled and the controller publishes CONTACT, recording is auto-stopped (equivalent to STOP).
+Recording continues through all state transitions until explicitly stopped via STOP/ABORT or node shutdown.
 
 ### Sending Commands
 
 ```bash
 # Recording starts automatically when the logger is launched — no START needed.
 
-# Set BASELINE — REQUIRED before any other state command
-# Controller starts in START state; BASELINE begins the grasp sequence
-rostopic pub /kitting_phase2/state std_msgs/String "data: 'BASELINE'" --once
+# BASELINE — REQUIRED before any other state command
+rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
+  "{command: 'BASELINE'}" --once
+
+# BASELINE — open gripper to max_width before collecting
+rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
+  "{command: 'BASELINE', open_gripper: true}" --once
+
+# BASELINE — open gripper to specific width
+rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
+  "{command: 'BASELINE', open_gripper: true, open_width: 0.06}" --once
 
 # CLOSING — use YAML defaults for gripper parameters (all params = 0 -> defaults)
-rostopic pub /kitting_phase2/state_cmd franka_kitting_controller/KittingGripperCommand \
+rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
   "{command: 'CLOSING'}" --once
 
 # CLOSING — override width and speed for a specific object
-rostopic pub /kitting_phase2/state_cmd franka_kitting_controller/KittingGripperCommand \
+rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
   "{command: 'CLOSING', closing_width: 0.01, closing_speed: 0.02}" --once
 
 # ... CONTACT is published by the controller automatically ...
 
-# SECURE_GRASP — use YAML defaults
-rostopic pub /kitting_phase2/state_cmd franka_kitting_controller/KittingGripperCommand \
-  "{command: 'SECURE_GRASP'}" --once
+# SECURE_GRASP — auto-uses contact width as grasp_width, unified epsilon
+rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
+  "{command: 'SECURE_GRASP', epsilon: 0.008, grasp_force: 30.0}" --once
 
-# SECURE_GRASP — override for a small, fragile object
-rostopic pub /kitting_phase2/state_cmd franka_kitting_controller/KittingGripperCommand \
-  "{command: 'SECURE_GRASP', grasp_width: 0.01, grasp_force: 5.0}" --once
-
-# SECURE_GRASP — override all parameters for a heavy object
-rostopic pub /kitting_phase2/state_cmd franka_kitting_controller/KittingGripperCommand \
-  "{command: 'SECURE_GRASP', grasp_width: 0.03, epsilon_inner: 0.008, epsilon_outer: 0.008, grasp_speed: 0.02, grasp_force: 30.0}" --once
+# SECURE_GRASP — override grasp_width explicitly
+rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
+  "{command: 'SECURE_GRASP', grasp_width: 0.01, epsilon: 0.005, grasp_force: 20.0}" --once
 
 # UPLIFT — use YAML defaults (3mm over 1s)
-rostopic pub /kitting_phase2/state_cmd franka_kitting_controller/KittingGripperCommand \
+rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
   "{command: 'UPLIFT'}" --once
 
 # UPLIFT — override distance and duration for a specific object
-rostopic pub /kitting_phase2/state_cmd franka_kitting_controller/KittingGripperCommand \
+rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
   "{command: 'UPLIFT', uplift_distance: 0.005, uplift_duration: 2.0}" --once
 
 # Stop recording
-rostopic pub /kitting_phase2/record_control std_msgs/String "data: 'STOP'" --once
+rostopic pub /kitting_controller/record_control std_msgs/String "data: 'STOP'" --once
 
 # Or abort (delete trial)
-rostopic pub /kitting_phase2/record_control std_msgs/String "data: 'ABORT'" --once
+rostopic pub /kitting_controller/record_control std_msgs/String "data: 'ABORT'" --once
 ```
 
-## Phase 2: Contact Detection
+## Grasp: Contact Detection
 
 The controller uses **hybrid contact detection** with two independent detectors running concurrently during CLOSING. Either detector triggering is sufficient to declare CONTACT (OR logic). Both detectors share a single latch (`contact_latched_`) — the first one to trigger wins.
 
@@ -301,7 +309,7 @@ Once baseline statistics are computed (`baseline_armed = true`), the controller 
   dt              Δt
 ```
 
-Where `Δt = slope_dt`. This filters out slow drift that might cross `θ` without actual contact.
+Where `Δt` is the actual inter-sample time difference. This filters out slow drift that might cross `θ` without actual contact.
 
 ### Detector 2: Gripper Stall Detection (Primary)
 
@@ -407,19 +415,19 @@ All computed values are above the experimentally determined minimum working thre
 
 #### Implementation
 
-The hold time is computed once when the RT thread transitions to CLOSING (in `applyPendingPhaseTransition()`), using the RT-local copy of closing speed:
+The hold time is computed once when the RT thread transitions to CLOSING (in `applyPendingStateTransition()`), using the RT-local copy of closing speed:
 
 ```
   rt_T_hold_gripper_ = computeGripperHoldTime(rt_closing_v_cmd_)
 ```
 
-This value is then used for all stall debounce checks during that CLOSING phase. No new synchronization is needed — the value is written and read by the same (RT) thread.
+This value is then used for all stall debounce checks during that CLOSING state. No new synchronization is needed — the value is written and read by the same (RT) thread.
 
 ### Latching
 
-Once CONTACT is declared by either detector, it is **latched** — both detectors stop evaluating. This prevents oscillation at the contact boundary. A new trial (publishing BASELINE) is required to re-arm the detectors and reset all debounce state.
+Once CONTACT is declared by either detector, it is **latched** — both detectors stop evaluating. This prevents oscillation at the contact boundary. Restarting the controller is required to re-arm the detectors.
 
-## Phase 2: UPLIFT Trajectory Mathematics
+## Grasp: UPLIFT Trajectory Mathematics
 
 The UPLIFT state executes a smooth Cartesian micro-lift internally using cosine-smoothed time-based trajectory interpolation. The trajectory runs at the control loop rate (1 kHz) and commands the end-effector pose via `FrankaPoseCartesianInterface`.
 
@@ -503,13 +511,12 @@ The **velocity profile** (first derivative) is:
 | -------------------------- | ------ | ------- | ------------------------------------------------------------------- |
 | `arm_id`                   | string | `panda` | Robot arm identifier                                                |
 | `publish_rate`             | double | `250.0` | State data publish rate [Hz]                                        |
-| `enable_contact_detector`  | bool   | `true`  | Enable Phase 2 contact detection                                    |
+| `enable_contact_detector`  | bool   | `true`  | Enable Grasp contact detection                                    |
 | `T_base`                   | double | `0.7`   | Baseline collection duration [s]                                    |
 | `N_min`                    | int    | `50`    | Minimum samples before arming detection                             |
 | `k_sigma`                  | double | `3.0`   | Threshold multiplier (theta = mu + k\*sigma)                        |
 | `T_hold_arm`               | double | `0.10`  | Arm torque debounce hold time [s]                                   |
 | `use_slope_gate`           | bool   | `false` | Enable slope gate (for drift false positives)                       |
-| `slope_dt`                 | double | `0.02`  | Slope finite difference dt [s]                                      |
 | `slope_min`                | double | `5.0`   | Minimum slope for contact [1/s]                                     |
 | `stall_velocity_threshold` | double | `0.007` | Gripper speed below this = stalled [m/s]                            |
 | `width_gap_threshold`      | double | `0.002` | Min gap (w - w_cmd) for stall detection [m]                         |
@@ -519,34 +526,32 @@ The **velocity profile** (first derivative) is:
 | `execute_gripper_actions`  | bool   | `true`  | Execute gripper actions (false = signal-only)                       |
 | `closing_width`            | double | `0.01`  | Default width for MoveAction in CLOSING [m]                         |
 | `closing_speed`            | double | `0.04`  | Default speed for MoveAction in CLOSING [m/s] (clamped to max 0.10) |
-| `grasp_width`              | double | `0.02`  | Default width for GraspAction [m]                                   |
+| `grasp_width`              | double | `0.02`  | Fallback width for GraspAction [m] (contact width is used first)    |
 | `epsilon_inner`            | double | `0.005` | Default inner epsilon for GraspAction [m]                           |
 | `epsilon_outer`            | double | `0.005` | Default outer epsilon for GraspAction [m]                           |
 | `grasp_speed`              | double | `0.04`  | Default speed for GraspAction [m/s]                                 |
 | `grasp_force`              | double | `10.0`  | Default force for GraspAction [N]                                   |
 | `uplift_distance`          | double | `0.003` | Default upward displacement [m] (max 0.01)                          |
 | `uplift_duration`          | double | `1.0`   | Cosine-smoothed motion duration [s]                                 |
-| `uplift_reference_frame`   | string | `world` | Reference frame for z-axis displacement                             |
-| `require_secure_grasp`     | bool   | `true`  | Only allow UPLIFT from SECURE_GRASP state                           |
+| `require_secure_grasp`     | bool   | `true`  | Only allow UPLIFT from SECURE_GRASP or UPLIFT state                 |
 
-Gripper and UPLIFT parameters are **defaults**. They can be overridden per-command by setting non-zero values in the `KittingGripperCommand` message published on `/kitting_phase2/state_cmd`.
+Gripper and UPLIFT parameters are **defaults**. They can be overridden per-command by setting non-zero values in the `KittingGripperCommand` message published on `/kitting_controller/state_cmd`.
 
-### Logger Parameters (`config/kitting_phase2_logger.yaml`)
+### Logger Parameters (`config/kitting_logger.yaml`)
 
 | Parameter              | Type        | Default          | Description                          |
 | ---------------------- | ----------- | ---------------- | ------------------------------------ |
 | `base_directory`       | string      | `~/kitting_bags` | Root directory for bag files         |
 | `object_name`          | string      | `default_object` | Object identifier for file naming    |
-| `auto_stop_on_contact` | bool        | `false`          | Auto-stop recording on CONTACT       |
 | `export_csv_on_stop`   | bool        | `true`           | Auto-export CSV when recording stops |
 | `topics_to_record`     | string list | (see below)      | Topics recorded in rosbag            |
 
 Default recorded topics:
 
 - `/kitting_state_controller/kitting_state_data`
-- `/kitting_phase2/state`
-- `/kitting_phase2/state_cmd`
-- `/kitting_phase2/record_control`
+- `/kitting_controller/state`
+- `/kitting_controller/state_cmd`
+- `/kitting_controller/record_control`
 - `/joint_states`
 
 ## File Output Structure
@@ -580,10 +585,9 @@ stop_time: "20260218_143052"
 total_samples: 6750
 topics_recorded:
   - /kitting_state_controller/kitting_state_data
-  - /kitting_phase2/state
-  - /kitting_phase2/record_control
+  - /kitting_controller/state
+  - /kitting_controller/record_control
   - /joint_states
-auto_stop_on_contact: false
 export_csv_on_stop: true
 detector_parameters:
   T_base: 0.7
@@ -591,7 +595,6 @@ detector_parameters:
   k_sigma: 3.0
   T_hold_arm: 0.10
   use_slope_gate: false
-  slope_dt: 0.02
   slope_min: 5.0
   stall_velocity_threshold: 0.007
   width_gap_threshold: 0.002
@@ -625,29 +628,33 @@ The CSV contains one row per `KittingState` message (63 columns):
 
 `O_T_EE` (16 values) and `jacobian` (42 values) are not included in the CSV. They remain in the rosbag.
 
-State labels are synchronized by iterating the bag chronologically: each signal row gets the most recent `/kitting_phase2/state` label at that timestamp.
+State labels are synchronized by iterating the bag chronologically: each signal row gets the most recent `/kitting_controller/state` label at that timestamp.
 
 ## KittingGripperCommand Message
 
-Per-object gripper command published on `/kitting_phase2/state_cmd`. Any parameter left at `0.0` (the ROS default for `float64`) falls back to the YAML config value loaded at startup. This lets you override only the parameters that differ for a particular object.
+Per-object command published on `/kitting_controller/state_cmd`. Any float64 parameter left at `0.0` falls back to the YAML config default. This lets you override only the parameters that differ for a particular object.
 
-| Field             | Type    | Description                                              |
-| ----------------- | ------- | -------------------------------------------------------- |
-| `command`         | string  | `"CLOSING"`, `"SECURE_GRASP"`, or `"UPLIFT"`             |
-| `closing_width`   | float64 | Target width for MoveAction [m] (0 = use default)        |
-| `closing_speed`   | float64 | Speed for MoveAction [m/s] (0 = use default, max 0.10)   |
-| `grasp_width`     | float64 | Target width for GraspAction [m] (0 = use default)       |
-| `epsilon_inner`   | float64 | Inner epsilon for GraspAction [m] (0 = use default)      |
-| `epsilon_outer`   | float64 | Outer epsilon for GraspAction [m] (0 = use default)      |
-| `grasp_speed`     | float64 | Speed for GraspAction [m/s] (0 = use default)            |
-| `grasp_force`     | float64 | Force for GraspAction [N] (0 = use default)              |
-| `uplift_distance` | float64 | Upward displacement [m] (0 = use default, max 0.01)      |
-| `uplift_duration` | float64 | Duration of cosine-smoothed micro-lift [s] (0 = default) |
+| Field             | Type    | Description                                                                        |
+| ----------------- | ------- | ---------------------------------------------------------------------------------- |
+| `command`         | string  | `"BASELINE"`, `"CLOSING"`, `"SECURE_GRASP"`, or `"UPLIFT"`                        |
+| `open_gripper`    | bool    | If true, open gripper before baseline collection (default: false)                  |
+| `open_width`      | float64 | Width to open to [m] (0 = max_width from firmware). Only if `open_gripper` is true |
+| `closing_width`   | float64 | Target width for MoveAction [m] (0 = use default)                                  |
+| `closing_speed`   | float64 | Speed for MoveAction [m/s] (0 = use default, max 0.10)                             |
+| `grasp_width`     | float64 | Target width for GraspAction [m] (0 = use contact width, or default)               |
+| `epsilon`         | float64 | Epsilon for GraspAction [m] — sets both inner and outer (0 = use individual or default) |
+| `epsilon_inner`   | float64 | Inner epsilon [m] (0 = use default). Overridden by `epsilon` if set                |
+| `epsilon_outer`   | float64 | Outer epsilon [m] (0 = use default). Overridden by `epsilon` if set                |
+| `grasp_speed`     | float64 | Speed for GraspAction [m/s] (0 = use default)                                      |
+| `grasp_force`     | float64 | Force for GraspAction [N] (0 = use default)                                        |
+| `uplift_distance` | float64 | Upward displacement [m] (0 = use default, max 0.01)                                |
+| `uplift_duration` | float64 | Duration of cosine-smoothed micro-lift [s] (0 = default)                           |
 
 Only the parameters relevant to the command are used:
 
+- `BASELINE` uses `open_gripper` and `open_width`
 - `CLOSING` uses `closing_width` and `closing_speed`
-- `SECURE_GRASP` uses `grasp_width`, `epsilon_inner`, `epsilon_outer`, `grasp_speed`, and `grasp_force`
+- `SECURE_GRASP` uses `grasp_width`, `epsilon` (or `epsilon_inner`/`epsilon_outer`), `grasp_speed`, and `grasp_force`
 - `UPLIFT` uses `uplift_distance` and `uplift_duration`
 
 ## KittingState Message
@@ -708,7 +715,7 @@ This eliminates the dependency on the `franka_gripper` ROS package. The launch f
 
 ## Recording Performance
 
-The Phase 2 logger is written in C++ using the `rosbag::Bag` API directly and `topic_tools::ShapeShifter` for generic topic subscription. This eliminates:
+The Grasp logger is written in C++ using the `rosbag::Bag` API directly and `topic_tools::ShapeShifter` for generic topic subscription. This eliminates:
 
 - **No subprocess spawn** — bag is opened via API, not `rosbag record` subprocess
 - **No Python GIL** — pure C++ callbacks, no interpreter overhead
@@ -716,7 +723,7 @@ The Phase 2 logger is written in C++ using the `rosbag::Bag` API directly and `t
 - **Multi-threaded** — uses `ros::AsyncSpinner(4)` so data callbacks and command callbacks run concurrently
 - **Single mutex** — one lock protects all trial state, minimal contention
 
-## Phase 1 Validation
+## Validation
 
 ### Test 1 -- Free Space Motion
 
@@ -730,17 +737,20 @@ Push the robot gently. **Expected**: increase in `tau_ext_norm` and `wrench_norm
 
 Move EE into table. **Expected**: clear increase in Fz, `wrench_norm`, `tau_ext_norm`.
 
-## Phase 2 Acceptance Checks
+## Grasp Acceptance Checks
 
-- **Logger must be running before any state commands are accepted** — controller rejects BASELINE and all `state_cmd` commands until `/kitting_phase2/logger_ready` is received
+- **Single launch file** — `record:=true` enables recording, `record:=false` (default) runs without logger
+- **Logger gate** (only when `record:=true`) — controller rejects commands until logger is ready
+- **All commands go through `/kitting_controller/state_cmd`** — BASELINE, CLOSING, SECURE_GRASP, UPLIFT
+- **BASELINE** is published once from START to begin the grasp sequence
+- **BASELINE with `open_gripper: true`** waits 3 seconds for gripper to open before collecting
 - Recording starts automatically when the logger launches — no START command needed
+- Recording continues through all state transitions until STOP/ABORT or node shutdown
 - Recording and state labeling are independent
-- STOP/ABORT on `/kitting_phase2/record_control` end recording
-- State labels on `/kitting_phase2/state` are for offline segmentation only
+- State labels on `/kitting_controller/state` are published by the controller for offline segmentation
 - One rosbag per trial containing all signals and all state transitions
 - STOP saves bag + metadata + CSV, ABORT deletes trial (no CSV)
 - Logger shutdown (Ctrl+C) automatically stops recording (equivalent to STOP)
-- CONTACT auto-stop works when `auto_stop_on_contact` is enabled
 - Bag contains 5 topics: kitting_state_data, state, state_cmd, record_control, joint_states
 - CSV contains 60 flattened columns with correct state labels per row
 - CSV export does not block the ROS spin loop (runs in background thread)
@@ -752,9 +762,12 @@ Move EE into table. **Expected**: clear increase in Fz, `wrench_norm`, `tau_ext_
 - Arm disturbance during CLOSING: tau_ext_norm > theta → CONTACT (arm)
 - Gripper stops immediately on contact: `stop()` called via atomic flag and read thread
 - Contact source recorded: "ARM" or "GRIPPER" logged on CONTACT transition
+- Contact width saved at CONTACT — used as default `grasp_width` in SECURE_GRASP
 - KittingState includes gripper_width, gripper_width_dot, gripper_width_cmd, gripper_max_width, gripper_is_grasped fields
 - Publishing CLOSING on `state_cmd` triggers gripper `move()` + state label
-- Publishing SECURE_GRASP on `state_cmd` triggers gripper `grasp()` + state label
+- Publishing BASELINE on `state_cmd` begins baseline collection (optionally opens gripper)
+- Publishing SECURE_GRASP on `state_cmd` triggers gripper `grasp()` + state label (uses contact width as default grasp_width)
+- `epsilon` field in SECURE_GRASP sets both epsilon_inner and epsilon_outer
 - Publishing UPLIFT on `state_cmd` triggers internal Cartesian micro-lift + state label
 - UPLIFT moves robot upward by `uplift_distance` over `uplift_duration` with cosine smoothing
 - UPLIFT orientation remains unchanged throughout the motion
