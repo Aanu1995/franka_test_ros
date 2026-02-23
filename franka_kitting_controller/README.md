@@ -287,7 +287,7 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
     f_min: 5.0, f_step: 3.0, f_max: 25.0, \
     fr_grasp_speed: 0.03, fr_epsilon: 0.005, \
     fr_uplift_distance: 0.005, fr_lift_speed: 0.005, fr_uplift_hold: 0.8, \
-    fr_stabilization: 0.5, fr_slip_tau_drop: 0.25, fr_slip_width_change: 0.002}" --once
+    fr_stabilization: 0.5, fr_slip_tau_drop: 0.20, fr_slip_width_change: 0.001}" --once
 
 # Stop recording
 rostopic pub /kitting_controller/record_control std_msgs/String "data: 'STOP'" --once
