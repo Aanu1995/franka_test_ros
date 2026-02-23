@@ -1072,6 +1072,8 @@ void KittingStateController::tickGrasping(const ros::Time& time,
     return;
   }
 
+  ROS_INFO("    Grasp force applied: %.2f N (iteration %d)", fr_f_current_, fr_iteration_);
+
   // Step 4: Record reference signals before UPLIFT
   fr_tau_before_ = tau_ext_norm;
   fr_width_before_uplift_ = gripper_snapshot.width;

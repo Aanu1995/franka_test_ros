@@ -170,7 +170,7 @@ Assess grasp stability at the lifted position. **Auto-triggered** after UPLIFT c
 - After hold, evaluates two slip criteria (OR logic):
   - **Torque drop**: `(tau_before - tau_min_during) / tau_before > fr_slip_tau_drop` (default 0.20)
   - **Width change**: `max_width_during - width_before > fr_slip_width_change` (default 0.001 m)
-- If **no slip**: transitions to SUCCESS
+- If **no slip**: transitions to SUCCESS (see [Slip Detection](#grasp-slip-detection) for formulas and decision logic)
 - If **slip detected**: transitions to DOWNLIFT to retry with higher force
 
 ### DOWNLIFT
@@ -497,6 +497,90 @@ This value is then used for all stall debounce checks during that CLOSING state.
 ### Latching
 
 Once CONTACT is declared by either detector, it is **latched** — both detectors stop evaluating. This prevents oscillation at the contact boundary. Restarting the controller is required to re-arm the detectors.
+
+## Grasp: Slip Detection
+
+After each UPLIFT, the controller evaluates whether the object slipped during the lift. Two independent slip criteria are checked (OR logic) — if either triggers, the grasp is retried with higher force.
+
+### Reference Signals
+
+Just before UPLIFT begins (end of `tickGrasping()`), the controller records two reference values:
+
+| Symbol           | Description                                      | Source              |
+| ---------------- | ------------------------------------------------ | ------------------- |
+| `tau_before`     | External torque norm at the moment before lift    | `tau_ext_norm`      |
+| `width_before`   | Gripper finger width at the moment before lift    | `gripper_snapshot.width` |
+
+### Tracking During Hold
+
+During the `fr_uplift_hold` period (default 0.5 s) at the lifted position, the controller continuously tracks:
+
+| Symbol                | Description                                          |
+| --------------------- | ---------------------------------------------------- |
+| `tau_min_during`      | Minimum `tau_ext_norm` observed during the hold      |
+| `max_width_during`    | Maximum gripper width observed during the hold       |
+
+A dropping torque norm suggests the object is slipping (load decreasing). An increasing gripper width suggests the fingers are opening (object pushing them apart).
+
+### Slip Formulas
+
+After the hold period completes:
+
+```
+  tau_drop     = (tau_before - tau_min_during) / tau_before
+  width_change = max_width_during - width_before
+
+  slip = (tau_drop > fr_slip_tau_drop) OR (width_change > fr_slip_width_change)
+```
+
+| Symbol                | Default | Description                                            |
+| --------------------- | ------- | ------------------------------------------------------ |
+| `fr_slip_tau_drop`    | 0.20    | Fractional torque drop threshold (0.20 = 20% drop)    |
+| `fr_slip_width_change`| 0.001 m | Gripper width increase threshold                       |
+
+### Decision
+
+```
+  If slip  → DOWNLIFT → SETTLING → GRASPING (retry with F += f_step)
+  If stable → SUCCESS
+```
+
+### Example Log Output
+
+After each evaluation, the controller logs the actual values vs thresholds:
+
+```
+  Grasp force applied: 3.00 N (iteration 0)
+  ============================================================
+    [STATE]  >>  UPLIFT  <<  Micro-lift starting
+  ============================================================
+    [STATE]  >>  EVALUATE  <<  Hold + slip detection
+  [EVALUATE]  tau_drop=0.150 (thresh=0.200)  width_change=0.0003 (thresh=0.0010)  STABLE
+  ============================================================
+    [STATE]  >>  SUCCESS  <<  Stable grasp confirmed
+  ============================================================
+```
+
+In this example:
+- `tau_drop=0.150` — torque norm dropped 15%, below the 20% threshold
+- `width_change=0.0003` — gripper opened 0.3 mm, below the 1.0 mm threshold
+- **Verdict: STABLE → SUCCESS**
+
+A slip example would show:
+
+```
+  [EVALUATE]  tau_drop=0.250 (thresh=0.200)  width_change=0.0012 (thresh=0.0010)  SLIP
+  ============================================================
+    [STATE]  >>  DOWNLIFT  <<  Returning before force increment
+  ============================================================
+    [STATE]  >>  SETTLING  <<  Post-downlift stabilization
+  Grasp force applied: 5.00 N (iteration 1)
+  ============================================================
+    [STATE]  >>  UPLIFT  <<  Micro-lift starting
+  ============================================================
+```
+
+Here both criteria exceeded their thresholds (25% > 20%, 1.2 mm > 1.0 mm), so the controller retries with incremented force (3 + 2 = 5 N).
 
 ## Grasp: UPLIFT / DOWNLIFT Trajectory Mathematics
 
