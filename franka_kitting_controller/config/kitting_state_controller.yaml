@@ -13,7 +13,7 @@ kitting_state_controller:
   slope_min: 5.0 # Minimum slope for contact [1/s]
 
   # Gripper contact detection parameters
-  stall_velocity_threshold: 0.007 # [m/s] Speed below this = stalled
+  stall_velocity_threshold: 0.0075 # [m/s] Speed below this = stalled
   width_gap_threshold: 0.002 # [m] Min gap: (w - w_cmd) > this to distinguish stall from completion
   # T_hold_gripper: computed dynamically as 0.35 + 0.5 * closing_speed (no config needed)
   stop_on_contact: true # Call gripper stop() on contact detection

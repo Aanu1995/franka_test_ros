@@ -214,7 +214,7 @@ class KittingStateController
   double slope_min_{5.0};
 
   // --- Gripper contact detection parameters ---
-  double stall_velocity_threshold_{0.007};  // [m/s] Speed below this = stalled
+  double stall_velocity_threshold_{0.0075};  // [m/s] Speed below this = stalled
   double width_gap_threshold_{0.002};       // [m] Min gap: (w - w_cmd) > this
   bool stop_on_contact_{true};              // Call stop() on contact
 
