@@ -487,7 +487,7 @@ bool KittingStateController::init(hardware_interface::RobotHW* robot_hw,
   node_handle.param("slope_min", slope_min_, 5.0);
 
   // --- Gripper contact detection parameters ---
-  node_handle.param("stall_velocity_threshold", stall_velocity_threshold_, 0.0075);
+  node_handle.param("stall_velocity_threshold", stall_velocity_threshold_, 0.008);
   node_handle.param("width_gap_threshold", width_gap_threshold_, 0.002);
   node_handle.param("stop_on_contact", stop_on_contact_, true);
   node_handle.param("enable_arm_contact", enable_arm_contact_, false);

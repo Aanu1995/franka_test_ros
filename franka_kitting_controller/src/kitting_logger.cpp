@@ -90,7 +90,7 @@ KittingLogger::KittingLogger()
   nh_.param(ctrl_ns + "T_hold_arm", T_hold_arm_, 0.10);
   nh_.param(ctrl_ns + "use_slope_gate", use_slope_gate_, false);
   nh_.param(ctrl_ns + "slope_min", slope_min_, 5.0);
-  nh_.param(ctrl_ns + "stall_velocity_threshold", stall_velocity_threshold_, 0.0075);
+  nh_.param(ctrl_ns + "stall_velocity_threshold", stall_velocity_threshold_, 0.008);
   nh_.param(ctrl_ns + "width_gap_threshold", width_gap_threshold_, 0.002);
   nh_.param(ctrl_ns + "enable_arm_contact", enable_arm_contact_, true);
   nh_.param(ctrl_ns + "enable_gripper_contact", enable_gripper_contact_, true);

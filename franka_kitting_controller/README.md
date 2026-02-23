@@ -133,7 +133,7 @@ Detect first stable physical interaction. Published **automatically** by the con
 
 - Object touches gripper fingers — detected by **either** the arm or gripper detector
 - **Arm detection**: External torque norm exceeds threshold `x(t) > θ` continuously for `T_hold_arm` seconds (default 0.10 s)
-- **Gripper detection**: Width velocity drops below `stall_velocity_threshold` (0.0075 m/s) while `(width - w_cmd) > width_gap_threshold` (0.002 m), sustained for `T_hold_gripper` seconds (computed dynamically from `closing_speed`; see [Dynamic Gripper Debounce Time](#dynamic-gripper-debounce-time-t_hold_gripper))
+- **Gripper detection**: Width velocity drops below `stall_velocity_threshold` (0.008 m/s) while `(width - w_cmd) > width_gap_threshold` (0.002 m), sustained for `T_hold_gripper` seconds (computed dynamically from `closing_speed`; see [Dynamic Gripper Debounce Time](#dynamic-gripper-debounce-time-t_hold_gripper))
 - **Immediate stop**: On contact, `franka::Gripper::stop()` is called via the read thread to physically halt the motor at the contact width
 - CONTACT is **latched** once detected — cannot return to CLOSING
 - `contact_source` records which detector fired: `"ARM"` or `"GRIPPER"`
@@ -409,7 +409,7 @@ The `GripperData` struct `{width, max_width, width_dot, is_grasped, stamp}` is p
 During CLOSING, the controller checks every RT tick:
 
 ```
-  velocity_stalled = |w_dot| < stall_velocity_threshold    (default 0.0075 m/s)
+  velocity_stalled = |w_dot| < stall_velocity_threshold    (default 0.008 m/s)
   width_gap_exists = (w - w_cmd) > width_gap_threshold     (default 0.002 m)
 
   stall_detected = velocity_stalled AND width_gap_exists
@@ -426,7 +426,7 @@ The **width gap check** is essential: without it, normal gripper completion (vel
 | `w`              | Gripper width            | m    | —        | Current finger width (from `franka::GripperState.width`)                                                                            |
 | `w_dot`          | Width velocity           | m/s  | —        | Finite difference of `w` between consecutive `readOnce()` calls                                                                     |
 | `w_cmd`          | Commanded width          | m    | 0.01     | Target width for the active MoveAction (from CLOSING command)                                                                       |
-| `v_stall`        | Stall velocity threshold | m/s  | 0.0075   | Speed below this is considered stalled                                                                                              |
+| `v_stall`        | Stall velocity threshold | m/s  | 0.008   | Speed below this is considered stalled                                                                                              |
 | `Δw`             | Width gap threshold      | m    | 0.002    | Minimum `(w - w_cmd)` to distinguish stall from normal completion                                                                   |
 | `T_hold_gripper` | Debounce time            | s    | computed | Duration stall must persist to declare contact (see [Dynamic Gripper Debounce Time](#dynamic-gripper-debounce-time-t_hold_gripper)) |
 
@@ -589,7 +589,7 @@ The **velocity profile** (first derivative) is:
 | `T_hold_arm`               | double | `0.10`  | Arm torque debounce hold time [s]                                   |
 | `use_slope_gate`           | bool   | `false` | Enable slope gate (for drift false positives)                       |
 | `slope_min`                | double | `5.0`   | Minimum slope for contact [1/s]                                     |
-| `stall_velocity_threshold` | double | `0.0075` | Gripper speed below this = stalled [m/s]                            |
+| `stall_velocity_threshold` | double | `0.008` | Gripper speed below this = stalled [m/s]                            |
 | `width_gap_threshold`      | double | `0.002` | Min gap (w - w_cmd) for stall detection [m]                         |
 | `stop_on_contact`          | bool   | `true`  | Call `stop()` on contact detection                                  |
 | `enable_arm_contact`       | bool   | `false` | Enable arm torque contact detector                                  |
@@ -665,7 +665,7 @@ detector_parameters:
   T_hold_arm: 0.10
   use_slope_gate: false
   slope_min: 5.0
-  stall_velocity_threshold: 0.0075
+  stall_velocity_threshold: 0.008
   width_gap_threshold: 0.002
   T_hold_gripper: "computed: 0.35 + 0.5 * closing_speed"
   stop_on_contact: true
