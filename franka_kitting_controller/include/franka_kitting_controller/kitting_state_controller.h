@@ -5,6 +5,7 @@
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -32,17 +33,28 @@
 
 namespace franka_kitting_controller {
 
-/// Grasp states for Grasp data collection.
+/// Grasp states for data collection and automated force ramp.
 /// Controller starts in START — no baseline collection, no contact detection,
 /// just Cartesian passthrough and state data publishing. The grasp state machine
 /// begins when the user explicitly publishes BASELINE on /kitting_controller/state_cmd.
+///
+/// User-commanded: START→BASELINE, →CLOSING, →GRASPING
+/// Automatic:      CLOSING→CONTACT (contact detection)
+/// Internal (RT):  GRASPING→UPLIFT→EVALUATE→SUCCESS
+///                 On slip: EVALUATE→DOWNLIFT→SETTLING→GRASPING (retry)
+///                 On F > f_max: SETTLING→FAILED
 enum class GraspState {
-  START,          // Initial state: controller running, awaiting BASELINE command
-  BASELINE,
-  CLOSING,
-  CONTACT,
-  SECURE_GRASP,
-  UPLIFT
+  START,        // Initial state: controller running, awaiting BASELINE command
+  BASELINE,     // Collecting reference signals
+  CLOSING,      // Gripper approaching object
+  CONTACT,      // Contact detected
+  GRASPING,     // Applying grasp force, waiting for completion + stabilization
+  UPLIFT,       // Cosine-smoothed micro-lift trajectory
+  EVALUATE,     // Hold + slip detection (hold for uplift_hold, then evaluate immediately)
+  DOWNLIFT,     // Returning to z_initial before force increment
+  SETTLING,     // Post-downlift stabilization
+  SUCCESS,      // Stable grasp confirmed
+  FAILED        // Max force exceeded
 };
 
 /// Command types for the gripper command thread.
@@ -67,20 +79,43 @@ struct GripperData {
   ros::Time stamp;         // Timestamp of the measurement
 };
 
+/// Lightweight debounce helper for sustained-threshold detection. RT-safe.
+struct DebounceState {
+  bool active{false};
+  ros::Time start_time;
+
+  /// Check if a condition has been sustained for at least hold_duration.
+  /// Returns true exactly once when the debounce threshold is reached.
+  bool check(bool condition, const ros::Time& now, double hold_duration) {
+    if (condition) {
+      if (!active) {
+        active = true;
+        start_time = now;
+        return false;
+      }
+      return (now - start_time).toSec() >= hold_duration;
+    }
+    active = false;
+    return false;
+  }
+
+  void reset() { active = false; }
+};
+
 /**
- * Controller that publishes comprehensive robot state, implements Grasp
- * contact detection with a 6-state machine, and executes Cartesian micro-lift
- * (UPLIFT) internally.
+ * Controller that publishes comprehensive robot state, implements contact
+ * detection, and executes an automated force ramp with micro-lift evaluation.
  *
  * Claims FrankaModelInterface, FrankaStateInterface, and FrankaPoseCartesianInterface.
- * The Cartesian pose interface is used for UPLIFT micro-lift execution. In all other
+ * The Cartesian pose interface is used for UPLIFT/DOWNLIFT trajectories. In all other
  * states, the controller operates in passthrough mode (holds current position).
  *
  * Grasp topics:
- *   /kitting_controller/state_cmd [subscribed]  KittingGripperCommand (BASELINE, CLOSING, SECURE_GRASP, UPLIFT)
+ *   /kitting_controller/state_cmd [subscribed]  KittingGripperCommand (BASELINE, CLOSING, GRASPING)
  *                                           with per-object parameters (0 = use YAML default)
- *   /kitting_controller/state     [published]   State labels: all states echoed here (BASELINE, CLOSING,
- *                                           CONTACT, SECURE_GRASP, UPLIFT). No user input on this topic.
+ *   /kitting_controller/state     [published]   State labels for all states (BASELINE, CLOSING,
+ *                                           CONTACT, GRASPING, UPLIFT, EVALUATE, DOWNLIFT,
+ *                                           SETTLING, SUCCESS, FAILED).
  *
  * Recording is controlled separately via /kitting_controller/record_control
  * (handled by the logger node, not the controller).
@@ -152,16 +187,12 @@ class KittingStateController
 
   // --- Grasp: Gripper default parameters (overridable per-command) ---
   bool execute_gripper_actions_{true};
-  double closing_width_{0.04};
-  double closing_speed_{0.04};
-  double grasp_width_{0.02};
-  double epsilon_inner_{0.005};
-  double epsilon_outer_{0.005};
-  double grasp_speed_{0.04};
-  double grasp_force_{10.0};
+  double closing_width_{0.01};
+  double closing_speed_{0.02};
 
   // State machine — cross-thread synchronization
   // current_state_: read by subscriber thread (precondition checks), written by RT thread.
+  //   Also written by RT thread for internal transitions (GRASPING→UPLIFT→EVALUATE etc.)
   // pending_state_: written by subscriber thread, read by RT thread.
   // state_changed_: synchronization flag — release on write, acquire on read.
   //   All stores before the release-store of state_changed_ are visible to the RT thread
@@ -173,7 +204,7 @@ class KittingStateController
 
   // --- Grasp: Arm contact detector parameters ---
   bool enable_contact_detector_{true};
-  bool enable_arm_contact_{true};
+  bool enable_arm_contact_{false};
   bool enable_gripper_contact_{true};
   double T_base_{0.7};
   int N_min_{50};
@@ -183,7 +214,7 @@ class KittingStateController
   double slope_min_{5.0};
 
   // --- Gripper contact detection parameters ---
-  double stall_velocity_threshold_{0.005};  // [m/s] Speed below this = stalled
+  double stall_velocity_threshold_{0.007};  // [m/s] Speed below this = stalled
   double width_gap_threshold_{0.002};       // [m] Min gap: (w - w_cmd) > this
   bool stop_on_contact_{true};              // Call stop() on contact
 
@@ -200,25 +231,21 @@ class KittingStateController
   double contact_threshold_{0.0};  // theta = mu + k * sigma
   std::atomic<bool> baseline_params_pending_{false};  // RT → read thread: publish params
 
-  // Arm debounce state
-  ros::Time exceed_start_time_;
-  bool exceeding_{false};
-
-  // Gripper debounce state (RT-thread owned)
-  ros::Time gripper_stall_start_time_;
-  bool gripper_stall_active_{false};
+  // Debounce state (RT-thread owned)
+  DebounceState arm_debounce_;
+  DebounceState gripper_debounce_;
   std::atomic<bool> gripper_stop_sent_{false};  // Written by RT, read by command thread
   const char* contact_source_{""};  // "ARM" or "GRIPPER" — records which detector fired (RT-safe)
-  std::atomic<double> contact_width_{0.0};  // Gripper width at CONTACT — default grasp_width for SECURE_GRASP
+  std::atomic<double> contact_width_{0.0};  // Gripper width at CONTACT — used as grasp width in GRASPING
   bool baseline_awaiting_gripper_{false}; // Wait for gripper open before baseline collection
   ros::Time baseline_gripper_wait_start_; // Timestamp when gripper open wait started
 
   // RT-local copies of CLOSING command parameters — snapshotted when CLOSING begins.
   // Written by subscriber (stateCmdCallback), synchronized via release/acquire on state_changed_.
-  double closing_w_cmd_{0.04};     // Resolved target width for active MoveAction
-  double closing_v_cmd_{0.04};     // Resolved speed for active MoveAction
-  double rt_closing_w_cmd_{0.04};  // RT-local copy
-  double rt_closing_v_cmd_{0.04};  // RT-local copy
+  double closing_w_cmd_{0.01};     // Resolved target width for active MoveAction
+  double closing_v_cmd_{0.02};     // Resolved speed for active MoveAction
+  double rt_closing_w_cmd_{0.01};  // RT-local copy
+  double rt_closing_v_cmd_{0.02};  // RT-local copy
   double rt_T_hold_gripper_{0.35}; // Computed from rt_closing_v_cmd_ when CLOSING starts
 
   // Slope gate state
@@ -232,36 +259,115 @@ class KittingStateController
   // Faster gripper velocity logger (10 Hz — for debugging gripper speed profile)
   franka_hw::TriggerRate gripper_log_trigger_{10.0};
 
-  // --- UPLIFT trajectory state (RT-thread owned, except uplift_active_) ---
-  std::atomic<bool> uplift_active_{false};  // Read by subscriber (duplicate guard), written by RT
+  // --- UPLIFT trajectory state (RT-thread owned) ---
+  std::atomic<bool> uplift_active_{false};
   double uplift_elapsed_{0.0};
   std::array<double, 16> uplift_start_pose_{};
   double uplift_z_start_{0.0};
-
-  // RT-local copies of UPLIFT parameters — snapshotted when UPLIFT starts in update().
-  // These isolate the RT trajectory from concurrent subscriber writes.
+  // RT-local copies of UPLIFT parameters — set when UPLIFT starts internally.
   double rt_uplift_distance_{0.003};
-  double rt_uplift_duration_{1.0};
+  double rt_uplift_duration_{0.3};
 
-  // --- UPLIFT parameters (loaded from YAML, overridable per-command) ---
-  // Written by subscriber thread (stateCmdCallback), read by RT thread only via rt_ copies.
-  double uplift_distance_{0.003};
-  double uplift_duration_{1.0};
-  bool require_secure_grasp_{true};
-  static constexpr double kMaxUpliftDistance{0.01};
+  // --- DOWNLIFT trajectory state (RT-thread owned) ---
+  std::atomic<bool> downlift_active_{false};
+  double downlift_elapsed_{0.0};
+  std::array<double, 16> downlift_start_pose_{};
+  double downlift_z_start_{0.0};
+  double rt_downlift_distance_{0.003};
+  double rt_downlift_duration_{0.3};
+
+  // --- Force ramp: YAML default parameters (overridable per-command via KittingGripperCommand) ---
+  double fr_f_min_{3.0};
+  double fr_f_step_{2.0};
+  double fr_f_max_{15.0};
+  double fr_uplift_distance_{0.003};
+  double fr_lift_speed_{0.01};
+  double fr_uplift_hold_{0.5};
+  double fr_grasp_speed_{0.02};
+  double fr_epsilon_{0.008};        // Single epsilon (inner == outer)
+  double fr_stabilization_{0.3};
+  double fr_slip_tau_drop_{0.20};
+  double fr_slip_width_change_{0.001};
+
+  // --- Force ramp: RT-local copies of resolved per-command parameters ---
+  // Snapshotted in applyPendingStateTransition() when entering GRASPING.
+  // Prevents concurrent subscriber writes from corrupting mid-ramp parameters.
+  double rt_fr_f_min_{3.0};
+  double rt_fr_f_step_{2.0};
+  double rt_fr_f_max_{15.0};
+  double rt_fr_uplift_distance_{0.003};
+  double rt_fr_lift_speed_{0.01};
+  double rt_fr_uplift_hold_{0.5};
+  double rt_fr_grasp_speed_{0.02};
+  double rt_fr_epsilon_{0.008};
+  double rt_fr_stabilization_{0.3};
+  double rt_fr_slip_tau_drop_{0.20};
+  double rt_fr_slip_width_change_{0.001};
+
+  // --- Force ramp: staging variables (subscriber → RT via state_changed_) ---
+  // Written by stateCmdCallback() with resolved per-command values, before release-store
+  // on state_changed_. RT thread snapshots these to rt_fr_* in applyPendingStateTransition().
+  double staging_fr_f_min_{3.0};
+  double staging_fr_f_step_{2.0};
+  double staging_fr_f_max_{15.0};
+  double staging_fr_uplift_distance_{0.003};
+  double staging_fr_lift_speed_{0.01};
+  double staging_fr_uplift_hold_{0.5};
+  double staging_fr_grasp_speed_{0.02};
+  double staging_fr_epsilon_{0.008};
+  double staging_fr_stabilization_{0.3};
+  double staging_fr_slip_tau_drop_{0.20};
+  double staging_fr_slip_width_change_{0.001};
+
+  // --- Force ramp: runtime state (RT-thread owned) ---
+  double fr_f_current_{0.0};           // Current grasp force [N]
+  int fr_iteration_{0};                // Current iteration (0 = first attempt)
+  double fr_z_initial_{0.0};           // EE z-height when force ramp started
+  double fr_grasp_width_{0.0};         // Width for GraspAction (always from contact_width_)
+  double rt_fr_grasp_width_{0.0};      // RT-local snapshot of fr_grasp_width_
+  ros::Time fr_phase_start_time_;      // Phase timing via timestamps
+  bool fr_grasping_phase_initialized_{false};  // First tick of GRASPING has set timer
+  bool fr_grasp_cmd_seen_executing_{false};  // Has cmd_executing_ gone true yet?
+  ros::Time fr_grasp_stabilize_start_;       // Timer for post-grasp stabilization
+  bool fr_grasp_stabilizing_{false};         // In post-grasp stabilization phase
+
+  // EVALUATE data (hold period with continuous signal tracking)
+  double fr_tau_before_{0.0};           // tau_ext_norm sampled before UPLIFT
+  double fr_tau_min_during_{std::numeric_limits<double>::max()};  // Minimum tau_ext_norm during EVALUATE hold
+  double fr_width_before_uplift_{0.0};  // Gripper width before UPLIFT
+  double fr_max_width_during_eval_{0.0}; // Maximum gripper width during EVALUATE hold
+
+  // --- Deferred grasp command (RT → read thread → command thread) ---
+  // RT thread requests a grasp command via this mechanism (can't call queueGripperCommand
+  // from RT because it uses a mutex). Same pattern as baseline_params_pending_:
+  //   RT thread: write parameters, then release-store deferred_grasp_pending_ = true
+  //   Read thread: acquire-load flag, read params, call queueGripperCommand(), clear flag
+  std::atomic<bool> deferred_grasp_pending_{false};
+  double deferred_grasp_width_{0.0};
+  double deferred_grasp_speed_{0.0};
+  double deferred_grasp_force_{0.0};
+  double deferred_grasp_epsilon_{0.0};  // Same for inner/outer
 
   // --- Closing speed safety limit + dynamic gripper hold time ---
   static constexpr double kMaxClosingSpeed{0.10};    // [m/s] Hard cap on closing speed
   static constexpr double kGripperHoldBase{0.35};     // [s] Hold time intercept at zero speed
   static constexpr double kGripperHoldSlope{0.5};     // [s/(m/s)] Linear slope
+  static constexpr double kMaxUpliftDistance{0.01};   // [m] Safety cap on uplift distance
+
+  // --- Force ramp internal timing constants ---
+  static constexpr double kGripperOpenWait{3.0};      // [s] Max wait for gripper open before baseline
+  static constexpr double kGraspSettleDelay{0.1};     // [s] Wait for command thread pickup
+  static constexpr double kGraspTimeout{10.0};        // [s] Fail if grasp doesn't complete
 
   /// Compute gripper stall debounce time from closing speed.
   /// Formula: T_hold = 0.35 + 0.5 * clamp(speed, 0, 0.10)
   static double computeGripperHoldTime(double closing_speed);
 
   /// Compute cosine-smoothed uplift pose for the current elapsed time.
-  /// Uses rt_uplift_distance_ and rt_uplift_duration_ (RT-local copies).
   std::array<double, 16> computeUpliftPose(double elapsed) const;
+
+  /// Compute cosine-smoothed downlift pose for the current elapsed time.
+  std::array<double, 16> computeDownliftPose(double elapsed) const;
 
   /// Publish a state label string exactly once per transition.
   void publishStateLabel(const std::string& label);
@@ -282,6 +388,16 @@ class KittingStateController
                            double tau_ext_norm,
                            const GripperData& gripper_snapshot);
 
+  /// Run internal force ramp transitions (GRASPING→UPLIFT→EVALUATE→...).
+  /// Called at 250Hz from update(). Drives all internal state transitions.
+  void runInternalTransitions(const ros::Time& time,
+                              double tau_ext_norm,
+                              const GripperData& gripper_snapshot);
+
+  /// Request a deferred grasp command from the RT thread.
+  /// RT-safe: only atomic stores, no mutex or allocation.
+  void requestDeferredGrasp(double width, double speed, double force, double epsilon);
+
   /// Populate KittingState message fields. Called inside trylock() guard.
   void fillKittingStateMsg(const ros::Time& time,
                            const franka::RobotState& robot_state,
@@ -289,12 +405,53 @@ class KittingStateController
                            const std::array<double, 7>& gravity,
                            const std::array<double, 7>& coriolis,
                            const std::array<double, 6>& ee_velocity,
-                           double tau_ext_norm, double wrench_norm,
-                           const GripperData& gripper_snapshot,
-                           GraspState state);
+                           double tau_ext_norm, double wrench_norm);
 
   /// Request the read thread to call stop(). RT-safe (atomic store only).
   void requestGripperStop(const char* source);
+
+  // --- Static helpers ---
+
+  /// Resolve a per-command parameter: use msg_value if positive, else default_value.
+  static inline double resolveParam(double msg_value, double default_value) {
+    return (msg_value > 0.0) ? msg_value : default_value;
+  }
+
+  /// Compute Euclidean norm of a fixed-size array. RT-safe, no allocation.
+  template <std::size_t N>
+  static inline double arrayNorm(const std::array<double, N>& arr) {
+    double sum = 0.0;
+    for (std::size_t i = 0; i < N; ++i) {
+      sum += arr[i] * arr[i];
+    }
+    return std::sqrt(sum);
+  }
+
+  /// Log a state transition with separator banners.
+  void logStateTransition(const char* label, const char* detail = nullptr);
+
+  // --- stateCmdCallback decomposition ---
+  void handleBaselineCmd(const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg);
+  void handleClosingCmd(const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg);
+  void handleGraspingCmd(const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg);
+
+  // --- runContactDetection decomposition ---
+  void collectBaselineSamples(const ros::Time& time, double tau_ext_norm);
+  void detectArmContact(const ros::Time& time, double tau_ext_norm,
+                        const GripperData& gripper_snapshot);
+  void detectGripperContact(const ros::Time& time, const GripperData& gripper_snapshot);
+
+  // --- runInternalTransitions decomposition ---
+  void tickGrasping(const ros::Time& time, double tau_ext_norm,
+                    const GripperData& gripper_snapshot);
+  void tickUplift(const ros::Time& time, double tau_ext_norm,
+                  const GripperData& gripper_snapshot);
+  void tickEvaluate(const ros::Time& time, double tau_ext_norm,
+                    const GripperData& gripper_snapshot);
+  void tickDownlift(const ros::Time& time, double tau_ext_norm,
+                    const GripperData& gripper_snapshot);
+  void tickSettling(const ros::Time& time, double tau_ext_norm,
+                    const GripperData& gripper_snapshot);
 };
 
 }  // namespace franka_kitting_controller

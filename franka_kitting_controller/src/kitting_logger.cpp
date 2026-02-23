@@ -79,10 +79,7 @@ KittingLogger::KittingLogger()
   if (!private_nh_.getParam("topics_to_record", topics_to_record_)) {
     topics_to_record_ = {
         "/kitting_state_controller/kitting_state_data",
-        "/kitting_controller/state",
-        "/kitting_controller/state_cmd",
-        "/kitting_controller/record_control",
-        "/joint_states"};
+        "/kitting_controller/state"};
   }
 
   // Detector params for metadata (read from controller namespace)
@@ -178,6 +175,18 @@ void KittingLogger::topicCallback(
       }
     } catch (const rosbag::BagIOException& e) {
       ROS_ERROR_THROTTLE(1.0, "KittingLogger: Failed to write to bag: %s", e.what());
+    }
+
+    // Auto-stop on terminal state: the message is already in the bag,
+    // so stopTrial() can safely close it.
+    if (topic == "/kitting_controller/state") {
+      auto str_msg = msg->instantiate<std_msgs::String>();
+      if (str_msg &&
+          (str_msg->data == "SUCCESS" || str_msg->data == "FAILED")) {
+        ROS_INFO("KittingLogger: Terminal state '%s' — auto-stopping recording",
+                 str_msg->data.c_str());
+        stopTrial();
+      }
     }
   }
 }
@@ -418,8 +427,6 @@ void KittingLogger::exportCsv(const std::string& bag_path,
     csv << ",ee_vx,ee_vy,ee_vz,ee_wx,ee_wy,ee_wz";
     for (int i = 1; i <= 7; ++i) csv << ",gravity_" << i;
     for (int i = 1; i <= 7; ++i) csv << ",coriolis_" << i;
-    csv << ",gripper_width,gripper_width_dot,gripper_width_cmd"
-           ",gripper_max_width,gripper_is_grasped";
     csv << "\n";
 
     // Set high precision for floating point
@@ -472,13 +479,6 @@ void KittingLogger::exportCsv(const std::string& bag_path,
         for (size_t i = 0; i < 7; ++i) csv << "," << ks->gravity[i];
         // coriolis[7]
         for (size_t i = 0; i < 7; ++i) csv << "," << ks->coriolis[i];
-
-        // gripper state
-        csv << "," << ks->gripper_width
-            << "," << ks->gripper_width_dot
-            << "," << ks->gripper_width_cmd
-            << "," << ks->gripper_max_width
-            << "," << (ks->gripper_is_grasped ? 1 : 0);
 
         csv << "\n";
         sample_count++;

@@ -2,6 +2,7 @@
 // Use of this source code is governed by the Apache-2.0 license, see LICENSE
 #include <franka_kitting_controller/kitting_state_controller.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <memory>
@@ -25,6 +26,9 @@ constexpr double KittingStateController::kMaxClosingSpeed;
 constexpr double KittingStateController::kGripperHoldBase;
 constexpr double KittingStateController::kGripperHoldSlope;
 constexpr double KittingStateController::kMaxUpliftDistance;
+constexpr double KittingStateController::kGripperOpenWait;
+constexpr double KittingStateController::kGraspSettleDelay;
+constexpr double KittingStateController::kGraspTimeout;
 
 const char* KittingStateController::stateToString(GraspState state) {
   switch (state) {
@@ -36,10 +40,20 @@ const char* KittingStateController::stateToString(GraspState state) {
       return "CLOSING";
     case GraspState::CONTACT:
       return "CONTACT";
-    case GraspState::SECURE_GRASP:
-      return "SECURE_GRASP";
+    case GraspState::GRASPING:
+      return "GRASPING";
     case GraspState::UPLIFT:
       return "UPLIFT";
+    case GraspState::EVALUATE:
+      return "EVALUATE";
+    case GraspState::DOWNLIFT:
+      return "DOWNLIFT";
+    case GraspState::SETTLING:
+      return "SETTLING";
+    case GraspState::SUCCESS:
+      return "SUCCESS";
+    case GraspState::FAILED:
+      return "FAILED";
     default:
       return "UNKNOWN";
   }
@@ -64,6 +78,14 @@ std::array<double, 16> KittingStateController::computeUpliftPose(double elapsed)
   return pose;
 }
 
+std::array<double, 16> KittingStateController::computeDownliftPose(double elapsed) const {
+  std::array<double, 16> pose = downlift_start_pose_;
+  double s_raw = std::min(elapsed / rt_downlift_duration_, 1.0);
+  double s = 0.5 * (1.0 - std::cos(M_PI * s_raw));
+  pose[14] = downlift_z_start_ - s * rt_downlift_distance_;
+  return pose;
+}
+
 void KittingStateController::requestGripperStop(const char* source) {
   if (stop_on_contact_ && !gripper_stop_sent_.load(std::memory_order_relaxed) &&
       execute_gripper_actions_) {
@@ -73,9 +95,30 @@ void KittingStateController::requestGripperStop(const char* source) {
   }
 }
 
+void KittingStateController::logStateTransition(const char* label, const char* detail) {
+  ROS_INFO("============================================================");
+  if (detail) {
+    ROS_INFO("  [STATE]  >>  %s  <<  %s", label, detail);
+  } else {
+    ROS_INFO("  [STATE]  >>  %s  <<", label);
+  }
+  ROS_INFO("============================================================");
+}
+
 double KittingStateController::computeGripperHoldTime(double closing_speed) {
   double clamped = std::min(std::max(closing_speed, 0.0), kMaxClosingSpeed);
   return kGripperHoldBase + kGripperHoldSlope * clamped;
+}
+
+void KittingStateController::requestDeferredGrasp(double width, double speed,
+                                                   double force, double epsilon) {
+  // RT-safe: only atomic stores, no mutex or allocation.
+  // Gripper read thread acquire-loads the flag and dispatches to command thread.
+  deferred_grasp_width_ = width;
+  deferred_grasp_speed_ = speed;
+  deferred_grasp_force_ = force;
+  deferred_grasp_epsilon_ = epsilon;
+  deferred_grasp_pending_.store(true, std::memory_order_release);
 }
 
 void KittingStateController::loggerReadyCallback(const std_msgs::Bool::ConstPtr& msg) {
@@ -86,9 +129,7 @@ void KittingStateController::loggerReadyCallback(const std_msgs::Bool::ConstPtr&
   if (msg->data && logger_ready_sub_.getNumPublishers() > 0) {
     if (!logger_ready_.load(std::memory_order_relaxed)) {
       logger_ready_.store(true, std::memory_order_relaxed);
-      ROS_INFO("============================================================");
-      ROS_INFO("  [READY]  Grasp logger detected — commands now accepted");
-      ROS_INFO("============================================================");
+      logStateTransition("READY", "Grasp logger detected — commands now accepted");
     }
   }
 }
@@ -163,6 +204,24 @@ void KittingStateController::gripperReadLoop() {
         ros::param::set("/kitting_state_controller/contact_threshold", contact_threshold_);
         baseline_params_pending_.store(false, std::memory_order_relaxed);
       }
+
+      // Dispatch deferred grasp command from RT thread (force ramp iteration).
+      // Same pattern as baseline_params_pending_: acquire-load ensures we see the
+      // parameter stores made by the RT thread before its release-store of the flag.
+      if (deferred_grasp_pending_.load(std::memory_order_acquire)) {
+        GripperCommand grasp_cmd;
+        grasp_cmd.type = GripperCommandType::GRASP;
+        grasp_cmd.width = deferred_grasp_width_;
+        grasp_cmd.speed = deferred_grasp_speed_;
+        grasp_cmd.force = deferred_grasp_force_;
+        grasp_cmd.epsilon_inner = deferred_grasp_epsilon_;
+        grasp_cmd.epsilon_outer = deferred_grasp_epsilon_;
+        queueGripperCommand(grasp_cmd);
+        ROS_INFO("  [GRIPPER]  Deferred grasp queued: width=%.4f speed=%.4f force=%.1f eps=%.4f",
+                 deferred_grasp_width_, deferred_grasp_speed_,
+                 deferred_grasp_force_, deferred_grasp_epsilon_);
+        deferred_grasp_pending_.store(false, std::memory_order_relaxed);
+      }
     } catch (const franka::Exception& ex) {
       ROS_ERROR_STREAM_THROTTLE(1.0, "KittingStateController: readOnce() failed: " << ex.what());
       prev_valid = false;
@@ -231,8 +290,8 @@ void KittingStateController::queueGripperCommand(const GripperCommand& cmd) {
 
 void KittingStateController::stateCmdCallback(
     const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg) {
-  // Listens to /kitting_controller/state_cmd for BASELINE, CLOSING, SECURE_GRASP,
-  // and UPLIFT commands with optional per-object parameters.
+  // Listens to /kitting_controller/state_cmd for BASELINE, CLOSING, and GRASPING
+  // commands with optional per-object parameters.
   //
   // This callback runs in the subscriber's spinner thread (non-RT), so it is
   // safe to queue gripper commands here.
@@ -270,180 +329,135 @@ void KittingStateController::stateCmdCallback(
   }
 
   if (cmd == "BASELINE") {
-    // --- Optional gripper open before baseline collection ---
-    if (msg->open_gripper && execute_gripper_actions_) {
-      double open_w = (msg->open_width > 0.0) ? msg->open_width
-                     : gripper_data_buf_.readFromNonRT()->max_width;
-      GripperCommand open_cmd;
-      open_cmd.type = GripperCommandType::MOVE;
-      open_cmd.width = open_w;
-      open_cmd.speed = 0.1;
-      queueGripperCommand(open_cmd);
-      baseline_gripper_wait_start_ = ros::Time::now();
-      baseline_awaiting_gripper_ = true;
-      ROS_INFO("  [GRIPPER]  Open queued: move(width=%.4f, speed=0.1)", open_w);
-    } else {
-      baseline_awaiting_gripper_ = false;
-    }
-
-    pending_state_.store(GraspState::BASELINE, std::memory_order_relaxed);
-    state_changed_.store(true, std::memory_order_release);
-    publishStateLabel("BASELINE");
-    ROS_INFO("============================================================");
-    ROS_INFO("  [STATE]  >>  BASELINE  <<  Collecting reference signals");
-    ROS_INFO("============================================================");
-    return;
-
+    handleBaselineCmd(msg);
   } else if (cmd == "CLOSING") {
-    if (current_state_.load(std::memory_order_relaxed) == GraspState::CLOSING) {
-      ROS_DEBUG("KittingStateController: Already in CLOSING, ignoring duplicate");
-      return;
-    }
-
-    // Warn if baseline not yet armed — arm contact detector won't work
-    if (enable_arm_contact_ && !baseline_armed_.load(std::memory_order_relaxed)) {
-      ROS_WARN("KittingStateController: Baseline not yet armed — arm torque contact detection "
-               "will NOT work for this closing. Only gripper stall detection is active.");
-    }
-
-    // Resolve per-command parameters (0 = use YAML default)
-    double width = (msg->closing_width > 0.0) ? msg->closing_width : closing_width_;
-    double speed = (msg->closing_speed > 0.0) ? msg->closing_speed : closing_speed_;
-
-    // Clamp closing speed to safety limit
-    if (speed > kMaxClosingSpeed) {
-      ROS_WARN("KittingStateController: closing_speed %.4f exceeds max %.4f, clamping",
-               speed, kMaxClosingSpeed);
-      speed = kMaxClosingSpeed;
-    }
-
-    // Queue gripper move command (non-blocking — executed by command thread)
-    if (execute_gripper_actions_) {
-      GripperCommand gripper_cmd;
-      gripper_cmd.type = GripperCommandType::MOVE;
-      gripper_cmd.width = width;
-      gripper_cmd.speed = speed;
-      queueGripperCommand(gripper_cmd);
-      ROS_INFO("KittingStateController: Queued move(width=%.4f, speed=%.4f)",
-               width, speed);
-    }
-
-    // Store resolved CLOSING parameters for RT contact detection.
-    // The release-store on state_changed_ below guarantees the RT thread
-    // sees these values after its acquire-load returns true.
-    closing_w_cmd_ = width;
-    closing_v_cmd_ = speed;
-
-    pending_state_.store(GraspState::CLOSING, std::memory_order_relaxed);
-    state_changed_.store(true, std::memory_order_release);
-    publishStateLabel("CLOSING");
-    ROS_INFO("============================================================");
-    ROS_INFO("  [STATE]  >>  CLOSING  <<  Gripper approaching object");
-    ROS_INFO("    width=%.4f m  speed=%.4f m/s", width, speed);
-    ROS_INFO("============================================================");
-
-  } else if (cmd == "SECURE_GRASP") {
-    // Resolve per-command parameters:
-    //   grasp_width:  message override > contact width > YAML default
-    //   epsilon:      unified field > individual fields > YAML default
-    double cw = contact_width_.load(std::memory_order_relaxed);
-    double width = (msg->grasp_width > 0.0) ? msg->grasp_width
-                 : (cw > 0.0)               ? cw
-                 :                             grasp_width_;
-    double eps_in = (msg->epsilon > 0.0)       ? msg->epsilon
-                  : (msg->epsilon_inner > 0.0) ? msg->epsilon_inner
-                  :                               epsilon_inner_;
-    double eps_out = (msg->epsilon > 0.0)       ? msg->epsilon
-                   : (msg->epsilon_outer > 0.0) ? msg->epsilon_outer
-                   :                               epsilon_outer_;
-    double speed = (msg->grasp_speed > 0.0) ? msg->grasp_speed : grasp_speed_;
-    double force = (msg->grasp_force > 0.0) ? msg->grasp_force : grasp_force_;
-
-    if (msg->grasp_width == 0.0 && cw > 0.0) {
-      ROS_INFO("KittingStateController: Using contact width %.4f m as grasp_width", cw);
-    }
-
-    // Queue gripper grasp command (non-blocking — executed by command thread)
-    if (execute_gripper_actions_) {
-      GripperCommand gripper_cmd;
-      gripper_cmd.type = GripperCommandType::GRASP;
-      gripper_cmd.width = width;
-      gripper_cmd.speed = speed;
-      gripper_cmd.force = force;
-      gripper_cmd.epsilon_inner = eps_in;
-      gripper_cmd.epsilon_outer = eps_out;
-      queueGripperCommand(gripper_cmd);
-      ROS_INFO("KittingStateController: Queued grasp(width=%.4f, eps=%.4f/%.4f, "
-               "speed=%.4f, force=%.1f)",
-               width, eps_in, eps_out, speed, force);
-    }
-
-    pending_state_.store(GraspState::SECURE_GRASP, std::memory_order_relaxed);
-    state_changed_.store(true, std::memory_order_release);
-    publishStateLabel("SECURE_GRASP");
-    ROS_INFO("============================================================");
-    ROS_INFO("  [STATE]  >>  SECURE_GRASP  <<  Grasping object");
-    ROS_INFO("    width=%.4f m  force=%.1f N  speed=%.4f m/s", width, force, speed);
-    ROS_INFO("============================================================");
-
-  } else if (cmd == "UPLIFT") {
-    // --- Precondition: require SECURE_GRASP or UPLIFT state if configured ---
-    if (require_secure_grasp_) {
-      GraspState cur = current_state_.load(std::memory_order_relaxed);
-      if (cur != GraspState::SECURE_GRASP && cur != GraspState::UPLIFT) {
-        ROS_WARN("KittingStateController: UPLIFT rejected — require_secure_grasp is true "
-                 "but current state is %s (expected SECURE_GRASP or UPLIFT)",
-                 stateToString(cur));
-        return;
-      }
-    }
-
-    // If UPLIFT is already active, stop current trajectory so it restarts from current position
-    if (uplift_active_.load(std::memory_order_relaxed)) {
-      uplift_active_.store(false, std::memory_order_relaxed);
-      ROS_INFO("KittingStateController: Restarting UPLIFT from current position");
-    }
-
-    // --- Resolve per-command parameters (0 = use YAML default) ---
-    double distance = (msg->uplift_distance > 0.0) ? msg->uplift_distance : uplift_distance_;
-    double duration = (msg->uplift_duration > 0.0) ? msg->uplift_duration : uplift_duration_;
-
-    // --- Safety: clamp distance ---
-    if (distance > kMaxUpliftDistance) {
-      ROS_WARN("KittingStateController: uplift_distance %.4f exceeds max %.4f, clamping",
-               distance, kMaxUpliftDistance);
-      distance = kMaxUpliftDistance;
-    }
-    if (distance <= 0.0) {
-      ROS_WARN("KittingStateController: uplift_distance must be positive, ignoring");
-      return;
-    }
-    if (duration <= 0.0) {
-      ROS_WARN("KittingStateController: uplift_duration must be positive, ignoring");
-      return;
-    }
-
-    // --- Store resolved parameters for RT update loop ---
-    // Written here (subscriber thread), read by RT thread in the state_changed_ block.
-    // Safety: the release-store on state_changed_ below creates a happens-before edge,
-    // guaranteeing that when the RT thread's acquire-load of state_changed_ returns true,
-    // it sees these stores. The RT thread then copies them to rt_uplift_distance_ and
-    // rt_uplift_duration_ for trajectory isolation.
-    uplift_distance_ = distance;
-    uplift_duration_ = duration;
-
-    pending_state_.store(GraspState::UPLIFT, std::memory_order_relaxed);
-    state_changed_.store(true, std::memory_order_release);
-    publishStateLabel("UPLIFT");
-    ROS_INFO("============================================================");
-    ROS_INFO("  [STATE]  >>  UPLIFT  <<  Cartesian micro-lift");
-    ROS_INFO("    distance=%.4f m  duration=%.2f s", distance, duration);
-    ROS_INFO("============================================================");
-
+    handleClosingCmd(msg);
+  } else if (cmd == "GRASPING") {
+    handleGraspingCmd(msg);
   } else {
     ROS_WARN("KittingStateController: Unknown command '%s' on state_cmd "
-             "(expected BASELINE, CLOSING, SECURE_GRASP, or UPLIFT)", cmd.c_str());
+             "(expected BASELINE, CLOSING, or GRASPING)", cmd.c_str());
   }
+}
+
+void KittingStateController::handleBaselineCmd(
+    const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg) {
+  if (msg->open_gripper && execute_gripper_actions_) {
+    double open_w = resolveParam(msg->open_width,
+                                 gripper_data_buf_.readFromNonRT()->max_width);
+    GripperCommand open_cmd;
+    open_cmd.type = GripperCommandType::MOVE;
+    open_cmd.width = open_w;
+    open_cmd.speed = 0.1;
+    queueGripperCommand(open_cmd);
+    baseline_gripper_wait_start_ = ros::Time::now();
+    baseline_awaiting_gripper_ = true;
+    ROS_INFO("  [GRIPPER]  Open queued: move(width=%.4f, speed=0.1)", open_w);
+  } else {
+    baseline_awaiting_gripper_ = false;
+  }
+
+  pending_state_.store(GraspState::BASELINE, std::memory_order_relaxed);
+  state_changed_.store(true, std::memory_order_release);
+  publishStateLabel("BASELINE");
+  logStateTransition("BASELINE", "Collecting reference signals");
+}
+
+void KittingStateController::handleClosingCmd(
+    const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg) {
+  if (current_state_.load(std::memory_order_relaxed) == GraspState::CLOSING) {
+    ROS_DEBUG("KittingStateController: Already in CLOSING, ignoring duplicate");
+    return;
+  }
+
+  if (enable_arm_contact_ && !baseline_armed_.load(std::memory_order_relaxed)) {
+    ROS_WARN("KittingStateController: Baseline not yet armed — arm torque contact detection "
+             "will NOT work for this closing. Only gripper stall detection is active.");
+  }
+
+  double width = resolveParam(msg->closing_width, closing_width_);
+  double speed = resolveParam(msg->closing_speed, closing_speed_);
+
+  if (speed > kMaxClosingSpeed) {
+    ROS_WARN("KittingStateController: closing_speed %.4f exceeds max %.4f, clamping",
+             speed, kMaxClosingSpeed);
+    speed = kMaxClosingSpeed;
+  }
+
+  if (execute_gripper_actions_) {
+    GripperCommand gripper_cmd;
+    gripper_cmd.type = GripperCommandType::MOVE;
+    gripper_cmd.width = width;
+    gripper_cmd.speed = speed;
+    queueGripperCommand(gripper_cmd);
+    ROS_INFO("KittingStateController: Queued move(width=%.4f, speed=%.4f)", width, speed);
+  }
+
+  closing_w_cmd_ = width;
+  closing_v_cmd_ = speed;
+
+  pending_state_.store(GraspState::CLOSING, std::memory_order_relaxed);
+  state_changed_.store(true, std::memory_order_release);
+  publishStateLabel("CLOSING");
+  logStateTransition("CLOSING", "Gripper approaching object");
+  ROS_INFO("    width=%.4f m  speed=%.4f m/s", width, speed);
+}
+
+void KittingStateController::handleGraspingCmd(
+    const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg) {
+  if (!execute_gripper_actions_) {
+    ROS_WARN("KittingStateController: GRASPING rejected — force ramp requires "
+             "execute_gripper_actions to be true (signal-only mode is incompatible)");
+    return;
+  }
+
+  double width = contact_width_.load(std::memory_order_relaxed);
+  if (width <= 0.0) {
+    ROS_WARN("KittingStateController: GRASPING rejected — no contact width available "
+             "(CONTACT must be reached before GRASPING)");
+    return;
+  }
+
+  // Resolve force ramp parameters (0 = use YAML default)
+  staging_fr_f_min_             = resolveParam(msg->f_min, fr_f_min_);
+  staging_fr_f_step_            = resolveParam(msg->f_step, fr_f_step_);
+  staging_fr_f_max_             = resolveParam(msg->f_max, fr_f_max_);
+  staging_fr_uplift_distance_   = resolveParam(msg->fr_uplift_distance, fr_uplift_distance_);
+  staging_fr_lift_speed_        = resolveParam(msg->fr_lift_speed, fr_lift_speed_);
+  staging_fr_uplift_hold_       = resolveParam(msg->fr_uplift_hold, fr_uplift_hold_);
+  staging_fr_grasp_speed_       = resolveParam(msg->fr_grasp_speed, fr_grasp_speed_);
+  staging_fr_epsilon_           = resolveParam(msg->fr_epsilon, fr_epsilon_);
+  staging_fr_stabilization_     = resolveParam(msg->fr_stabilization, fr_stabilization_);
+  staging_fr_slip_tau_drop_     = resolveParam(msg->fr_slip_tau_drop, fr_slip_tau_drop_);
+  staging_fr_slip_width_change_ = resolveParam(msg->fr_slip_width_change, fr_slip_width_change_);
+
+  if (staging_fr_uplift_distance_ > kMaxUpliftDistance) {
+    ROS_WARN("KittingStateController: fr_uplift_distance %.4f exceeds max %.4f, clamping",
+             staging_fr_uplift_distance_, kMaxUpliftDistance);
+    staging_fr_uplift_distance_ = kMaxUpliftDistance;
+  }
+
+  fr_grasp_width_ = width;
+
+  // Queue first grasp command at f_min
+  GripperCommand gripper_cmd;
+  gripper_cmd.type = GripperCommandType::GRASP;
+  gripper_cmd.width = width;
+  gripper_cmd.speed = staging_fr_grasp_speed_;
+  gripper_cmd.force = staging_fr_f_min_;
+  gripper_cmd.epsilon_inner = staging_fr_epsilon_;
+  gripper_cmd.epsilon_outer = staging_fr_epsilon_;
+  queueGripperCommand(gripper_cmd);
+  ROS_INFO("KittingStateController: Queued grasp(width=%.4f, eps=%.4f, "
+           "speed=%.4f, force=%.1f)",
+           width, staging_fr_epsilon_, staging_fr_grasp_speed_, staging_fr_f_min_);
+
+  pending_state_.store(GraspState::GRASPING, std::memory_order_relaxed);
+  state_changed_.store(true, std::memory_order_release);
+  publishStateLabel("GRASPING");
+  logStateTransition("GRASPING", "Force ramp starting");
+  ROS_INFO("    width=%.4f m  f_min=%.1f N  f_max=%.1f N  f_step=%.1f N",
+           width, staging_fr_f_min_, staging_fr_f_max_, staging_fr_f_step_);
 }
 
 bool KittingStateController::init(hardware_interface::RobotHW* robot_hw,
@@ -473,10 +487,10 @@ bool KittingStateController::init(hardware_interface::RobotHW* robot_hw,
   node_handle.param("slope_min", slope_min_, 5.0);
 
   // --- Gripper contact detection parameters ---
-  node_handle.param("stall_velocity_threshold", stall_velocity_threshold_, 0.005);
+  node_handle.param("stall_velocity_threshold", stall_velocity_threshold_, 0.007);
   node_handle.param("width_gap_threshold", width_gap_threshold_, 0.002);
   node_handle.param("stop_on_contact", stop_on_contact_, true);
-  node_handle.param("enable_arm_contact", enable_arm_contact_, true);
+  node_handle.param("enable_arm_contact", enable_arm_contact_, false);
   node_handle.param("enable_gripper_contact", enable_gripper_contact_, true);
 
   ROS_INFO_STREAM("KittingStateController: Contact detector "
@@ -491,50 +505,70 @@ bool KittingStateController::init(hardware_interface::RobotHW* robot_hw,
 
   // --- Grasp: Gripper default parameters (overridable per-command via KittingGripperCommand) ---
   node_handle.param("execute_gripper_actions", execute_gripper_actions_, true);
-  node_handle.param("closing_width", closing_width_, 0.04);
-  node_handle.param("closing_speed", closing_speed_, 0.04);
+  node_handle.param("closing_width", closing_width_, 0.01);
+  node_handle.param("closing_speed", closing_speed_, 0.02);
   if (closing_speed_ > kMaxClosingSpeed) {
     ROS_WARN("KittingStateController: closing_speed %.4f exceeds max %.4f, clamping",
              closing_speed_, kMaxClosingSpeed);
     closing_speed_ = kMaxClosingSpeed;
   }
-  node_handle.param("grasp_width", grasp_width_, 0.02);
-  node_handle.param("epsilon_inner", epsilon_inner_, 0.005);
-  node_handle.param("epsilon_outer", epsilon_outer_, 0.005);
-  node_handle.param("grasp_speed", grasp_speed_, 0.04);
-  node_handle.param("grasp_force", grasp_force_, 10.0);
-
   ROS_INFO_STREAM("KittingStateController: Gripper execution "
                    << (execute_gripper_actions_ ? "ENABLED" : "DISABLED (signal-only)")
                    << " | closing: width=" << closing_width_ << " speed=" << closing_speed_
-                   << " | grasp: width=" << grasp_width_ << " eps=" << epsilon_inner_
-                   << "/" << epsilon_outer_ << " speed=" << grasp_speed_
-                   << " force=" << grasp_force_);
+                   << " | grasp width: from contact_width (auto)");
 
-  // --- Grasp: UPLIFT parameters (overridable per-command via KittingGripperCommand) ---
-  node_handle.param("uplift_distance", uplift_distance_, 0.003);
-  node_handle.param("uplift_duration", uplift_duration_, 1.0);
-  node_handle.param("require_secure_grasp", require_secure_grasp_, true);
+  // --- GRASPING: Force ramp parameters (overridable per-command via KittingGripperCommand) ---
+  node_handle.param("f_min", fr_f_min_, 3.0);
+  node_handle.param("f_step", fr_f_step_, 2.0);
+  node_handle.param("f_max", fr_f_max_, 15.0);
+  node_handle.param("uplift_distance", fr_uplift_distance_, 0.003);
+  node_handle.param("lift_speed", fr_lift_speed_, 0.01);
+  node_handle.param("uplift_hold", fr_uplift_hold_, 0.5);
+  node_handle.param("grasp_speed", fr_grasp_speed_, 0.02);
+  node_handle.param("epsilon", fr_epsilon_, 0.008);
+  node_handle.param("stabilization", fr_stabilization_, 0.3);
+  node_handle.param("slip_tau_drop", fr_slip_tau_drop_, 0.20);
+  node_handle.param("slip_width_change", fr_slip_width_change_, 0.001);
 
-  if (uplift_distance_ > kMaxUpliftDistance) {
-    ROS_WARN("KittingStateController: uplift_distance %.4f exceeds max %.4f, clamping",
-             uplift_distance_, kMaxUpliftDistance);
-    uplift_distance_ = kMaxUpliftDistance;
+  // Validate force ramp parameters
+  if (fr_f_min_ <= 0.0) {
+    ROS_ERROR("KittingStateController: f_min must be positive (got %.2f)", fr_f_min_);
+    return false;
   }
-  if (uplift_distance_ <= 0.0) {
+  if (fr_f_step_ <= 0.0) {
+    ROS_ERROR("KittingStateController: f_step must be positive (got %.2f)", fr_f_step_);
+    return false;
+  }
+  if (fr_f_max_ < fr_f_min_) {
+    ROS_ERROR("KittingStateController: f_max (%.2f) must be >= f_min (%.2f)",
+              fr_f_max_, fr_f_min_);
+    return false;
+  }
+  if (fr_uplift_distance_ <= 0.0) {
     ROS_ERROR("KittingStateController: uplift_distance must be positive (got %.4f)",
-              uplift_distance_);
+              fr_uplift_distance_);
     return false;
   }
-  if (uplift_duration_ <= 0.0) {
-    ROS_ERROR("KittingStateController: uplift_duration must be positive (got %.4f)",
-              uplift_duration_);
+  if (fr_uplift_distance_ > kMaxUpliftDistance) {
+    ROS_WARN("KittingStateController: uplift_distance %.4f exceeds max %.4f, clamping",
+             fr_uplift_distance_, kMaxUpliftDistance);
+    fr_uplift_distance_ = kMaxUpliftDistance;
+  }
+  if (fr_lift_speed_ <= 0.0) {
+    ROS_ERROR("KittingStateController: lift_speed must be positive (got %.4f)",
+              fr_lift_speed_);
     return false;
   }
 
-  ROS_INFO_STREAM("KittingStateController: UPLIFT config | distance=" << uplift_distance_
-                   << "m duration=" << uplift_duration_ << "s (world-frame z)"
-                   << " require_secure_grasp=" << (require_secure_grasp_ ? "true" : "false"));
+  ROS_INFO_STREAM("KittingStateController: Force ramp config"
+                   << " | f: min=" << fr_f_min_ << " step=" << fr_f_step_
+                   << " max=" << fr_f_max_
+                   << " | uplift: dist=" << fr_uplift_distance_
+                   << " speed=" << fr_lift_speed_ << " hold=" << fr_uplift_hold_
+                   << " | grasp: speed=" << fr_grasp_speed_ << " eps=" << fr_epsilon_
+                   << " | stab=" << fr_stabilization_
+                   << " | slip: tau_drop=" << fr_slip_tau_drop_
+                   << " width_change=" << fr_slip_width_change_);
 
   // --- Direct gripper connection via libfranka ---
   if (execute_gripper_actions_) {
@@ -627,7 +661,7 @@ bool KittingStateController::init(hardware_interface::RobotHW* robot_hw,
   }
 
   // Grasp: Command subscriber — user publishes KittingGripperCommand here
-  // with command (BASELINE/CLOSING/SECURE_GRASP/UPLIFT) + optional per-object parameters.
+  // with command (BASELINE/CLOSING/GRASPING) + optional per-object parameters.
   state_cmd_sub_ = root_nh.subscribe("/kitting_controller/state_cmd", 10,
                                       &KittingStateController::stateCmdCallback, this);
 
@@ -651,15 +685,27 @@ void KittingStateController::starting(const ros::Time& /* time */) {
   uplift_active_.store(false, std::memory_order_relaxed);
   uplift_elapsed_ = 0.0;
 
-  ROS_INFO("============================================================");
-  ROS_INFO("  [STATE]  >>  START  <<  Controller running");
+  // Reset DOWNLIFT and deferred grasp state
+  downlift_active_.store(false, std::memory_order_relaxed);
+  downlift_elapsed_ = 0.0;
+  deferred_grasp_pending_.store(false, std::memory_order_relaxed);
+
+  // Reset force ramp state
+  fr_f_current_ = 0.0;
+  fr_iteration_ = 0;
+  fr_z_initial_ = 0.0;
+  fr_grasp_width_ = 0.0;
+  fr_grasp_cmd_seen_executing_ = false;
+  fr_grasp_stabilizing_ = false;
+  fr_grasping_phase_initialized_ = false;
+
+  logStateTransition("START", "Controller running");
   if (require_logger_) {
     ROS_INFO("    Step 1: Wait for Grasp logger to start");
     ROS_INFO("    Step 2: Publish BASELINE on /kitting_controller/state_cmd");
   } else {
     ROS_INFO("    Recording disabled — publish BASELINE on /kitting_controller/state_cmd");
   }
-  ROS_INFO("============================================================");
 }
 
 // ============================================================================
@@ -671,16 +717,19 @@ void KittingStateController::applyPendingStateTransition() {
     return;
   }
   // acquire: guarantees visibility of all stores preceding the subscriber's
-  // release-store of state_changed_ (including uplift_distance_, uplift_duration_,
+  // release-store of state_changed_ (including staging_fr_* parameters, fr_grasp_width_,
   // and pending_state_).
   GraspState new_state = pending_state_.load(std::memory_order_relaxed);
 
   // Handle BASELINE start: reset all state-machine variables for a fresh grasp cycle.
   // This enables multi-trial operation without restarting the controller.
   if (new_state == GraspState::BASELINE) {
-    // Stop any active UPLIFT trajectory
+    // Stop any active trajectories
     uplift_active_.store(false, std::memory_order_relaxed);
     uplift_elapsed_ = 0.0;
+    downlift_active_.store(false, std::memory_order_relaxed);
+    downlift_elapsed_ = 0.0;
+    deferred_grasp_pending_.store(false, std::memory_order_relaxed);
 
     // Reset contact detection state
     contact_latched_ = false;
@@ -690,15 +739,20 @@ void KittingStateController::applyPendingStateTransition() {
     baseline_sum_sq_ = 0.0;
     baseline_n_ = 0;
 
-    // Reset arm debounce
-    exceeding_ = false;
+    // Reset debounce state
+    arm_debounce_.reset();
     prev_tau_ext_valid_ = false;
-
-    // Reset gripper debounce
-    gripper_stall_active_ = false;
+    gripper_debounce_.reset();
     gripper_stop_sent_.store(false, std::memory_order_relaxed);
     contact_source_ = "";
     contact_width_.store(0.0, std::memory_order_relaxed);
+
+    // Reset force ramp state
+    fr_f_current_ = 0.0;
+    fr_iteration_ = 0;
+    fr_grasp_cmd_seen_executing_ = false;
+    fr_grasp_stabilizing_ = false;
+    fr_grasping_phase_initialized_ = false;
 
     ROS_INFO("  [BASELINE]  State machine reset for new trial");
   }
@@ -708,23 +762,43 @@ void KittingStateController::applyPendingStateTransition() {
     rt_closing_w_cmd_ = closing_w_cmd_;
     rt_closing_v_cmd_ = closing_v_cmd_;
     rt_T_hold_gripper_ = computeGripperHoldTime(rt_closing_v_cmd_);
-    gripper_stall_active_ = false;
+    gripper_debounce_.reset();
     gripper_stop_sent_.store(false, std::memory_order_relaxed);
     contact_source_ = "";
     ROS_INFO("  [CLOSING]  T_hold_gripper=%.3fs (from speed=%.4f m/s)",
              rt_T_hold_gripper_, rt_closing_v_cmd_);
   }
 
-  // Handle UPLIFT start (or restart): capture current desired pose, snapshot params, reset timer
-  if (new_state == GraspState::UPLIFT) {
-    uplift_start_pose_ = cartesian_pose_handle_->getRobotState().O_T_EE_d;
-    uplift_z_start_ = uplift_start_pose_[14];
-    uplift_elapsed_ = 0.0;
-    // Snapshot parameters into RT-local copies — isolates trajectory from
-    // any concurrent subscriber writes to uplift_distance_/uplift_duration_.
-    rt_uplift_distance_ = uplift_distance_;
-    rt_uplift_duration_ = uplift_duration_;
-    uplift_active_.store(true, std::memory_order_relaxed);
+  // Handle GRASPING start: snapshot force ramp parameters, initialize force ramp state
+  if (new_state == GraspState::GRASPING) {
+    // Snapshot staging → RT-local copies (synchronized via state_changed_ acquire)
+    rt_fr_f_min_ = staging_fr_f_min_;
+    rt_fr_f_step_ = staging_fr_f_step_;
+    rt_fr_f_max_ = staging_fr_f_max_;
+    rt_fr_uplift_distance_ = staging_fr_uplift_distance_;
+    rt_fr_lift_speed_ = staging_fr_lift_speed_;
+    rt_fr_uplift_hold_ = staging_fr_uplift_hold_;
+    rt_fr_grasp_speed_ = staging_fr_grasp_speed_;
+    rt_fr_epsilon_ = staging_fr_epsilon_;
+    rt_fr_stabilization_ = staging_fr_stabilization_;
+    rt_fr_slip_tau_drop_ = staging_fr_slip_tau_drop_;
+    rt_fr_slip_width_change_ = staging_fr_slip_width_change_;
+
+    // Capture EE z-height before force ramp starts
+    fr_z_initial_ = cartesian_pose_handle_->getRobotState().O_T_EE_d[14];
+
+    // Initialize force ramp state
+    fr_f_current_ = rt_fr_f_min_;
+    fr_iteration_ = 0;
+    rt_fr_grasp_width_ = fr_grasp_width_;
+    fr_grasping_phase_initialized_ = false;  // Set on first runInternalTransitions tick
+    fr_grasp_cmd_seen_executing_ = false;
+    fr_grasp_stabilizing_ = false;
+
+    // Clear trajectory and deferred state
+    uplift_active_.store(false, std::memory_order_relaxed);
+    downlift_active_.store(false, std::memory_order_relaxed);
+    deferred_grasp_pending_.store(false, std::memory_order_relaxed);
   }
 
   current_state_.store(new_state, std::memory_order_relaxed);
@@ -740,6 +814,14 @@ void KittingStateController::updateCartesianCommand(const ros::Duration& period)
       ROS_INFO("KittingStateController: UPLIFT trajectory complete (%.3fs, %.4fm)",
                rt_uplift_duration_, rt_uplift_distance_);
     }
+  } else if (downlift_active_.load(std::memory_order_relaxed)) {
+    downlift_elapsed_ += period.toSec();
+    cartesian_pose_handle_->setCommand(computeDownliftPose(downlift_elapsed_));
+    if (downlift_elapsed_ >= rt_downlift_duration_) {
+      downlift_active_.store(false, std::memory_order_relaxed);
+      ROS_INFO("KittingStateController: DOWNLIFT trajectory complete (%.3fs, %.4fm)",
+               rt_downlift_duration_, rt_downlift_distance_);
+    }
   } else {
     // Passthrough: send current desired pose back as command (hold position).
     cartesian_pose_handle_->setCommand(cartesian_pose_handle_->getRobotState().O_T_EE_d);
@@ -751,146 +833,137 @@ void KittingStateController::runContactDetection(const ros::Time& time,
                                                   const GripperData& gripper_snapshot) {
   const GraspState state = current_state_.load(std::memory_order_relaxed);
 
-  // --- BASELINE: collect samples ---
   if (state == GraspState::BASELINE) {
-    // Wait for gripper open to complete before collecting baseline samples
-    if (baseline_awaiting_gripper_) {
-      double wait_elapsed = (time - baseline_gripper_wait_start_).toSec();
-      if (wait_elapsed >= 3.0) {
-        baseline_awaiting_gripper_ = false;
-        ROS_INFO("KittingStateController: Gripper open wait complete (%.1fs) "
-                 "— starting baseline collection", wait_elapsed);
-      } else {
-        return;  // Still waiting, skip collection this tick
-      }
-    }
+    collectBaselineSamples(time, tau_ext_norm);
+  }
 
-    if (!baseline_collecting_) {
-      baseline_collecting_ = true;
-      baseline_start_time_ = time;
-      baseline_sum_ = 0.0;
-      baseline_sum_sq_ = 0.0;
-      baseline_n_ = 0;
-    }
+  if (enable_arm_contact_ && state == GraspState::CLOSING &&
+      baseline_armed_.load(std::memory_order_relaxed) && !contact_latched_) {
+    detectArmContact(time, tau_ext_norm, gripper_snapshot);
+  }
 
-    double elapsed = (time - baseline_start_time_).toSec();
-    if (!baseline_armed_.load(std::memory_order_relaxed)) {
-      baseline_sum_ += tau_ext_norm;
-      baseline_sum_sq_ += tau_ext_norm * tau_ext_norm;
-      baseline_n_++;
+  if (enable_gripper_contact_ && state == GraspState::CLOSING && !contact_latched_) {
+    detectGripperContact(time, gripper_snapshot);
+  }
+}
 
-      if (elapsed >= T_base_ && baseline_n_ >= N_min_) {
-        baseline_mu_ = baseline_sum_ / baseline_n_;
-        double variance =
-            (baseline_sum_sq_ - baseline_sum_ * baseline_sum_ / baseline_n_) / (baseline_n_ - 1);
-        baseline_sigma_ = std::sqrt(std::max(variance, 0.0));
-        contact_threshold_ = baseline_mu_ + k_sigma_ * baseline_sigma_;
-        baseline_armed_.store(true, std::memory_order_relaxed);
-
-        // Signal the gripper read thread to publish baseline params (RT-safe: atomic store only).
-        // The actual ros::param::set() calls happen in gripperReadLoop() (non-RT).
-        baseline_params_pending_.store(true, std::memory_order_release);
-
-        ROS_INFO_STREAM("KittingStateController: Baseline computed | N=" << baseline_n_
-                        << " mu=" << baseline_mu_ << " sigma=" << baseline_sigma_
-                        << " theta=" << contact_threshold_
-                        << " elapsed=" << elapsed << "s");
-      }
+void KittingStateController::collectBaselineSamples(const ros::Time& time,
+                                                     double tau_ext_norm) {
+  // Wait for gripper open to complete before collecting baseline samples
+  if (baseline_awaiting_gripper_) {
+    double wait_elapsed = (time - baseline_gripper_wait_start_).toSec();
+    if (wait_elapsed >= kGripperOpenWait) {
+      baseline_awaiting_gripper_ = false;
+      ROS_INFO("KittingStateController: Gripper open wait complete (%.1fs) "
+               "— starting baseline collection", wait_elapsed);
+    } else {
+      return;
     }
   }
 
-  // --- CLOSING: detect arm torque contact ---
-  if (enable_arm_contact_ && state == GraspState::CLOSING &&
-      baseline_armed_.load(std::memory_order_relaxed) && !contact_latched_) {
-    bool threshold_exceeded = (tau_ext_norm > contact_threshold_);
+  if (!baseline_collecting_) {
+    baseline_collecting_ = true;
+    baseline_start_time_ = time;
+    baseline_sum_ = 0.0;
+    baseline_sum_sq_ = 0.0;
+    baseline_n_ = 0;
+  }
 
-    // Optional slope gate
-    if (threshold_exceeded && use_slope_gate_) {
-      if (prev_tau_ext_valid_) {
-        double dt = (time - prev_tau_ext_time_).toSec();
-        if (dt > 1e-6) {
-          double slope = (tau_ext_norm - prev_tau_ext_norm_) / dt;
-          if (slope < slope_min_) {
-            threshold_exceeded = false;
-          }
-        }
-      } else {
-        threshold_exceeded = false;
-      }
-    }
+  double elapsed = (time - baseline_start_time_).toSec();
+  if (baseline_armed_.load(std::memory_order_relaxed)) {
+    return;
+  }
 
-    // Debounce: require sustained exceedance for T_hold_arm seconds
-    if (threshold_exceeded) {
-      if (!exceeding_) {
-        exceeding_ = true;
-        exceed_start_time_ = time;
-      } else {
-        double hold_elapsed = (time - exceed_start_time_).toSec();
-        if (hold_elapsed >= T_hold_arm_) {
-          contact_latched_ = true;
-          contact_source_ = "ARM";
-          contact_width_.store(gripper_snapshot.width, std::memory_order_relaxed);
-          current_state_.store(GraspState::CONTACT, std::memory_order_relaxed);
-          publishStateLabel("CONTACT");
-          ROS_INFO("============================================================");
-          ROS_INFO("  [STATE]  >>  CONTACT  <<  ARM torque contact detected!");
-          ROS_INFO("    x(t)=%.4f  theta=%.4f  delta=%.4f  hold=%.3fs  width=%.4f",
-                   tau_ext_norm, contact_threshold_,
-                   tau_ext_norm - baseline_mu_, hold_elapsed,
-                   contact_width_.load(std::memory_order_relaxed));
-          ROS_INFO("============================================================");
-          requestGripperStop("ARM");
+  baseline_sum_ += tau_ext_norm;
+  baseline_sum_sq_ += tau_ext_norm * tau_ext_norm;
+  baseline_n_++;
+
+  if (elapsed >= T_base_ && baseline_n_ >= N_min_) {
+    baseline_mu_ = baseline_sum_ / baseline_n_;
+    double variance =
+        (baseline_sum_sq_ - baseline_sum_ * baseline_sum_ / baseline_n_) / (baseline_n_ - 1);
+    baseline_sigma_ = std::sqrt(std::max(variance, 0.0));
+    contact_threshold_ = baseline_mu_ + k_sigma_ * baseline_sigma_;
+    baseline_armed_.store(true, std::memory_order_relaxed);
+
+    // Signal the gripper read thread to publish baseline params (RT-safe: atomic store only)
+    baseline_params_pending_.store(true, std::memory_order_release);
+
+    ROS_INFO_STREAM("KittingStateController: Baseline computed | N=" << baseline_n_
+                    << " mu=" << baseline_mu_ << " sigma=" << baseline_sigma_
+                    << " theta=" << contact_threshold_
+                    << " elapsed=" << elapsed << "s");
+  }
+}
+
+void KittingStateController::detectArmContact(const ros::Time& time,
+                                               double tau_ext_norm,
+                                               const GripperData& gripper_snapshot) {
+  bool threshold_exceeded = (tau_ext_norm > contact_threshold_);
+
+  // Optional slope gate
+  if (threshold_exceeded && use_slope_gate_) {
+    if (prev_tau_ext_valid_) {
+      double dt = (time - prev_tau_ext_time_).toSec();
+      if (dt > 1e-6) {
+        double slope = (tau_ext_norm - prev_tau_ext_norm_) / dt;
+        if (slope < slope_min_) {
+          threshold_exceeded = false;
         }
       }
     } else {
-      exceeding_ = false;
+      threshold_exceeded = false;
     }
-
-    // Update slope gate history
-    prev_tau_ext_norm_ = tau_ext_norm;
-    prev_tau_ext_time_ = time;
-    prev_tau_ext_valid_ = true;
   }
 
-  // --- CLOSING: detect gripper stall contact ---
-  if (enable_gripper_contact_ && state == GraspState::CLOSING && !contact_latched_) {
-    bool gripper_data_valid = (gripper_snapshot.stamp != ros::Time(0)) &&
-                               ((time - gripper_snapshot.stamp).toSec() < 0.5);
+  // Debounce: require sustained exceedance for T_hold_arm seconds
+  if (arm_debounce_.check(threshold_exceeded, time, T_hold_arm_)) {
+    double hold_elapsed = (time - arm_debounce_.start_time).toSec();
+    contact_latched_ = true;
+    contact_source_ = "ARM";
+    contact_width_.store(gripper_snapshot.width, std::memory_order_relaxed);
+    current_state_.store(GraspState::CONTACT, std::memory_order_relaxed);
+    publishStateLabel("CONTACT");
+    logStateTransition("CONTACT", "ARM torque contact detected!");
+    ROS_INFO("    x(t)=%.4f  theta=%.4f  delta=%.4f  hold=%.3fs  width=%.4f",
+             tau_ext_norm, contact_threshold_,
+             tau_ext_norm - baseline_mu_, hold_elapsed,
+             contact_width_.load(std::memory_order_relaxed));
+    requestGripperStop("ARM");
+  }
 
-    if (gripper_data_valid) {
-      double w = gripper_snapshot.width;
-      double w_dot = gripper_snapshot.width_dot;
+  // Update slope gate history
+  prev_tau_ext_norm_ = tau_ext_norm;
+  prev_tau_ext_time_ = time;
+  prev_tau_ext_valid_ = true;
+}
 
-      // Stall condition: fingers nearly stopped AND not yet at commanded width.
-      bool velocity_stalled = (std::abs(w_dot) < stall_velocity_threshold_);
-      bool width_gap_exists = ((w - rt_closing_w_cmd_) > width_gap_threshold_);
-      bool stall_detected = velocity_stalled && width_gap_exists;
+void KittingStateController::detectGripperContact(const ros::Time& time,
+                                                    const GripperData& gripper_snapshot) {
+  bool gripper_data_valid = (gripper_snapshot.stamp != ros::Time(0)) &&
+                             ((time - gripper_snapshot.stamp).toSec() < 0.5);
+  if (!gripper_data_valid) {
+    return;
+  }
 
-      // Debounce: require sustained stall for rt_T_hold_gripper_ seconds (speed-dependent)
-      if (stall_detected) {
-        if (!gripper_stall_active_) {
-          gripper_stall_active_ = true;
-          gripper_stall_start_time_ = time;
-        } else {
-          double hold_elapsed = (time - gripper_stall_start_time_).toSec();
-          if (hold_elapsed >= rt_T_hold_gripper_) {
-            contact_latched_ = true;
-            contact_source_ = "GRIPPER";
-            contact_width_.store(gripper_snapshot.width, std::memory_order_relaxed);
-            current_state_.store(GraspState::CONTACT, std::memory_order_relaxed);
-            publishStateLabel("CONTACT");
-            ROS_INFO("============================================================");
-            ROS_INFO("  [STATE]  >>  CONTACT  <<  GRIPPER stall contact detected!");
-            ROS_INFO("    w=%.4f  w_cmd=%.4f  gap=%.4f  w_dot=%.6f  hold=%.3fs",
-                     w, rt_closing_w_cmd_, w - rt_closing_w_cmd_, w_dot, hold_elapsed);
-            ROS_INFO("============================================================");
-            requestGripperStop("Stall");
-          }
-        }
-      } else {
-        gripper_stall_active_ = false;
-      }
-    }
+  double w = gripper_snapshot.width;
+  double w_dot = gripper_snapshot.width_dot;
+
+  bool velocity_stalled = (std::abs(w_dot) < stall_velocity_threshold_);
+  bool width_gap_exists = ((w - rt_closing_w_cmd_) > width_gap_threshold_);
+  bool stall_detected = velocity_stalled && width_gap_exists;
+
+  if (gripper_debounce_.check(stall_detected, time, rt_T_hold_gripper_)) {
+    double hold_elapsed = (time - gripper_debounce_.start_time).toSec();
+    contact_latched_ = true;
+    contact_source_ = "GRIPPER";
+    contact_width_.store(gripper_snapshot.width, std::memory_order_relaxed);
+    current_state_.store(GraspState::CONTACT, std::memory_order_relaxed);
+    publishStateLabel("CONTACT");
+    logStateTransition("CONTACT", "GRIPPER stall contact detected!");
+    ROS_INFO("    w=%.4f  w_cmd=%.4f  gap=%.4f  w_dot=%.6f  hold=%.3fs",
+             w, rt_closing_w_cmd_, w - rt_closing_w_cmd_, w_dot, hold_elapsed);
+    requestGripperStop("Stall");
   }
 }
 
@@ -901,45 +974,244 @@ void KittingStateController::fillKittingStateMsg(
     const std::array<double, 7>& gravity,
     const std::array<double, 7>& coriolis,
     const std::array<double, 6>& ee_velocity,
-    double tau_ext_norm, double wrench_norm,
-    const GripperData& gripper_snapshot,
-    GraspState state) {
+    double tau_ext_norm, double wrench_norm) {
   kitting_publisher_.msg_.header.stamp = time;
 
-  for (size_t i = 0; i < 7; ++i) {
-    kitting_publisher_.msg_.q[i] = robot_state.q[i];
-    kitting_publisher_.msg_.dq[i] = robot_state.dq[i];
-    kitting_publisher_.msg_.tau_J[i] = robot_state.tau_J[i];
-    kitting_publisher_.msg_.tau_ext[i] = robot_state.tau_ext_hat_filtered[i];
-  }
-
-  for (size_t i = 0; i < 6; ++i) {
-    kitting_publisher_.msg_.wrench_ext[i] = robot_state.O_F_ext_hat_K[i];
-  }
-  for (size_t i = 0; i < 16; ++i) {
-    kitting_publisher_.msg_.O_T_EE[i] = robot_state.O_T_EE[i];
-  }
-
-  for (size_t i = 0; i < 42; ++i) {
-    kitting_publisher_.msg_.jacobian[i] = jacobian[i];
-  }
-  for (size_t i = 0; i < 7; ++i) {
-    kitting_publisher_.msg_.gravity[i] = gravity[i];
-    kitting_publisher_.msg_.coriolis[i] = coriolis[i];
-  }
-
-  for (size_t i = 0; i < 6; ++i) {
-    kitting_publisher_.msg_.ee_velocity[i] = ee_velocity[i];
-  }
+  std::copy(robot_state.q.begin(), robot_state.q.end(),
+            kitting_publisher_.msg_.q.begin());
+  std::copy(robot_state.dq.begin(), robot_state.dq.end(),
+            kitting_publisher_.msg_.dq.begin());
+  std::copy(robot_state.tau_J.begin(), robot_state.tau_J.end(),
+            kitting_publisher_.msg_.tau_J.begin());
+  std::copy(robot_state.tau_ext_hat_filtered.begin(), robot_state.tau_ext_hat_filtered.end(),
+            kitting_publisher_.msg_.tau_ext.begin());
+  std::copy(robot_state.O_F_ext_hat_K.begin(), robot_state.O_F_ext_hat_K.end(),
+            kitting_publisher_.msg_.wrench_ext.begin());
+  std::copy(robot_state.O_T_EE.begin(), robot_state.O_T_EE.end(),
+            kitting_publisher_.msg_.O_T_EE.begin());
+  std::copy(jacobian.begin(), jacobian.end(),
+            kitting_publisher_.msg_.jacobian.begin());
+  std::copy(gravity.begin(), gravity.end(),
+            kitting_publisher_.msg_.gravity.begin());
+  std::copy(coriolis.begin(), coriolis.end(),
+            kitting_publisher_.msg_.coriolis.begin());
+  std::copy(ee_velocity.begin(), ee_velocity.end(),
+            kitting_publisher_.msg_.ee_velocity.begin());
   kitting_publisher_.msg_.tau_ext_norm = tau_ext_norm;
   kitting_publisher_.msg_.wrench_norm = wrench_norm;
+}
 
-  kitting_publisher_.msg_.gripper_width = gripper_snapshot.width;
-  kitting_publisher_.msg_.gripper_width_dot = gripper_snapshot.width_dot;
-  kitting_publisher_.msg_.gripper_width_cmd =
-      (state == GraspState::CLOSING) ? rt_closing_w_cmd_ : 0.0;
-  kitting_publisher_.msg_.gripper_max_width = gripper_snapshot.max_width;
-  kitting_publisher_.msg_.gripper_is_grasped = gripper_snapshot.is_grasped;
+// ============================================================================
+// runInternalTransitions() — Force ramp state machine driver (250Hz)
+// Called from update() when state is GRASPING/UPLIFT/EVALUATE/DOWNLIFT/SETTLING.
+// All operations are RT-safe: atomic stores, timestamp arithmetic, trylock publish.
+// ============================================================================
+
+void KittingStateController::runInternalTransitions(const ros::Time& time,
+                                                     double tau_ext_norm,
+                                                     const GripperData& gripper_snapshot) {
+  switch (current_state_.load(std::memory_order_relaxed)) {
+    case GraspState::GRASPING:  tickGrasping(time, tau_ext_norm, gripper_snapshot); break;
+    case GraspState::UPLIFT:    tickUplift(time, tau_ext_norm, gripper_snapshot);   break;
+    case GraspState::EVALUATE:  tickEvaluate(time, tau_ext_norm, gripper_snapshot); break;
+    case GraspState::DOWNLIFT:  tickDownlift(time, tau_ext_norm, gripper_snapshot); break;
+    case GraspState::SETTLING:  tickSettling(time, tau_ext_norm, gripper_snapshot); break;
+    default: break;
+  }
+}
+
+void KittingStateController::tickGrasping(const ros::Time& time,
+                                           double tau_ext_norm,
+                                           const GripperData& gripper_snapshot) {
+  // First tick after entering GRASPING: initialize phase timer
+  if (!fr_grasping_phase_initialized_) {
+    fr_phase_start_time_ = time;
+    fr_grasping_phase_initialized_ = true;
+  }
+
+  double elapsed = (time - fr_phase_start_time_).toSec();
+
+  // Step 1: Settle delay — wait for command thread to pick up the grasp command
+  if (elapsed < kGraspSettleDelay) {
+    return;
+  }
+
+  // Timeout: if grasp command doesn't complete in time, fail
+  if (elapsed > kGraspTimeout) {
+    current_state_.store(GraspState::FAILED, std::memory_order_relaxed);
+    publishStateLabel("FAILED");
+    logStateTransition("FAILED", "GRASPING timeout");
+    ROS_INFO("    elapsed=%.1fs  cmd_executing_=%s  seen_executing=%s  stabilizing=%s",
+             elapsed,
+             cmd_executing_.load(std::memory_order_relaxed) ? "true" : "false",
+             fr_grasp_cmd_seen_executing_ ? "true" : "false",
+             fr_grasp_stabilizing_ ? "true" : "false");
+    return;
+  }
+
+  // Step 2: Poll cmd_executing_ — wait for grasp to start then complete
+  if (!fr_grasp_stabilizing_) {
+    bool executing = cmd_executing_.load(std::memory_order_relaxed);
+    if (!fr_grasp_cmd_seen_executing_) {
+      if (executing) {
+        fr_grasp_cmd_seen_executing_ = true;
+      }
+      return;
+    }
+    if (executing) {
+      return;
+    }
+    fr_grasp_stabilizing_ = true;
+    fr_grasp_stabilize_start_ = time;
+    return;
+  }
+
+  // Step 3: Post-grasp stabilization delay
+  double stab_elapsed = (time - fr_grasp_stabilize_start_).toSec();
+  if (stab_elapsed < rt_fr_stabilization_) {
+    return;
+  }
+
+  // Step 4: Record reference signals before UPLIFT
+  fr_tau_before_ = tau_ext_norm;
+  fr_width_before_uplift_ = gripper_snapshot.width;
+
+  // Step 5: Initialize UPLIFT trajectory
+  uplift_start_pose_ = cartesian_pose_handle_->getRobotState().O_T_EE_d;
+  uplift_z_start_ = uplift_start_pose_[14];
+  uplift_elapsed_ = 0.0;
+  rt_uplift_distance_ = rt_fr_uplift_distance_;
+  rt_uplift_duration_ = rt_fr_uplift_distance_ / rt_fr_lift_speed_;
+  uplift_active_.store(true, std::memory_order_relaxed);
+
+  // Step 6: Transition to UPLIFT
+  current_state_.store(GraspState::UPLIFT, std::memory_order_relaxed);
+  publishStateLabel("UPLIFT");
+  logStateTransition("UPLIFT", "Micro-lift starting");
+  ROS_INFO("    iter=%d  F=%.1f N  tau_before=%.4f  width_before=%.4f  "
+           "distance=%.4f  duration=%.2f",
+           fr_iteration_, fr_f_current_, fr_tau_before_, fr_width_before_uplift_,
+           rt_fr_uplift_distance_, rt_uplift_duration_);
+}
+
+void KittingStateController::tickUplift(const ros::Time& time,
+                                         double tau_ext_norm,
+                                         const GripperData& gripper_snapshot) {
+  if (uplift_active_.load(std::memory_order_relaxed)) {
+    return;  // Trajectory still running
+  }
+
+  fr_phase_start_time_ = time;
+  fr_tau_min_during_ = tau_ext_norm;
+  fr_max_width_during_eval_ = gripper_snapshot.width;
+
+  current_state_.store(GraspState::EVALUATE, std::memory_order_relaxed);
+  publishStateLabel("EVALUATE");
+  logStateTransition("EVALUATE", "Hold + slip detection");
+  ROS_INFO("    hold=%.2fs", rt_fr_uplift_hold_);
+}
+
+void KittingStateController::tickEvaluate(const ros::Time& time,
+                                           double tau_ext_norm,
+                                           const GripperData& gripper_snapshot) {
+  double elapsed = (time - fr_phase_start_time_).toSec();
+  double gw = gripper_snapshot.width;
+
+  // Continuously track slip signals during hold
+  if (tau_ext_norm < fr_tau_min_during_) {
+    fr_tau_min_during_ = tau_ext_norm;
+  }
+  if (gw > fr_max_width_during_eval_) {
+    fr_max_width_during_eval_ = gw;
+  }
+
+  if (elapsed < rt_fr_uplift_hold_) {
+    return;  // Still in hold period
+  }
+
+  // Evaluate immediately after hold
+  double tau_drop = 0.0;
+  if (fr_tau_before_ > 1e-6) {
+    tau_drop = (fr_tau_before_ - fr_tau_min_during_) / fr_tau_before_;
+  }
+  double width_change = fr_max_width_during_eval_ - fr_width_before_uplift_;
+
+  bool slip = (tau_drop > rt_fr_slip_tau_drop_) ||
+              (width_change > rt_fr_slip_width_change_);
+
+  ROS_INFO("  [EVALUATE]  tau_drop=%.3f (thresh=%.3f)  width_change=%.4f (thresh=%.4f)  %s",
+           tau_drop, rt_fr_slip_tau_drop_, width_change, rt_fr_slip_width_change_,
+           slip ? "SLIP" : "STABLE");
+
+  if (!slip) {
+    current_state_.store(GraspState::SUCCESS, std::memory_order_relaxed);
+    publishStateLabel("SUCCESS");
+    logStateTransition("SUCCESS", "Stable grasp confirmed");
+    ROS_INFO("    F=%.1f N  iter=%d  tau_drop=%.3f  width_change=%.4f",
+             fr_f_current_, fr_iteration_, tau_drop, width_change);
+  } else {
+    // Initialize DOWNLIFT trajectory
+    downlift_start_pose_ = cartesian_pose_handle_->getRobotState().O_T_EE_d;
+    downlift_z_start_ = downlift_start_pose_[14];
+    downlift_elapsed_ = 0.0;
+    rt_downlift_distance_ = rt_fr_uplift_distance_;
+    rt_downlift_duration_ = rt_fr_uplift_distance_ / rt_fr_lift_speed_;
+    downlift_active_.store(true, std::memory_order_relaxed);
+
+    current_state_.store(GraspState::DOWNLIFT, std::memory_order_relaxed);
+    publishStateLabel("DOWNLIFT");
+    logStateTransition("DOWNLIFT", "Returning before force increment");
+    ROS_INFO("    distance=%.4f m  duration=%.2f s",
+             rt_downlift_distance_, rt_downlift_duration_);
+  }
+}
+
+void KittingStateController::tickDownlift(const ros::Time& time,
+                                           double /* tau_ext_norm */,
+                                           const GripperData& /* gripper_snapshot */) {
+  if (downlift_active_.load(std::memory_order_relaxed)) {
+    return;  // Trajectory still running
+  }
+
+  fr_phase_start_time_ = time;
+  current_state_.store(GraspState::SETTLING, std::memory_order_relaxed);
+  publishStateLabel("SETTLING");
+  ROS_INFO("  [STATE]  >>  SETTLING  <<  Post-downlift stabilization (%.2fs)",
+           rt_fr_stabilization_);
+}
+
+void KittingStateController::tickSettling(const ros::Time& time,
+                                           double /* tau_ext_norm */,
+                                           const GripperData& /* gripper_snapshot */) {
+  double elapsed = (time - fr_phase_start_time_).toSec();
+  if (elapsed < rt_fr_stabilization_) {
+    return;  // Still settling
+  }
+
+  // Increment force for next iteration
+  fr_f_current_ += rt_fr_f_step_;
+  fr_iteration_++;
+
+  if (fr_f_current_ > rt_fr_f_max_) {
+    current_state_.store(GraspState::FAILED, std::memory_order_relaxed);
+    publishStateLabel("FAILED");
+    logStateTransition("FAILED", "Max force exceeded");
+    ROS_INFO("    f_current=%.1f N > f_max=%.1f N  after %d iterations",
+             fr_f_current_, rt_fr_f_max_, fr_iteration_);
+    return;
+  }
+
+  // Re-enter GRASPING with incremented force
+  fr_phase_start_time_ = time;
+  fr_grasping_phase_initialized_ = true;
+  fr_grasp_cmd_seen_executing_ = false;
+  fr_grasp_stabilizing_ = false;
+  requestDeferredGrasp(rt_fr_grasp_width_, rt_fr_grasp_speed_,
+                       fr_f_current_, rt_fr_epsilon_);
+  current_state_.store(GraspState::GRASPING, std::memory_order_relaxed);
+  publishStateLabel("GRASPING");
+  logStateTransition("GRASPING", "Force ramp retry");
+  ROS_INFO("    iter=%d  F=%.1f N", fr_iteration_, fr_f_current_);
 }
 
 // ============================================================================
@@ -958,17 +1230,8 @@ void KittingStateController::update(const ros::Time& time, const ros::Duration& 
     std::array<double, 7> gravity = model_handle_->getGravity();
     std::array<double, 7> coriolis = model_handle_->getCoriolis();
 
-    double tau_ext_norm = 0.0;
-    for (size_t i = 0; i < 7; ++i) {
-      tau_ext_norm += robot_state.tau_ext_hat_filtered[i] * robot_state.tau_ext_hat_filtered[i];
-    }
-    tau_ext_norm = std::sqrt(tau_ext_norm);
-
-    double wrench_norm = 0.0;
-    for (size_t i = 0; i < 6; ++i) {
-      wrench_norm += robot_state.O_F_ext_hat_K[i] * robot_state.O_F_ext_hat_K[i];
-    }
-    wrench_norm = std::sqrt(wrench_norm);
+    double tau_ext_norm = arrayNorm(robot_state.tau_ext_hat_filtered);
+    double wrench_norm = arrayNorm(robot_state.O_F_ext_hat_K);
 
     std::array<double, 6> ee_velocity{};
     for (size_t row = 0; row < 6; ++row) {
@@ -984,7 +1247,18 @@ void KittingStateController::update(const ros::Time& time, const ros::Duration& 
       runContactDetection(time, tau_ext_norm, gripper_snapshot);
     }
 
+    // Run internal force ramp transitions (GRASPING→UPLIFT→EVALUATE→...)
+    {
+      GraspState fr_state = current_state_.load(std::memory_order_relaxed);
+      if (fr_state == GraspState::GRASPING || fr_state == GraspState::UPLIFT ||
+          fr_state == GraspState::EVALUATE || fr_state == GraspState::DOWNLIFT ||
+          fr_state == GraspState::SETTLING) {
+        runInternalTransitions(time, tau_ext_norm, gripper_snapshot);
+      }
+    }
+
     // Signal monitor — 2 Hz slow-rate logger for terminal readability
+    // Re-read state since runInternalTransitions may have changed it
     const GraspState state = current_state_.load(std::memory_order_relaxed);
     if (signal_log_trigger_()) {
       bool armed = baseline_armed_.load(std::memory_order_relaxed);
@@ -1003,12 +1277,16 @@ void KittingStateController::update(const ros::Time& time, const ros::Duration& 
                  gripper_snapshot.width_dot,
                  grip_stall ? "STALL" : "moving");
       } else if (armed && (state == GraspState::CONTACT ||
-                 state == GraspState::SECURE_GRASP ||
-                 state == GraspState::UPLIFT)) {
-        ROS_INFO("  [SIGNAL]  %s  |  x(t)=%.4f  theta=%.4f  margin=+%.4f",
+                 state == GraspState::GRASPING ||
+                 state == GraspState::UPLIFT ||
+                 state == GraspState::EVALUATE ||
+                 state == GraspState::DOWNLIFT ||
+                 state == GraspState::SETTLING)) {
+        ROS_INFO("  [SIGNAL]  %s  |  x(t)=%.4f  theta=%.4f  margin=+%.4f  F=%.1f  iter=%d",
                  stateToString(state),
                  tau_ext_norm, contact_threshold_,
-                 tau_ext_norm - contact_threshold_);
+                 tau_ext_norm - contact_threshold_,
+                 fr_f_current_, fr_iteration_);
       }
     }
 
@@ -1023,7 +1301,7 @@ void KittingStateController::update(const ros::Time& time, const ros::Duration& 
 
     if (kitting_publisher_.trylock()) {
       fillKittingStateMsg(time, robot_state, jacobian, gravity, coriolis,
-                          ee_velocity, tau_ext_norm, wrench_norm, gripper_snapshot, state);
+                          ee_velocity, tau_ext_norm, wrench_norm);
       kitting_publisher_.unlockAndPublish();
     }
   }

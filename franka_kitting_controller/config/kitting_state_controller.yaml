@@ -3,7 +3,7 @@ kitting_state_controller:
   arm_id: panda
   publish_rate: 250.0 # [Hz]
 
-  # Grasp: Arm contact detector parameters
+  # Arm contact detector parameters
   enable_contact_detector: true
   T_base: 0.7 # Baseline collection duration [s]
   N_min: 50 # Minimum samples before enabling detection
@@ -12,7 +12,7 @@ kitting_state_controller:
   use_slope_gate: false # Optional slope gate (enable if drift false positives)
   slope_min: 5.0 # Minimum slope for contact [1/s]
 
-  # Grasp: Gripper contact detection parameters
+  # Gripper contact detection parameters
   stall_velocity_threshold: 0.007 # [m/s] Speed below this = stalled
   width_gap_threshold: 0.002 # [m] Min gap: (w - w_cmd) > this to distinguish stall from completion
   # T_hold_gripper: computed dynamically as 0.35 + 0.5 * closing_speed (no config needed)
@@ -20,20 +20,26 @@ kitting_state_controller:
   enable_arm_contact: false # Enable arm torque contact detector (requires enable_contact_detector)
   enable_gripper_contact: true # Enable gripper stall contact detector (requires enable_contact_detector)
 
-  # Grasp: Gripper default parameters (overridable per-command via KittingGripperCommand)
+  # Gripper parameters (overridable per-command via KittingGripperCommand)
   execute_gripper_actions: true # Set false for signal-only testing mode
   closing_width: 0.01 # [m] Default width for MoveAction in CLOSING
-  closing_speed: 0.04 # [m/s] Default speed for MoveAction in CLOSING
-  grasp_width: 0.02 # [m] Default width for GraspAction in SECURE_GRASP
-  epsilon_inner: 0.005 # [m] Default inner epsilon for GraspAction
-  epsilon_outer: 0.005 # [m] Default outer epsilon for GraspAction
-  grasp_speed: 0.04 # [m/s] Default speed for GraspAction in SECURE_GRASP
-  grasp_force: 10.0 # [N] Default force for GraspAction in SECURE_GRASP
+  closing_speed: 0.02 # [m/s] Default speed for MoveAction in CLOSING
 
-  # Grasp: UPLIFT micro-lift parameters (overridable per-command via KittingGripperCommand)
-  uplift_distance: 0.003 # [m] Default upward displacement (3mm, max 10mm)
-  uplift_duration: 1.0 # [s] Cosine-smoothed motion duration
-  require_secure_grasp: true # If true, UPLIFT only allowed from SECURE_GRASP state
+  # Grasping parameters (overridable per-command via KittingGripperCommand)
+  # After GRASPING command, controller runs: GRASPING -> UPLIFT -> EVALUATE -> SUCCESS
+  # On slip: DOWNLIFT -> SETTLING -> GRASPING (retry with F += f_step)
+  # grasp_width is always the contact_width captured at CONTACT (not configurable)
+  grasp_speed: 0.02 # [m/s] Gripper speed for GraspAction
+  epsilon: 0.008 # [m] Epsilon for GraspAction (same for inner/outer)
+  f_min: 3.0 # [N] Starting grasp force
+  f_step: 2.0 # [N] Force increment per iteration
+  f_max: 15.0 # [N] Maximum force (FAILED if exceeded)
+  uplift_distance: 0.003 # [m] Micro-uplift distance per iteration
+  lift_speed: 0.01 # [m/s] Lift speed for both UPLIFT and DOWNLIFT
+  uplift_hold: 0.5 # [s] Hold at top; evaluation performed immediately after
+  stabilization: 0.3 # [s] Post-grasp and post-downlift settle time
+  slip_tau_drop: 0.20 # Fractional tau_ext_norm drop threshold for slip
+  slip_width_change: 0.001 # [m] Width change threshold for slip
 
   # Recording / Logger parameters (used by launch file, see kitting_state_controller.launch)
   # Set require_logger: true to enable rosbag recording (launch arg: record:=true)
@@ -42,6 +48,6 @@ kitting_state_controller:
   require_logger: false
   # Logger parameters below are passed to the logger node via launch file <param> overrides.
   # Edit these defaults here or override via launch args (base_directory:=, object_name:=, etc.)
-  base_directory: "~/kitting_bags"    # Root directory for trial bags
-  object_name: "default_object"       # Object label for directory naming
-  export_csv_on_stop: true            # Export CSV alongside rosbag on STOP
+  base_directory: "~/kitting_bags" # Root directory for trial bags
+  object_name: "default_object" # Object label for directory naming
+  export_csv_on_stop: true # Export CSV alongside rosbag on STOP

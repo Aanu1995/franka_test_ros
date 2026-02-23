@@ -24,14 +24,16 @@ namespace franka_kitting_controller {
  *
  * Recording starts automatically when the node launches — no START command
  * is needed. The logger opens a new trial bag immediately on startup and
- * records all configured topics until STOP or ABORT is published, or the
- * node is shut down (which triggers an automatic STOP).
+ * records all configured topics until STOP or ABORT is published, the
+ * node is shut down (which triggers an automatic STOP), or a terminal
+ * state (SUCCESS or FAILED) is detected on /kitting_controller/state.
  *
  *   /kitting_controller/record_control  ->  STOP, ABORT
- *   /kitting_controller/state           ->  BASELINE, CLOSING, CONTACT, SECURE_GRASP, UPLIFT
+ *   /kitting_controller/state           ->  BASELINE, CLOSING, CONTACT, GRASPING, UPLIFT,
+ *                                         EVALUATE, DOWNLIFT, SETTLING, SUCCESS, FAILED
  *
- * States are labels for offline analysis segmentation only.
- * They do NOT control recording.
+ * States are labels for offline analysis segmentation.
+ * Terminal states (SUCCESS, FAILED) also trigger automatic recording stop.
  *
  * One rosbag per trial. All state transitions and signals are recorded
  * into the same bag file.

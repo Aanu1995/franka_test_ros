@@ -1,7 +1,7 @@
 # KittingGripperCommand - Runtime command with per-object parameters
 #
 # Published by the user on /kitting_controller/state_cmd to trigger BASELINE,
-# CLOSING, SECURE_GRASP, or UPLIFT with optional per-object parameters.
+# CLOSING, or GRASPING with optional per-object parameters.
 #
 # Any float64 parameter left at 0.0 (the default) will fall back to the value
 # loaded from the controller's YAML config at startup.  This lets you override
@@ -11,18 +11,13 @@
 #   command: "BASELINE"
 #   open_gripper: true
 #
-# Example: grip using contact width with unified epsilon
-#   command: "SECURE_GRASP"
-#   epsilon: 0.008
-#   grasp_force: 30.0
-#   (grasp_width auto-uses the width captured at CONTACT)
-#
-# Example: micro-lift 5mm over 2 seconds
-#   command: "UPLIFT"
-#   uplift_distance: 0.005
-#   uplift_duration: 2.0
+# Example: start grasping with custom force range
+#   command: "GRASPING"
+#   f_min: 5.0
+#   f_max: 20.0
+#   (grasp width auto-uses the width captured at CONTACT)
 
-# Command: "BASELINE", "CLOSING", "SECURE_GRASP", or "UPLIFT"
+# Command: "BASELINE", "CLOSING", or "GRASPING"
 string command
 
 # --- BASELINE parameters (used when command == "BASELINE") ---
@@ -33,14 +28,20 @@ float64 open_width          # [m] Width to open to (0 = max_width from firmware)
 float64 closing_width    # [m]   Target width for MoveAction  (0 = use default)
 float64 closing_speed    # [m/s] Speed for MoveAction         (0 = use default)
 
-# --- SECURE_GRASP parameters (used when command == "SECURE_GRASP") ---
-float64 grasp_width      # [m]   Target width for GraspAction (0 = use contact width, or default)
-float64 epsilon           # [m]   Epsilon for GraspAction — sets both inner and outer (0 = use individual fields or default)
-float64 epsilon_inner    # [m]   Inner epsilon for GraspAction (0 = use default). Overridden by epsilon if set
-float64 epsilon_outer    # [m]   Outer epsilon for GraspAction (0 = use default). Overridden by epsilon if set
-float64 grasp_speed      # [m/s] Speed for GraspAction        (0 = use default)
-float64 grasp_force      # [N]   Force for GraspAction        (0 = use default)
-
-# --- UPLIFT parameters (used when command == "UPLIFT") ---
-float64 uplift_distance  # [m]   Upward displacement (0 = use default, max 0.01m)
-float64 uplift_duration  # [s]   Duration of cosine-smoothed micro-lift (0 = use default)
+# --- Force ramp parameters (used when command == "GRASPING") ---
+# grasp_width is always the contact_width captured at CONTACT (not configurable).
+# All parameters are per-command overridable. 0 = use YAML default.
+# The controller runs an automated force ramp loop:
+#   GRASPING → UPLIFT → EVALUATE → SUCCESS
+#   On slip: DOWNLIFT → SETTLING → GRASPING (retry with F += f_step)
+float64 f_min                # [N]   Starting grasp force (0 = use default 3.0)
+float64 f_step               # [N]   Force increment per iteration (0 = use default 2.0)
+float64 f_max                # [N]   Maximum force, FAILED if exceeded (0 = use default 15.0)
+float64 fr_uplift_distance   # [m]   Micro-uplift distance (0 = use default 0.003)
+float64 fr_lift_speed        # [m/s] Lift speed for UPLIFT and DOWNLIFT (0 = use default 0.01)
+float64 fr_uplift_hold       # [s]   Hold at top; evaluation runs immediately after (0 = use default 0.5)
+float64 fr_grasp_speed       # [m/s] Gripper speed for ramp grasps (0 = use default 0.02)
+float64 fr_epsilon           # [m]   Epsilon for ramp grasps, same for inner/outer (0 = use default 0.008)
+float64 fr_stabilization     # [s]   Post-grasp/post-downlift settle time (0 = use default 0.3)
+float64 fr_slip_tau_drop     # Fractional tau_ext_norm drop threshold (0 = use default 0.20)
+float64 fr_slip_width_change # [m]   Width change threshold for slip (0 = use default 0.001)
