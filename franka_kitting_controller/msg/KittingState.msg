@@ -22,3 +22,14 @@ float64[7] coriolis     # Coriolis torque vector [Nm]
 float64[6] ee_velocity  # End-effector velocity (J * dq) [m/s, rad/s]
 float64 tau_ext_norm    # Euclidean norm of tau_ext
 float64 wrench_norm     # Euclidean norm of wrench_ext
+
+# Gripper signals (from franka::Gripper, via dedicated read thread)
+float64 gripper_width          # Measured finger width [m]
+float64 gripper_width_dot      # Finger width velocity (finite difference) [m/s]
+float64 gripper_width_cmd      # Commanded closing width [m] (0 if not in CLOSING)
+float64 gripper_max_width      # Maximum gripper opening width [m]
+bool gripper_is_grasped        # Firmware-level grasp detection flag
+
+# Force ramp state (from automated force ramp state machine)
+float64 grasp_force            # Current grasp force [N] (0 if not in force ramp)
+int32 grasp_iteration          # Force ramp iteration (0-based; 0 = first attempt)

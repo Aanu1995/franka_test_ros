@@ -458,7 +458,7 @@ bool KittingStateController::init(hardware_interface::RobotHW* robot_hw,
 
   // --- Grasp: Gripper default parameters (overridable per-command via KittingGripperCommand) ---
   node_handle.param("closing_width", closing_width_, 0.01);
-  node_handle.param("closing_speed", closing_speed_, 0.02);
+  node_handle.param("closing_speed", closing_speed_, 0.05);
   if (closing_speed_ > kMaxClosingSpeed) {
     ROS_WARN("KittingStateController: closing_speed %.4f exceeds max %.4f, clamping",
              closing_speed_, kMaxClosingSpeed);
@@ -470,14 +470,14 @@ bool KittingStateController::init(hardware_interface::RobotHW* robot_hw,
 
   // --- GRASPING: Force ramp parameters (overridable per-command via KittingGripperCommand) ---
   node_handle.param("f_min", fr_f_min_, 3.0);
-  node_handle.param("f_step", fr_f_step_, 2.0);
-  node_handle.param("f_max", fr_f_max_, 15.0);
+  node_handle.param("f_step", fr_f_step_, 3.0);
+  node_handle.param("f_max", fr_f_max_, 30.0);
   node_handle.param("uplift_distance", fr_uplift_distance_, 0.003);
   node_handle.param("lift_speed", fr_lift_speed_, 0.01);
-  node_handle.param("uplift_hold", fr_uplift_hold_, 0.6);
+  node_handle.param("uplift_hold", fr_uplift_hold_, 0.10);
   node_handle.param("grasp_speed", fr_grasp_speed_, 0.02);
   node_handle.param("epsilon", fr_epsilon_, 0.008);
-  node_handle.param("stabilization", fr_stabilization_, 0.3);
+  node_handle.param("stabilization", fr_stabilization_, 0.5);
   node_handle.param("slip_tau_drop", fr_slip_tau_drop_, 0.20);
   node_handle.param("slip_width_change", fr_slip_width_change_, 0.001);
 
@@ -812,7 +812,8 @@ void KittingStateController::fillKittingStateMsg(
     const std::array<double, 7>& gravity,
     const std::array<double, 7>& coriolis,
     const std::array<double, 6>& ee_velocity,
-    double tau_ext_norm, double wrench_norm) {
+    double tau_ext_norm, double wrench_norm,
+    const GripperData& gripper_snapshot) {
   kitting_publisher_.msg_.header.stamp = time;
 
   std::copy(robot_state.q.begin(), robot_state.q.end(),
@@ -837,6 +838,19 @@ void KittingStateController::fillKittingStateMsg(
             kitting_publisher_.msg_.ee_velocity.begin());
   kitting_publisher_.msg_.tau_ext_norm = tau_ext_norm;
   kitting_publisher_.msg_.wrench_norm = wrench_norm;
+
+  // Gripper signals
+  kitting_publisher_.msg_.gripper_width = gripper_snapshot.width;
+  kitting_publisher_.msg_.gripper_width_dot = gripper_snapshot.width_dot;
+  kitting_publisher_.msg_.gripper_width_cmd =
+      (current_state_.load(std::memory_order_relaxed) == GraspState::CLOSING)
+          ? rt_closing_w_cmd_ : 0.0;
+  kitting_publisher_.msg_.gripper_max_width = gripper_snapshot.max_width;
+  kitting_publisher_.msg_.gripper_is_grasped = gripper_snapshot.is_grasped;
+
+  // Force ramp state
+  kitting_publisher_.msg_.grasp_force = fr_f_current_;
+  kitting_publisher_.msg_.grasp_iteration = fr_iteration_;
 }
 
 // ============================================================================
@@ -959,15 +973,17 @@ void KittingStateController::tickUplift(const ros::Time& time,
   current_state_.store(GraspState::EVALUATE, std::memory_order_relaxed);
   publishStateLabel("EVALUATE");
   logStateTransition("EVALUATE", "Hold + load-transfer slip detection");
-  ROS_INFO("    early=0.3s  late=0.3s  (total hold=0.6s)  W_pre samples=%d", fr_pre_count_);
+  ROS_INFO("    early=%.2fs  late=%.2fs  (total hold=%.2fs)  W_pre samples=%d",
+           rt_fr_uplift_hold_ / 2.0, rt_fr_uplift_hold_ / 2.0,
+           rt_fr_uplift_hold_, fr_pre_count_);
 }
 
 void KittingStateController::tickEvaluate(const ros::Time& time,
                                            double /* tau_ext_norm */,
                                            double wrench_norm,
                                            const GripperData& gripper_snapshot) {
-  static constexpr double kEarlyEnd = 0.3;  // W_hold_early [0, 0.3) s
-  static constexpr double kLateEnd  = 0.6;  // W_hold_late  [0.3, 0.6) s
+  const double kEarlyEnd = rt_fr_uplift_hold_ / 2.0;  // W_hold_early [0, half)
+  const double kLateEnd  = rt_fr_uplift_hold_;         // W_hold_late  [half, hold)
 
   double elapsed = (time - fr_phase_start_time_).toSec();
   double gw = gripper_snapshot.width;
@@ -1172,7 +1188,8 @@ void KittingStateController::update(const ros::Time& time, const ros::Duration& 
 
     if (kitting_publisher_.trylock()) {
       fillKittingStateMsg(time, robot_state, jacobian, gravity, coriolis,
-                          ee_velocity, tau_ext_norm, wrench_norm);
+                          ee_velocity, tau_ext_norm, wrench_norm,
+                          gripper_snapshot);
       kitting_publisher_.unlockAndPublish();
     }
   }

@@ -373,7 +373,8 @@ class KittingStateController
                            const std::array<double, 7>& gravity,
                            const std::array<double, 7>& coriolis,
                            const std::array<double, 6>& ee_velocity,
-                           double tau_ext_norm, double wrench_norm);
+                           double tau_ext_norm, double wrench_norm,
+                           const GripperData& gripper_snapshot);
 
   /// Request the read thread to call stop(). RT-safe (atomic store only).
   void requestGripperStop(const char* source);

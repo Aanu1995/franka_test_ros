@@ -401,6 +401,8 @@ void KittingLogger::exportCsv(const std::string& bag_path,
     csv << ",ee_vx,ee_vy,ee_vz,ee_wx,ee_wy,ee_wz";
     for (int i = 1; i <= 7; ++i) csv << ",gravity_" << i;
     for (int i = 1; i <= 7; ++i) csv << ",coriolis_" << i;
+    csv << ",gripper_width,gripper_width_dot,gripper_width_cmd,gripper_max_width,gripper_is_grasped";
+    csv << ",grasp_force,grasp_iteration";
     csv << "\n";
 
     // Set high precision for floating point
@@ -453,6 +455,15 @@ void KittingLogger::exportCsv(const std::string& bag_path,
         for (size_t i = 0; i < 7; ++i) csv << "," << ks->gravity[i];
         // coriolis[7]
         for (size_t i = 0; i < 7; ++i) csv << "," << ks->coriolis[i];
+        // Gripper signals
+        csv << "," << ks->gripper_width
+            << "," << ks->gripper_width_dot
+            << "," << ks->gripper_width_cmd
+            << "," << ks->gripper_max_width
+            << "," << (ks->gripper_is_grasped ? 1 : 0);
+        // Force ramp state
+        csv << "," << ks->grasp_force
+            << "," << ks->grasp_iteration;
 
         csv << "\n";
         sample_count++;

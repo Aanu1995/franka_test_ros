@@ -7,7 +7,7 @@ kitting_state_controller:
   stall_velocity_threshold: 0.008 # [m/s] Speed below this = stalled
   width_gap_threshold: 0.002 # [m] Min gap: (w - w_cmd) > this to distinguish stall from completion
   closing_width: 0.01 # [m] Default width for MoveAction in CLOSING
-  closing_speed: 0.02 # [m/s] Default speed for MoveAction in CLOSING
+  closing_speed: 0.05 # [m/s] Default speed for MoveAction in CLOSING
 
   # Grasping parameters (overridable per-command via KittingGripperCommand)
   # After GRASPING command, controller runs: GRASPING -> UPLIFT -> EVALUATE -> SUCCESS
@@ -16,12 +16,12 @@ kitting_state_controller:
   grasp_speed: 0.02 # [m/s] Gripper speed for GraspAction
   epsilon: 0.008 # [m] Epsilon for GraspAction (same for inner/outer)
   f_min: 3.0 # [N] Starting grasp force
-  f_step: 2.0 # [N] Force increment per iteration
-  f_max: 15.0 # [N] Maximum force (FAILED if exceeded)
+  f_step: 3.0 # [N] Force increment per iteration
+  f_max: 30.0 # [N] Maximum force (FAILED if exceeded)
   uplift_distance: 0.003 # [m] Micro-uplift distance per iteration
   lift_speed: 0.01 # [m/s] Lift speed for both UPLIFT and DOWNLIFT
-  uplift_hold: 0.6 # [s] Hold at top; early (0–0.3s) + late (0.3–0.6s) windows
-  stabilization: 0.3 # [s] Post-grasp settle time (also W_pre window for slip baseline)
+  uplift_hold: 0.10 # [s] Hold at top; early (0–0.05s) + late (0.05–0.10s) windows
+  stabilization: 0.5 # [s] Post-grasp settle time (also W_pre window for slip baseline)
   slip_tau_drop: 0.20 # Drop ratio threshold for slip (mu_early−mu_late)/mu_early
   slip_width_change: 0.001 # [m] Width change threshold for slip
 

@@ -138,7 +138,7 @@ Initiate automated force ramp. Published via `/kitting_controller/state_cmd` wit
 
 - Gripper applies force `F` via GraspAction to width `w` with tolerance `ε`
 - Grasp width is always the `contact_width` captured at CONTACT (not configurable)
-- Initial force is `f_min` (default 3.0 N); on slip, force increments by `f_step` (default 2.0 N) up to `f_max` (default 15.0 N)
+- Initial force is `f_min` (default 3.0 N); on slip, force increments by `f_step` (default 3.0 N) up to `f_max` (default 30.0 N)
 - After grasp completion + stabilization delay, the controller automatically transitions to UPLIFT
 - **Timeout**: If the grasp command does not complete within 10 seconds, the controller transitions to FAILED
 
@@ -157,7 +157,7 @@ Validate grasp robustness under load. **Auto-triggered** by the controller after
 
 Assess grasp stability at the lifted position. **Auto-triggered** after UPLIFT completes.
 
-- Holds position for 0.6 s total: early window (0–0.3 s) + late window (0.3–0.6 s)
+- Holds position for `uplift_hold` seconds (default 0.10 s): early window (first half) + late window (second half)
 - Uses `wrench_norm` (Cartesian external wrench) for load-transfer slip detection
 - Two-gate evaluation (see [Slip Detection](#grasp-slip-detection-load-transfer-drop-metric)):
   - **Gate 1**: Load transfer confirmation — `delta_F > max(3*sigma_pre, 1.0)`
@@ -178,7 +178,7 @@ Return end-effector to pre-lift height after slip detection. **Auto-triggered** 
 
 Post-downlift stabilization before force increment. **Auto-triggered** after DOWNLIFT completes.
 
-- Waits for `fr_stabilization` seconds (default 0.3 s) for signals to settle
+- Waits for `fr_stabilization` seconds (default 0.5 s) for signals to settle
 - Increments grasp force: `f_current += f_step`
 - If `f_current > f_max`: transitions to FAILED (max force exceeded)
 - Otherwise: re-enters GRASPING with the incremented force, starting a new force ramp iteration
@@ -259,11 +259,11 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
 
 # CLOSING — override width and speed for a specific object
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
-  "{command: 'CLOSING', closing_width: 0.01, closing_speed: 0.02}" --once
+  "{command: 'CLOSING', closing_width: 0.01, closing_speed: 0.05}" --once
 
 # ... CONTACT is published by the controller automatically ...
 
-# GRASPING — use YAML defaults (f_min=3N, f_max=15N, f_step=2N)
+# GRASPING — use YAML defaults (f_min=3N, f_max=30N, f_step=3N)
 # Uses contact_width from CONTACT as grasp width. After this command, the force ramp
 # runs autonomously: GRASPING → UPLIFT → EVALUATE → SUCCESS (or retry → FAILED)
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
@@ -271,14 +271,14 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
 
 # GRASPING — override force range for a specific object
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
-  "{command: 'GRASPING', f_min: 5.0, f_max: 30.0, f_step: 5.0}" --once
+  "{command: 'GRASPING', f_min: 3.0, f_max: 30.0, f_step: 3.0}" --once
 
 # GRASPING — override all force ramp parameters for a specific object
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
   "{command: 'GRASPING', \
-    f_min: 5.0, f_step: 3.0, f_max: 25.0, \
-    fr_grasp_speed: 0.03, fr_epsilon: 0.005, \
-    fr_uplift_distance: 0.005, fr_lift_speed: 0.005, fr_uplift_hold: 0.8, \
+    f_min: 3.0, f_step: 3.0, f_max: 30.0, \
+    fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
+    fr_uplift_distance: 0.003, fr_lift_speed: 0.01, fr_uplift_hold: 0.10, \
     fr_stabilization: 0.5, fr_slip_tau_drop: 0.20, fr_slip_width_change: 0.001}" --once
 
 # Stop recording
@@ -375,8 +375,9 @@ Where `v` is the resolved `closing_speed` (YAML default or per-command override,
 | `closing_speed` (m/s) | `T_hold_gripper` (s) | Notes                     |
 | --------------------- | -------------------- | ------------------------- |
 | 0.01                  | 0.355                |                           |
-| 0.02                  | 0.360                | Default speed, verified   |
+| 0.02                  | 0.360                | Verified                  |
 | 0.04                  | 0.370                | Verified experimentally   |
+| 0.05                  | 0.375                | Default speed             |
 | 0.06                  | 0.380                | Verified experimentally   |
 | 0.08                  | 0.390                |                           |
 | 0.10                  | 0.400                | Maximum speed, verified   |
@@ -416,17 +417,17 @@ After each UPLIFT, the controller evaluates grasp quality using a two-gate load-
 
 The slip evaluation uses three time windows across the grasp-lift-hold sequence:
 
-| Window         | Duration | When                        | Signal           | Purpose                     |
-| -------------- | -------- | --------------------------- | ---------------- | --------------------------- |
-| **W_pre**      | 0.3 s    | Post-grasp stabilization    | `wrench_norm`    | Baseline before lift        |
-| **W_hold_early** | 0.3 s  | First 0.3 s of EVALUATE     | `wrench_norm`    | Loaded reference after lift |
-| **W_hold_late**  | 0.3 s  | Next 0.3 s of EVALUATE      | `wrench_norm`    | Late hold for drop check   |
+| Window         | Duration         | When                            | Signal           | Purpose                     |
+| -------------- | ---------------- | ------------------------------- | ---------------- | --------------------------- |
+| **W_pre**      | `stabilization`  | Post-grasp stabilization        | `wrench_norm`    | Baseline before lift        |
+| **W_hold_early** | `uplift_hold/2`| First half of EVALUATE          | `wrench_norm`    | Loaded reference after lift |
+| **W_hold_late**  | `uplift_hold/2`| Second half of EVALUATE         | `wrench_norm`    | Late hold for drop check   |
 
 ```
-  GRASPING (stab.)       UPLIFT         EVALUATE (0.6 s hold)
-  ├── W_pre [0.3 s]      [lift]         ├── W_hold_early [0–0.3 s)
-  │   mu_pre, sigma_pre                 └── W_hold_late  [0.3–0.6 s)
-  │                                          mu_early, mu_late
+  GRASPING (stab.)            UPLIFT         EVALUATE (uplift_hold)
+  ├── W_pre [stabilization]   [lift]         ├── W_hold_early [0, hold/2)
+  │   mu_pre, sigma_pre                      └── W_hold_late  [hold/2, hold)
+  │                                               mu_early, mu_late
 ```
 
 ### Gate 1: Load Transfer Confirmation
@@ -622,16 +623,16 @@ The **velocity profile** (first derivative) is:
 | `stall_velocity_threshold` | double | `0.008` | Gripper speed below this = stalled [m/s]                            |
 | `width_gap_threshold`      | double | `0.002` | Min gap (w - w_cmd) for stall detection [m]                         |
 | `closing_width`            | double | `0.01`  | Default width for MoveAction in CLOSING [m]                         |
-| `closing_speed`            | double | `0.02`  | Default speed for MoveAction in CLOSING [m/s] (clamped to max 0.10) |
+| `closing_speed`            | double | `0.05`  | Default speed for MoveAction in CLOSING [m/s] (clamped to max 0.10) |
 | `grasp_speed`              | double | `0.02`  | Gripper speed for GraspAction [m/s]                                 |
 | `epsilon`                  | double | `0.008` | Epsilon for GraspAction (inner and outer) [m]                       |
 | `f_min`                    | double | `3.0`   | Starting grasp force [N]                                            |
-| `f_step`                   | double | `2.0`   | Force increment per iteration [N]                                   |
-| `f_max`                    | double | `15.0`  | Maximum force — FAILED if exceeded [N]                              |
+| `f_step`                   | double | `3.0`   | Force increment per iteration [N]                                   |
+| `f_max`                    | double | `30.0`  | Maximum force — FAILED if exceeded [N]                              |
 | `uplift_distance`          | double | `0.003` | Micro-uplift distance per iteration [m] (max 0.01)                  |
 | `lift_speed`               | double | `0.01`  | Lift speed for UPLIFT and DOWNLIFT [m/s]                            |
-| `uplift_hold`              | double | `0.6`   | Hold time: early (0–0.3 s) + late (0.3–0.6 s) windows [s]          |
-| `stabilization`            | double | `0.3`   | Post-grasp settle time; also W_pre baseline window [s]              |
+| `uplift_hold`              | double | `0.10`  | Hold time: early (first half) + late (second half) windows [s]      |
+| `stabilization`            | double | `0.5`   | Post-grasp settle time; also W_pre baseline window [s]              |
 | `slip_tau_drop`            | double | `0.20`  | Drop ratio threshold: (mu_early−mu_late)/mu_early                   |
 | `slip_width_change`        | double | `0.001` | Width change threshold for slip [m]                                 |
 
@@ -694,7 +695,7 @@ detector_parameters:
 
 When `export_csv_on_stop` is `true` (default), the logger automatically reads back the rosbag after recording stops and writes a flattened CSV file using the C++ `rosbag::View` API. The export runs in a background thread so the stop operation returns immediately.
 
-The CSV contains one row per `KittingState` message (60 columns):
+The CSV contains one row per `KittingState` message (67 columns):
 
 | Group            | Columns                                                                                     |
 | ---------------- | ------------------------------------------------------------------------------------------- |
@@ -708,6 +709,8 @@ The CSV contains one row per `KittingState` message (60 columns):
 | EE velocity      | `ee_vx`, `ee_vy`, `ee_vz`, `ee_wx`, `ee_wy`, `ee_wz`                                        |
 | Gravity          | `gravity_1` ... `gravity_7`                                                                 |
 | Coriolis         | `coriolis_1` ... `coriolis_7`                                                               |
+| Gripper          | `gripper_width`, `gripper_width_dot`, `gripper_width_cmd`, `gripper_max_width`, `gripper_is_grasped` |
+| Force ramp       | `grasp_force`, `grasp_iteration`                                                            |
 
 `O_T_EE` (16 values) and `jacobian` (42 values) are not included in the CSV. They remain in the rosbag.
 
@@ -725,14 +728,14 @@ Per-object command published on `/kitting_controller/state_cmd`. Any float64 par
 | `closing_width`        | float64 | Target width for MoveAction [m] (0 = use default)                                  |
 | `closing_speed`        | float64 | Speed for MoveAction [m/s] (0 = use default, max 0.10)                             |
 | `f_min`                | float64 | Starting grasp force [N] (0 = use default 3.0)                                     |
-| `f_step`               | float64 | Force increment per iteration [N] (0 = use default 2.0)                            |
-| `f_max`                | float64 | Maximum force — FAILED if exceeded [N] (0 = use default 15.0)                      |
+| `f_step`               | float64 | Force increment per iteration [N] (0 = use default 3.0)                            |
+| `f_max`                | float64 | Maximum force — FAILED if exceeded [N] (0 = use default 30.0)                      |
 | `fr_uplift_distance`   | float64 | Micro-uplift distance per iteration [m] (0 = use default 0.003, max 0.01)          |
 | `fr_lift_speed`        | float64 | Lift speed for UPLIFT and DOWNLIFT [m/s] (0 = use default 0.01)                    |
-| `fr_uplift_hold`       | float64 | Hold time at top for evaluation [s] (0 = use default 0.6)                          |
+| `fr_uplift_hold`       | float64 | Hold time at top for evaluation [s] (0 = use default 0.10)                         |
 | `fr_grasp_speed`       | float64 | Gripper speed for ramp GraspAction [m/s] (0 = use default 0.02)                    |
 | `fr_epsilon`           | float64 | Epsilon for ramp GraspAction, inner and outer [m] (0 = use default 0.008)          |
-| `fr_stabilization`     | float64 | Post-grasp and post-downlift settle time [s] (0 = use default 0.3)                 |
+| `fr_stabilization`     | float64 | Post-grasp and post-downlift settle time [s] (0 = use default 0.5)                 |
 | `fr_slip_tau_drop`     | float64 | Drop ratio threshold (mu_early−mu_late)/mu_early (0 = use default 0.20)            |
 | `fr_slip_width_change` | float64 | Width change threshold for slip [m] (0 = use default 0.001)                        |
 
@@ -759,6 +762,13 @@ Only the parameters relevant to the command are used:
 | `ee_velocity`  | float64[6]  | End-effector velocity (J \* dq) [m/s, rad/s]      |
 | `tau_ext_norm` | float64     | Euclidean norm of `tau_ext`                       |
 | `wrench_norm`  | float64     | Euclidean norm of `wrench_ext`                    |
+| `gripper_width` | float64    | Measured finger width [m]                         |
+| `gripper_width_dot` | float64 | Finger width velocity (finite difference) [m/s]  |
+| `gripper_width_cmd` | float64 | Commanded closing width [m] (0 if not CLOSING)   |
+| `gripper_max_width` | float64 | Maximum gripper opening width [m]                |
+| `gripper_is_grasped` | bool   | Firmware-level grasp detection flag               |
+| `grasp_force`  | float64     | Current grasp force [N] (0 if not in force ramp)  |
+| `grasp_iteration` | int32    | Force ramp iteration (0-based; 0 = first attempt) |
 
 ## Interfaces
 
@@ -837,7 +847,7 @@ Move EE into table. **Expected**: clear increase in Fz, `wrench_norm`, `tau_ext_
 - STOP saves bag + metadata + CSV, ABORT deletes trial (no CSV)
 - Logger shutdown (Ctrl+C) automatically stops recording (equivalent to STOP)
 - Bag contains 2 topics: kitting_state_data, state
-- CSV contains 60 flattened columns with state labels per row
+- CSV contains 67 flattened columns with state labels per row
 - CSV export does not block the ROS spin loop (runs in background thread)
 - metadata.yaml contains bag_filename, csv_filename, total_samples, start/stop times, and detector parameters
 - Gripper stall contact detection: velocity < threshold AND width gap > threshold for T_hold_gripper (computed: 0.35 + 0.5 \* closing_speed)
@@ -845,7 +855,7 @@ Move EE into table. **Expected**: clear increase in Fz, `wrench_norm`, `tau_ext_
 - Object contact: width stalls before w_cmd, w_dot ~0, gap > threshold → CONTACT
 - Gripper stops immediately on contact: `stop()` called via atomic flag and read thread
 - Contact width saved at CONTACT — used as the grasp width in GRASPING
-- KittingState contains robot-side signals only: joint, Cartesian, model, and derived quantities (no gripper or force ramp fields)
+- KittingState contains robot signals, gripper signals, and force ramp state — all published at 250 Hz
 - Publishing CLOSING on `state_cmd` triggers gripper `move()` + state label
 - Publishing BASELINE on `state_cmd` prepares for new trial (optionally opens gripper)
 - Publishing GRASPING on `state_cmd` starts the automated force ramp (uses contact_width from CONTACT)
