@@ -84,16 +84,8 @@ KittingLogger::KittingLogger()
 
   // Detector params for metadata (read from controller namespace)
   std::string ctrl_ns = "/kitting_state_controller/";
-  nh_.param(ctrl_ns + "T_base", T_base_, 0.7);
-  nh_.param(ctrl_ns + "N_min", N_min_, 50);
-  nh_.param(ctrl_ns + "k_sigma", k_sigma_, 3.0);
-  nh_.param(ctrl_ns + "T_hold_arm", T_hold_arm_, 0.10);
-  nh_.param(ctrl_ns + "use_slope_gate", use_slope_gate_, false);
-  nh_.param(ctrl_ns + "slope_min", slope_min_, 5.0);
   nh_.param(ctrl_ns + "stall_velocity_threshold", stall_velocity_threshold_, 0.008);
   nh_.param(ctrl_ns + "width_gap_threshold", width_gap_threshold_, 0.002);
-  nh_.param(ctrl_ns + "enable_arm_contact", enable_arm_contact_, true);
-  nh_.param(ctrl_ns + "enable_gripper_contact", enable_gripper_contact_, true);
 
   // --- Subscribe to record control (STOP, ABORT) ---
   record_control_sub_ = nh_.subscribe(
@@ -362,27 +354,9 @@ void KittingLogger::writeMetadata() {
   f << "export_csv_on_stop: " << (export_csv_on_stop_ ? "true" : "false") << "\n";
 
   f << "detector_parameters:\n";
-  f << "  T_base: " << T_base_ << "\n";
-  f << "  N_min: " << N_min_ << "\n";
-  f << "  k_sigma: " << k_sigma_ << "\n";
-  f << "  T_hold_arm: " << T_hold_arm_ << "\n";
   f << "  T_hold_gripper: \"computed: 0.35 + 0.5 * closing_speed\"\n";
-  f << "  use_slope_gate: " << (use_slope_gate_ ? "true" : "false") << "\n";
-  f << "  slope_min: " << slope_min_ << "\n";
-  f << "  enable_arm_contact: " << (enable_arm_contact_ ? "true" : "false") << "\n";
-  f << "  enable_gripper_contact: " << (enable_gripper_contact_ ? "true" : "false") << "\n";
   f << "  stall_velocity_threshold: " << stall_velocity_threshold_ << "\n";
   f << "  width_gap_threshold: " << width_gap_threshold_ << "\n";
-
-  double mu = 0, sigma = 0, theta = 0;
-  bool has_mu = nh_.getParam("/kitting_state_controller/baseline_mu", mu);
-  bool has_sigma = nh_.getParam("/kitting_state_controller/baseline_sigma", sigma);
-  bool has_theta = nh_.getParam("/kitting_state_controller/contact_threshold", theta);
-
-  f << "baseline_statistics:\n";
-  f << "  baseline_mu_tau_ext_norm: " << (has_mu ? std::to_string(mu) : "null") << "\n";
-  f << "  baseline_sigma_tau_ext_norm: " << (has_sigma ? std::to_string(sigma) : "null") << "\n";
-  f << "  contact_threshold_theta: " << (has_theta ? std::to_string(theta) : "null") << "\n";
 
   f.close();
   ROS_INFO("KittingLogger: Metadata written -> %s", meta_path.c_str());

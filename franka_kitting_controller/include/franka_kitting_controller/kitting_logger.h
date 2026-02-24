@@ -54,11 +54,7 @@ class KittingLogger {
   std::vector<std::string> topics_to_record_;
 
   // Detector params (read from parameter server for metadata)
-  double T_base_, k_sigma_, slope_min_;
-  double T_hold_arm_;
   double stall_velocity_threshold_, width_gap_threshold_;
-  int N_min_;
-  bool use_slope_gate_, enable_arm_contact_, enable_gripper_contact_;
 
   // CSV export thread (joinable, not detached)
   std::thread csv_export_thread_;

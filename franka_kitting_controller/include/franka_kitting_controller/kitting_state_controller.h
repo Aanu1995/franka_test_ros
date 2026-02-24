@@ -5,7 +5,6 @@
 #include <array>
 #include <atomic>
 #include <condition_variable>
-#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -186,7 +185,6 @@ class KittingStateController
   realtime_tools::RealtimeBuffer<GripperData> gripper_data_buf_;
 
   // --- Grasp: Gripper default parameters (overridable per-command) ---
-  bool execute_gripper_actions_{true};
   double closing_width_{0.01};
   double closing_speed_{0.02};
 
@@ -202,43 +200,15 @@ class KittingStateController
   std::atomic<bool> state_changed_{false};
   bool contact_latched_{false};
 
-  // --- Grasp: Arm contact detector parameters ---
-  bool enable_contact_detector_{true};
-  bool enable_arm_contact_{false};
-  bool enable_gripper_contact_{true};
-  double T_base_{0.7};
-  int N_min_{50};
-  double k_sigma_{3.0};
-  double T_hold_arm_{0.10};
-  bool use_slope_gate_{false};
-  double slope_min_{5.0};
-
   // --- Gripper contact detection parameters ---
   double stall_velocity_threshold_{0.008};  // [m/s] Speed below this = stalled
   double width_gap_threshold_{0.002};       // [m] Min gap: (w - w_cmd) > this
-  bool stop_on_contact_{true};              // Call stop() on contact
-
-  // Baseline statistics (computed during BASELINE state)
-  double baseline_sum_{0.0};
-  double baseline_sum_sq_{0.0};
-  int baseline_n_{0};
-  ros::Time baseline_start_time_;
-  bool baseline_collecting_{false};
-  std::atomic<bool> baseline_armed_{false};  // True once baseline stats are computed
-
-  double baseline_mu_{0.0};
-  double baseline_sigma_{0.0};
-  double contact_threshold_{0.0};  // theta = mu + k * sigma
-  std::atomic<bool> baseline_params_pending_{false};  // RT → read thread: publish params
 
   // Debounce state (RT-thread owned)
-  DebounceState arm_debounce_;
   DebounceState gripper_debounce_;
   std::atomic<bool> gripper_stop_sent_{false};  // Written by RT, read by command thread
-  const char* contact_source_{""};  // "ARM" or "GRIPPER" — records which detector fired (RT-safe)
+  const char* contact_source_{""};  // "GRIPPER" — records which detector fired (RT-safe)
   std::atomic<double> contact_width_{0.0};  // Gripper width at CONTACT — used as grasp width in GRASPING
-  bool baseline_awaiting_gripper_{false}; // Wait for gripper open before baseline collection
-  ros::Time baseline_gripper_wait_start_; // Timestamp when gripper open wait started
 
   // RT-local copies of CLOSING command parameters — snapshotted when CLOSING begins.
   // Written by subscriber (stateCmdCallback), synchronized via release/acquire on state_changed_.
@@ -247,11 +217,6 @@ class KittingStateController
   double rt_closing_w_cmd_{0.01};  // RT-local copy
   double rt_closing_v_cmd_{0.02};  // RT-local copy
   double rt_T_hold_gripper_{0.35}; // Computed from rt_closing_v_cmd_ when CLOSING starts
-
-  // Slope gate state
-  double prev_tau_ext_norm_{0.0};
-  ros::Time prev_tau_ext_time_;
-  bool prev_tau_ext_valid_{false};
 
   // Slow-rate logger for contact signal monitoring (2 Hz — readable in terminal)
   franka_hw::TriggerRate signal_log_trigger_{2.0};
@@ -344,7 +309,7 @@ class KittingStateController
 
   // --- Deferred grasp command (RT → read thread → command thread) ---
   // RT thread requests a grasp command via this mechanism (can't call queueGripperCommand
-  // from RT because it uses a mutex). Same pattern as baseline_params_pending_:
+  // from RT because it uses a mutex):
   //   RT thread: write parameters, then release-store deferred_grasp_pending_ = true
   //   Read thread: acquire-load flag, read params, call queueGripperCommand(), clear flag
   std::atomic<bool> deferred_grasp_pending_{false};
@@ -360,7 +325,6 @@ class KittingStateController
   static constexpr double kMaxUpliftDistance{0.01};   // [m] Safety cap on uplift distance
 
   // --- Force ramp internal timing constants ---
-  static constexpr double kGripperOpenWait{3.0};      // [s] Max wait for gripper open before baseline
   static constexpr double kGraspSettleDelay{0.1};     // [s] Wait for command thread pickup
   static constexpr double kGraspTimeout{10.0};        // [s] Fail if grasp doesn't complete
 
@@ -388,9 +352,8 @@ class KittingStateController
   /// Generate and send the Cartesian pose command for this tick (1kHz).
   void updateCartesianCommand(const ros::Duration& period);
 
-  /// Run Grasp contact detection (BASELINE collection + CLOSING detectors).
+  /// Run Grasp contact detection (gripper stall detection during CLOSING).
   void runContactDetection(const ros::Time& time,
-                           double tau_ext_norm,
                            const GripperData& gripper_snapshot);
 
   /// Run internal force ramp transitions (GRASPING→UPLIFT→EVALUATE→...).
@@ -441,9 +404,6 @@ class KittingStateController
   void handleGraspingCmd(const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg);
 
   // --- runContactDetection decomposition ---
-  void collectBaselineSamples(const ros::Time& time, double tau_ext_norm);
-  void detectArmContact(const ros::Time& time, double tau_ext_norm,
-                        const GripperData& gripper_snapshot);
   void detectGripperContact(const ros::Time& time, const GripperData& gripper_snapshot);
 
   // --- runInternalTransitions decomposition ---
