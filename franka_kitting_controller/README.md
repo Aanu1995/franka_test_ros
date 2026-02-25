@@ -146,7 +146,7 @@ Initiate automated force ramp. Published via `/kitting_controller/state_cmd` wit
 
 Validate grasp robustness under load. **Auto-triggered** by the controller after GRASPING completes — not a user command.
 
-- Controller displaces end-effector upward by `fr_uplift_distance` (default 3 mm, max 10 mm)
+- Controller displaces end-effector upward by `fr_uplift_distance` (default 5 mm, max 10 mm)
 - Duration computed from distance and speed: `T = fr_uplift_distance / fr_lift_speed`
 - Cosine-smoothed trajectory `s = 0.5(1 - cos(π · s_raw))` ensures zero velocity at start and end
 - Only z-translation of `O_T_EE_d[14]` is modified — orientation and x/y unchanged
@@ -278,7 +278,7 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
   "{command: 'GRASPING', \
     f_min: 3.0, f_step: 3.0, f_max: 30.0, \
     fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
-    fr_uplift_distance: 0.003, fr_lift_speed: 0.01, fr_uplift_hold: 0.10, \
+    fr_uplift_distance: 0.005, fr_lift_speed: 0.01, fr_uplift_hold: 0.10, \
     fr_stabilization: 0.5, fr_slip_tau_drop: 0.20, fr_slip_width_change: 0.001}" --once
 
 # Stop recording
@@ -544,7 +544,7 @@ The UPLIFT and DOWNLIFT states execute smooth Cartesian micro-lifts internally u
 
 | Symbol     | Name                      | Unit | Default  | Description                                                                |
 | ---------- | ------------------------- | ---- | -------- | -------------------------------------------------------------------------- |
-| `d`        | Lift distance             | m    | 0.003    | Total displacement along the z-axis (max 0.01)                             |
+| `d`        | Lift distance             | m    | 0.005    | Total displacement along the z-axis (max 0.01)                             |
 | `v_lift`   | Lift speed                | m/s  | 0.01     | Speed for both UPLIFT and DOWNLIFT                                         |
 | `T`        | Lift duration             | s    | computed | `T = d / v_lift` (computed from distance and speed)                        |
 | `t`        | Elapsed time              | s    | —        | Time since lift started, incremented by `Δt` (control period) each tick    |
@@ -589,7 +589,7 @@ The **velocity profile** (first derivative) is:
 | Velocity at `t = 0`     | `dz/dt = 0`                            | Zero velocity at start (no step discontinuity) |
 | Velocity at `t = T`     | `dz/dt = 0`                            | Zero velocity at end (smooth stop)             |
 | Peak velocity           | `v_max = πd/(2T)` at `t = T/2`         | Maximum speed at the midpoint of the motion    |
-| Peak velocity (default) | `v_max = π·0.003/(2·0.3) ≈ 0.0157 m/s` | ~15.7 mm/s — well within Franka limits         |
+| Peak velocity (default) | `v_max = π·0.005/(2·0.5) ≈ 0.0157 m/s` | ~15.7 mm/s — well within Franka limits         |
 
 ### Execution Details
 
@@ -629,7 +629,7 @@ The **velocity profile** (first derivative) is:
 | `f_min`                    | double | `3.0`   | Starting grasp force [N]                                            |
 | `f_step`                   | double | `3.0`   | Force increment per iteration [N]                                   |
 | `f_max`                    | double | `30.0`  | Maximum force — FAILED if exceeded [N]                              |
-| `uplift_distance`          | double | `0.003` | Micro-uplift distance per iteration [m] (max 0.01)                  |
+| `uplift_distance`          | double | `0.005` | Micro-uplift distance per iteration [m] (max 0.01)                  |
 | `lift_speed`               | double | `0.01`  | Lift speed for UPLIFT and DOWNLIFT [m/s]                            |
 | `uplift_hold`              | double | `0.10`  | Hold time: early (first half) + late (second half) windows [s]      |
 | `stabilization`            | double | `0.5`   | Post-grasp settle time; also W_pre baseline window [s]              |
@@ -730,7 +730,7 @@ Per-object command published on `/kitting_controller/state_cmd`. Any float64 par
 | `f_min`                | float64 | Starting grasp force [N] (0 = use default 3.0)                                     |
 | `f_step`               | float64 | Force increment per iteration [N] (0 = use default 3.0)                            |
 | `f_max`                | float64 | Maximum force — FAILED if exceeded [N] (0 = use default 30.0)                      |
-| `fr_uplift_distance`   | float64 | Micro-uplift distance per iteration [m] (0 = use default 0.003, max 0.01)          |
+| `fr_uplift_distance`   | float64 | Micro-uplift distance per iteration [m] (0 = use default 0.005, max 0.01)          |
 | `fr_lift_speed`        | float64 | Lift speed for UPLIFT and DOWNLIFT [m/s] (0 = use default 0.01)                    |
 | `fr_uplift_hold`       | float64 | Hold time at top for evaluation [s] (0 = use default 0.10)                         |
 | `fr_grasp_speed`       | float64 | Gripper speed for ramp GraspAction [m/s] (0 = use default 0.02)                    |
