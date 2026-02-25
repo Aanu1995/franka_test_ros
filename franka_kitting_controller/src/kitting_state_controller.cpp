@@ -190,6 +190,7 @@ namespace franka_kitting_controller {
           } catch (const franka::Exception& ex) {
             ROS_WARN_STREAM("KittingStateController: stop() failed: " << ex.what());
           }
+          gripper_stopped_.store(true, std::memory_order_relaxed);
           stop_requested_.store(false, std::memory_order_relaxed);
         }
 
@@ -684,6 +685,7 @@ namespace franka_kitting_controller {
       contact_latched_ = false;
       gripper_debounce_.reset();
       gripper_stop_sent_.store(false, std::memory_order_relaxed);
+      gripper_stopped_.store(false, std::memory_order_relaxed);
       contact_width_.store(0.0, std::memory_order_relaxed);
 
       // Reset force ramp state
@@ -703,6 +705,7 @@ namespace franka_kitting_controller {
       rt_T_hold_gripper_ = computeGripperHoldTime(rt_closing_v_cmd_);
       gripper_debounce_.reset();
       gripper_stop_sent_.store(false, std::memory_order_relaxed);
+      gripper_stopped_.store(false, std::memory_order_relaxed);
       ROS_INFO("  [CLOSING]  T_hold_gripper=%.3fs (from speed=%.4f m/s)",
               rt_T_hold_gripper_, rt_closing_v_cmd_);
     }
@@ -772,6 +775,15 @@ namespace franka_kitting_controller {
         !contact_latched_) {
       detectGripperContact(time, gripper_snapshot);
     }
+
+    // Deferred CONTACT transition: wait for gripper to physically stop
+    if (contact_latched_ &&
+        current_state_.load(std::memory_order_relaxed) == GraspState::CLOSING &&
+        gripper_stopped_.load(std::memory_order_relaxed)) {
+      current_state_.store(GraspState::CONTACT, std::memory_order_relaxed);
+      publishStateLabel("CONTACT");
+      logStateTransition("CONTACT", "Gripper stopped — contact confirmed");
+    }
   }
 
   void KittingStateController::detectGripperContact(const ros::Time& time,
@@ -795,10 +807,8 @@ namespace franka_kitting_controller {
       requestGripperStop("Stall"); // Request gripper closing to stop
 
       contact_width_.store(gripper_snapshot.width, std::memory_order_relaxed);
-      current_state_.store(GraspState::CONTACT, std::memory_order_relaxed);
-      publishStateLabel("CONTACT");
-      logStateTransition("CONTACT", "GRIPPER stall contact detected!");
-      ROS_INFO("    w=%.4f  w_cmd=%.4f  gap=%.4f  w_dot=%.6f  hold=%.3fs",
+      ROS_INFO("  [CLOSING]  Stall detected, waiting for gripper stop: "
+              "w=%.4f  w_cmd=%.4f  gap=%.4f  w_dot=%.6f  hold=%.3fs",
               w, rt_closing_w_cmd_, w - rt_closing_w_cmd_, w_dot, hold_elapsed);
     }
   }
