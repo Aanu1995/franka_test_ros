@@ -1,7 +1,6 @@
 <?xml version="1.0" ?>
 <launch>
   <arg name="robot_ip" />
-  <arg name="load_gripper" default="false" />
 
   <!-- Recording parameters -->
   <arg name="record" default="false" />
@@ -9,11 +8,7 @@
   <arg name="object_name" default="default_object" />
   <arg name="export_csv_on_stop" default="true" />
 
-  <include file="$(find franka_control)/launch/franka_control.launch">
-    <arg name="robot_ip" value="$(arg robot_ip)" />
-    <arg name="load_gripper" value="$(arg load_gripper)" />
-  </include>
-
+  <!-- Load controller config and spawn into running controller_manager -->
   <rosparam command="load" file="$(find franka_kitting_controller)/config/kitting_state_controller.yaml" />
   <param name="kitting_state_controller/robot_ip" value="$(arg robot_ip)" />
   <param name="kitting_state_controller/require_logger" value="$(arg record)" />

@@ -1,6 +1,6 @@
 # franka_kitting_controller
 
-Real-time state acquisition and automated force ramp controller for the Franka Panda with gripper stall contact detection and rosbag data collection. Reads all robot state, model, and Cartesian signals, publishes them as a single `KittingState` message, autonomously detects contact using gripper stall detection, immediately stops the gripper on contact via `franka::Gripper::stop()`, and runs an automated force ramp loop (GRASPING → UPLIFT → EVALUATE → SUCCESS, with slip-triggered retry at higher force) internally. Claims `FrankaPoseCartesianInterface` for Cartesian pose control. Gripper operations use the libfranka `franka::Gripper` API directly (no dependency on `franka_gripper` ROS package).
+Real-time state acquisition and automated force ramp controller for the Franka Panda with gripper stall contact detection and rosbag data collection. Reads all robot state, model, and Cartesian signals, publishes them as a single `KittingState` message, autonomously detects contact using gripper stall detection, immediately stops the gripper on contact via `franka::Gripper::stop()`, and runs an automated force ramp loop (GRASPING → UPLIFT → EVALUATE → SUCCESS, with slip-triggered retry at higher force) internally. Claims `FrankaPoseCartesianInterface` for Cartesian pose control. Gripper operations use the libfranka `franka::Gripper` API directly. Also exposes `franka_gripper`-compatible action servers (move, grasp, homing, stop) for external gripper control when the internal state machine is idle.
 
 ## Overview
 
@@ -26,7 +26,8 @@ This controller runs inside the `ros_control` real-time loop provided by `franka
 
 - ROS Noetic (or Melodic)
 - [libfranka](https://github.com/frankaemika/libfranka) >= 0.8.0
-- [franka_ros](https://github.com/frankaemika/franka_ros) (specifically `franka_hw`, `franka_control`)
+- [franka_ros](https://github.com/frankaemika/franka_ros) (specifically `franka_hw`, `franka_control`, `franka_gripper` for action type definitions)
+- `actionlib` (for gripper action servers)
 
 ## Building
 
@@ -39,18 +40,27 @@ catkin build franka_kitting_controller
 
 ## Usage
 
+### Prerequisites: Launch the robot
+
+The kitting controller does **not** launch the robot — it assumes `franka_control` is already running. Launch the robot first:
+
+```bash
+roslaunch franka_control franka_control.launch robot_ip:=<ROBOT_IP> load_gripper:=false
+```
+
+Use `load_gripper:=false` because the kitting controller connects to the gripper directly via `libfranka`. Running `franka_gripper_node` simultaneously would create a connection conflict.
+
 ### Launch the controller
 
-Connects to the robot, starts `franka_control`, and spawns the `kitting_state_controller`.
+Loads config, spawns the `kitting_state_controller` into the running `controller_manager`, and connects to the gripper.
 
 ```bash
 roslaunch franka_kitting_controller kitting_state_controller.launch robot_ip:=<ROBOT_IP>
 ```
 
-| Argument       | Default    | Description                                                                  |
-| -------------- | ---------- | ---------------------------------------------------------------------------- |
-| `robot_ip`     | (required) | Franka robot IP address                                                      |
-| `load_gripper` | `false`    | Load gripper driver (must be false — controller owns the gripper connection) |
+| Argument   | Default    | Description               |
+| ---------- | ---------- | ------------------------- |
+| `robot_ip` | (required) | Franka robot IP address   |
 
 ### Recording (optional)
 
@@ -121,6 +131,7 @@ Observe approach dynamics before contact.
 - Gripper begins closing toward object at width `w` and speed `v` (max 0.10 m/s)
 - Gripper stall contact detection runs: finger width velocity stalls while gap to target width remains
 - CONTACT is latched immediately when detected
+- If gripper reaches target width without stalling (no object present), transitions to **FAILED** — "no contact detected"
 
 ### CONTACT
 
@@ -128,9 +139,9 @@ Detect first stable physical interaction. Published **automatically** by the con
 
 - Object touches gripper fingers — detected by gripper stall detection
 - Width velocity drops below `stall_velocity_threshold` (0.008 m/s) while `(width - w_cmd) > width_gap_threshold` (0.002 m), sustained for `T_hold_gripper` seconds (computed dynamically from `closing_speed`; see [Dynamic Gripper Debounce Time](#dynamic-gripper-debounce-time-t_hold_gripper))
-- **Immediate stop**: On contact, `franka::Gripper::stop()` is called via the read thread to physically halt the motor at the contact width
+- `contact_width` is saved immediately at stall detection — used as the grasp width in GRASPING
+- **Deferred transition**: On stall detection, `franka::Gripper::stop()` is requested via the read thread. The state remains CLOSING until the gripper has physically stopped (`gripper_stopped_` flag set by the read thread), then transitions to CONTACT. This ensures all data recorded during CONTACT reflects a stopped gripper.
 - CONTACT is **latched** once detected — cannot return to CLOSING
-- `contact_width` saves the gripper width at the moment of contact — used as the grasp width in GRASPING
 
 ### GRASPING
 
@@ -197,6 +208,7 @@ Terminal state indicating stable grasp confirmed. **Auto-triggered** when EVALUA
 
 Terminal state indicating grasp failure. **Auto-triggered** on any of:
 
+- No contact detected during CLOSING (gripper reached target width without stalling)
 - Maximum force exceeded (`f_current > f_max`) after all force ramp iterations
 - GRASPING timeout (gripper command did not complete within 10 seconds)
 - State label published for offline analysis with diagnostic information
@@ -214,6 +226,10 @@ Recording and state labeling are independent concerns.
 | `/kitting_controller/state`          | std_msgs/String       | Published  | State labels for offline segmentation      |
 | `/kitting_controller/record_control` | std_msgs/String       | Subscribed | Recording control: STOP, ABORT             |
 | `/kitting_controller/logger_ready`   | std_msgs/Bool         | Subscribed | Latched readiness signal from logger node  |
+| `/franka_gripper/move`               | franka_gripper/MoveAction   | ActionServer | Move fingers to width at speed        |
+| `/franka_gripper/grasp`              | franka_gripper/GraspAction  | ActionServer | Grasp with width, speed, force, epsilon |
+| `/franka_gripper/homing`             | franka_gripper/HomingAction | ActionServer | Gripper homing (recalibrate)          |
+| `/franka_gripper/stop`               | franka_gripper/StopAction   | ActionServer | Emergency gripper stop (always allowed) |
 
 - `/kitting_controller/state_cmd` — The **user** publishes a `KittingGripperCommand` with `command` field set to `BASELINE`, `CLOSING`, or `GRASPING`, plus optional per-object parameters. Any float64 parameter left at `0.0` falls back to the YAML config default. The **controller** executes the corresponding action, publishes the state label on `/kitting_controller/state`, and drives the force ramp internally.
 - `/kitting_controller/state` — The **controller** publishes all 11 state labels: START, BASELINE, CLOSING, CONTACT, GRASPING, UPLIFT, EVALUATE, DOWNLIFT, SETTLING, SUCCESS, FAILED. States are labels for offline analysis. Terminal states (SUCCESS, FAILED) also trigger automatic recording stop when the logger is running.
@@ -288,6 +304,47 @@ rostopic pub /kitting_controller/record_control std_msgs/String "data: 'STOP'" -
 rostopic pub /kitting_controller/record_control std_msgs/String "data: 'ABORT'" --once
 ```
 
+## Gripper Action Servers
+
+The controller exposes four `franka_gripper`-compatible action servers under the `/franka_gripper/` namespace. These allow external nodes (e.g., a MoveIt-based main controller) to command the gripper through standard ROS action interfaces — without running `franka_gripper_node` (which would conflict with the controller's own gripper connection).
+
+### State Guard
+
+Action server requests are only accepted when the internal state machine is **idle**: `START`, `SUCCESS`, or `FAILED`. During an active grasp sequence (BASELINE through EVALUATE), the state machine owns the gripper and external actions are rejected with an error describing the current state.
+
+### Available Actions
+
+| Action                    | Type                       | Description                                              |
+| ------------------------- | -------------------------- | -------------------------------------------------------- |
+| `/franka_gripper/move`    | `franka_gripper/MoveAction`   | Move fingers to a target width at a given speed          |
+| `/franka_gripper/grasp`   | `franka_gripper/GraspAction`  | Grasp with specified width, speed, force, and epsilon    |
+| `/franka_gripper/homing`  | `franka_gripper/HomingAction` | Run the gripper homing routine (recalibrate)             |
+| `/franka_gripper/stop`    | `franka_gripper/StopAction`   | Immediately stop the gripper (always allowed, any state) |
+
+**Move**, **Grasp**, and **Homing** are routed through the existing gripper command thread to prevent concurrent `libfranka` calls. **Stop** calls `gripper_->stop()` directly — it is thread-safe and must work even when another command is executing (to abort it).
+
+### Usage Examples
+
+```bash
+# Open gripper to 8 cm at 0.1 m/s
+rostopic pub /franka_gripper/move/goal franka_gripper/MoveActionGoal \
+  "goal: {width: 0.08, speed: 0.1}" --once
+
+# Grasp at 4 cm width, 0.02 m/s, 10 N force, epsilon 0.005
+rostopic pub /franka_gripper/grasp/goal franka_gripper/GraspActionGoal \
+  "goal: {width: 0.04, speed: 0.02, force: 10.0, epsilon: {inner: 0.005, outer: 0.005}}" --once
+
+# Run homing routine
+rostopic pub /franka_gripper/homing/goal franka_gripper/HomingActionGoal "{}" --once
+
+# Emergency stop
+rostopic pub /franka_gripper/stop/goal franka_gripper/StopActionGoal "{}" --once
+```
+
+### Drop-in Compatibility
+
+The `/franka_gripper/` namespace matches the default namespace used by `franka_gripper_node`. Clients that already target `franka_gripper_node` (e.g., MoveIt pick-and-place pipelines) can use these action servers without modification — just ensure `franka_gripper_node` is not running simultaneously.
+
 ## Grasp: Contact Detection
 
 The controller uses **gripper stall detection** during CLOSING. When the gripper is commanded to close but the fingers stop moving before reaching the target width, an object is blocking them. Contact detection is always enabled.
@@ -342,13 +399,14 @@ The **width gap check** is essential: without it, normal gripper completion (vel
 
 ### Gripper Stop on Contact
 
-When CONTACT is detected, the controller immediately stops the gripper to prevent object damage:
+When stall contact is detected, the controller stops the gripper and defers the CONTACT state transition until the stop is confirmed:
 
-1. **Atomic flag**: The RT `update()` loop sets `stop_requested_` (single atomic store, nanoseconds)
-2. **Read thread executes stop**: The gripper read thread checks `stop_requested_` after each `readOnce()` and calls `franka::Gripper::stop()`, which communicates directly with the firmware to physically halt the motor
-3. **One-shot guard**: `gripper_stop_sent_` flag prevents duplicate stop requests
+1. **Stall detected (RT thread)**: Sets `contact_latched_`, stores `contact_width_`, and sets `stop_requested_` (single atomic store, nanoseconds). State remains **CLOSING**.
+2. **Read thread executes stop**: Checks `stop_requested_` after each `readOnce()`, calls `franka::Gripper::stop()` to physically halt the motor, then sets `gripper_stopped_` to signal the RT thread.
+3. **Deferred transition (RT thread)**: On the next tick, sees `contact_latched_ && gripper_stopped_` and transitions to **CONTACT**.
+4. **One-shot guard**: `gripper_stop_sent_` flag prevents duplicate stop requests; `contact_latched_` prevents re-detection.
 
-The atomic store in `update()` is a single-word write (nanoseconds), fully RT-safe. The actual `stop()` call executes in the non-RT read thread. Worst-case latency from contact detection to physical halt is one firmware update period.
+The atomic stores in `update()` are single-word writes (nanoseconds), fully RT-safe. The actual `stop()` call executes in the non-RT read thread. The state transition is deferred by ~20–30 ms (one gripper firmware update period) to ensure the gripper has physically stopped before CONTACT data is recorded.
 
 ### Dynamic Gripper Debounce Time (`T_hold_gripper`)
 
@@ -781,9 +839,11 @@ The controller claims three hardware interfaces:
 When not executing a trajectory, the controller operates in **passthrough mode**: it reads the robot's own desired pose (`O_T_EE_d`) and writes it back as the command every tick. This results in zero tracking error and the robot holds position. During UPLIFT/DOWNLIFT, the controller commands a cosine-smoothed trajectory. Gripper operations use the libfranka `franka::Gripper` API directly via two dedicated threads:
 
 - **Read thread**: Continuously calls `readOnce()` at firmware rate, computes width velocity via finite difference, writes `GripperData` to `RealtimeBuffer`, executes `stop()` when the RT loop sets the `stop_requested_` atomic flag, and dispatches deferred grasp commands from the RT force ramp via atomic flag polling
-- **Command thread**: Waits on a condition variable for queued `move()`/`grasp()` commands from the subscriber callback thread, then executes them (blocking calls, interruptible by `stop()`)
+- **Command thread**: Waits on a condition variable for queued `move()`/`grasp()`/`homing()` commands from the subscriber callback or action server threads, then executes them (blocking calls, interruptible by `stop()`)
 
-This eliminates the dependency on the `franka_gripper` ROS package. The launch file sets `load_gripper: false` to prevent conflicting connections (only one `franka::Gripper` connection per robot is allowed).
+The controller also exposes four `franka_gripper`-compatible action servers (`/franka_gripper/move`, `/franka_gripper/grasp`, `/franka_gripper/homing`, `/franka_gripper/stop`) for external gripper control. Move, grasp, and homing actions are routed through the command thread; stop calls `gripper_->stop()` directly. Actions are guarded by the state machine — only allowed when idle (START, SUCCESS, FAILED). See [Gripper Action Servers](#gripper-action-servers).
+
+The `franka_gripper` package is used only for action type definitions — `franka_gripper_node` is **not** launched. The robot must be launched with `load_gripper:=false` to prevent conflicting gripper connections (only one `franka::Gripper` connection per robot is allowed).
 
 ## Real-Time Safety
 
@@ -794,7 +854,8 @@ This eliminates the dependency on the `franka_gripper` ROS package. The launch f
 - Contact detection uses only scalar arithmetic (no Eigen, no allocation)
 - Gripper data passed to RT loop via lock-free `RealtimeBuffer` (no mutex in `update()`)
 - Gripper stop on contact uses single atomic store (`stop_requested_`), nanoseconds, RT-safe
-- Read thread checks `stop_requested_` flag after each `readOnce()` and calls `stop()` (non-RT)
+- Read thread checks `stop_requested_` flag after each `readOnce()`, calls `stop()` (non-RT), and sets `gripper_stopped_` to confirm
+- CONTACT state transition deferred until `gripper_stopped_` is true — ensures stopped gripper before recording
 - Command thread executes blocking `move()`/`grasp()` (non-RT), interruptible by `stop()`
 - No blocking gripper calls in `update()` — all gripper I/O runs in dedicated threads
 - State publisher uses `trylock()` pattern (publish only on transition, non-blocking)
@@ -803,6 +864,8 @@ This eliminates the dependency on the `franka_gripper` ROS package. The launch f
 - Force ramp state machine (`runInternalTransitions`) runs at 250 Hz with only atomic stores, timestamp arithmetic, and trylock publish — fully RT-safe
 - Deferred grasp mechanism: RT thread stores params + release-stores flag; read thread acquire-loads and dispatches (no blocking calls in RT)
 - `starting()` captures initial desired pose to avoid step discontinuity on controller start
+- Action server execute callbacks run in `SimpleActionServer` threads (non-RT); block on `std::future` for command completion
+- Action server state guard (`isActionAllowed()`) rejects requests during active grasp sequences — no interference with RT state machine
 - Rosbag management runs in a separate C++ node (no Python overhead)
 
 ## Recording Performance
@@ -815,23 +878,10 @@ The Grasp logger is written in C++ using the `rosbag::Bag` API directly and `top
 - **Multi-threaded** — uses `ros::AsyncSpinner(4)` so data callbacks and command callbacks run concurrently
 - **Single mutex** — one lock protects all trial state, minimal contention
 
-## Validation
-
-### Test 1 -- Free Space Motion
-
-Move the robot without contact. **Expected**: `wrench_ext` near zero, `tau_ext` near noise floor.
-
-### Test 2 -- Manual External Push
-
-Push the robot gently. **Expected**: increase in `tau_ext_norm` and `wrench_norm`.
-
-### Test 3 -- Controlled Table Contact
-
-Move EE into table. **Expected**: clear increase in Fz, `wrench_norm`, `tau_ext_norm`.
-
 ## Grasp Acceptance Checks
 
-- **Single launch file** — `record:=true` enables recording, `record:=false` (default) runs without logger
+- **Separate robot launch** — the controller does not launch the robot; `franka_control.launch` must be running first (with `load_gripper:=false`)
+- **Single controller launch file** — `record:=true` enables recording, `record:=false` (default) runs without logger
 - **Logger gate** (only when `record:=true`) — controller rejects commands until logger is ready
 - **Three user commands** go through `/kitting_controller/state_cmd` — BASELINE, CLOSING, GRASPING
 - **BASELINE** is published once from START to begin the grasp sequence
@@ -851,10 +901,11 @@ Move EE into table. **Expected**: clear increase in Fz, `wrench_norm`, `tau_ext_
 - CSV export does not block the ROS spin loop (runs in background thread)
 - metadata.yaml contains bag_filename, csv_filename, total_samples, start/stop times, and detector parameters
 - Gripper stall contact detection: velocity < threshold AND width gap > threshold for T_hold_gripper (computed: 0.35 + 0.5 \* closing_speed)
-- Free closing (no object): width reaches w_cmd, gap ~0 → no false CONTACT
+- Free closing (no object): width reaches w_cmd, gap ~0 → no false CONTACT → transitions to FAILED ("no contact detected")
 - Object contact: width stalls before w_cmd, w_dot ~0, gap > threshold → CONTACT
-- Gripper stops immediately on contact: `stop()` called via atomic flag and read thread
-- Contact width saved at CONTACT — used as the grasp width in GRASPING
+- Gripper stop requested immediately on contact: `stop()` called via atomic flag and read thread
+- CONTACT state transition deferred until gripper has physically stopped (`gripper_stopped_` flag)
+- Contact width saved at stall detection — used as the grasp width in GRASPING
 - KittingState contains robot signals, gripper signals, and force ramp state — all published at 250 Hz
 - Publishing CLOSING on `state_cmd` triggers gripper `move()` + state label
 - Publishing BASELINE on `state_cmd` prepares for new trial (optionally opens gripper)
@@ -872,7 +923,13 @@ Move EE into table. **Expected**: clear increase in Fz, `wrench_norm`, `tau_ext_
 - Duplicate CLOSING commands are ignored
 - Controller holds position (passthrough) when not executing trajectory — no drift or jerk
 - Gripper connection failure at init returns false (controller not loaded)
-- Controller destructor joins gripper threads cleanly on unload
+- Controller destructor shuts down action servers then joins gripper threads cleanly on unload
+- Gripper action servers (move, grasp, homing, stop) advertised under `/franka_gripper/` namespace
+- Action servers guarded by state machine — only allowed in START, SUCCESS, FAILED
+- Action server requests rejected with descriptive error during active grasp sequence (BASELINE through EVALUATE)
+- Stop action always allowed regardless of state (thread-safe `gripper_->stop()`)
+- Move, grasp, homing actions routed through command thread to prevent concurrent libfranka calls
+- Action server shutdown before gripper thread shutdown prevents hanging futures on controller unload
 
 ## License
 

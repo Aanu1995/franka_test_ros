@@ -5,7 +5,9 @@ set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(catkin REQUIRED COMPONENTS
+  actionlib
   controller_interface
+  franka_gripper
   franka_hw
   hardware_interface
   message_generation
@@ -37,7 +39,9 @@ catkin_package(
   INCLUDE_DIRS include
   LIBRARIES kitting_state_controller
   CATKIN_DEPENDS
+    actionlib
     controller_interface
+    franka_gripper
     franka_hw
     hardware_interface
     message_runtime

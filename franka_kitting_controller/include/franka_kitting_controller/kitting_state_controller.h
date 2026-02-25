@@ -5,6 +5,7 @@
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -20,9 +21,14 @@
 
 #include <realtime_tools/realtime_buffer.h>
 
+#include <actionlib/server/simple_action_server.h>
 #include <franka/exception.h>
 #include <franka/gripper.h>
 #include <franka/gripper_state.h>
+#include <franka_gripper/GraspAction.h>
+#include <franka_gripper/HomingAction.h>
+#include <franka_gripper/MoveAction.h>
+#include <franka_gripper/StopAction.h>
 #include <franka_kitting_controller/KittingGripperCommand.h>
 #include <franka_kitting_controller/KittingState.h>
 #include <franka_hw/franka_cartesian_command_interface.h>
@@ -57,7 +63,7 @@ namespace franka_kitting_controller {
   };
 
   /// Command types for the gripper command thread.
-  enum class GripperCommandType { NONE, MOVE, GRASP };
+  enum class GripperCommandType { NONE, MOVE, GRASP, HOMING };
 
   /// Command queued from subscriber thread to the gripper command thread.
   struct GripperCommand {
@@ -67,6 +73,7 @@ namespace franka_kitting_controller {
     double force{0.0};
     double epsilon_inner{0.008};
     double epsilon_outer{0.008};
+    std::shared_ptr<std::promise<bool>> result_promise;  // nullptr = fire-and-forget
   };
 
   /// Data transferred from gripper read thread (non-realtime) to update() (realtime) via RealtimeBuffer.
@@ -217,6 +224,7 @@ namespace franka_kitting_controller {
     double rt_closing_w_cmd_{0.01};  // Realtime-local copy
     double rt_closing_v_cmd_{0.05};  // Realtime-local copy
     double rt_T_hold_gripper_{0.35}; // Computed from rt_closing_v_cmd_ when CLOSING starts
+    bool closing_cmd_seen_executing_{false};  ///< True once move() seen running during CLOSING
 
     // Slow-rate logger for contact signal monitoring (2 Hz — readable in terminal)
     franka_hw::TriggerRate signal_log_trigger_{2.0};
@@ -403,6 +411,26 @@ namespace franka_kitting_controller {
     void handleBaselineCmd(const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg);
     void handleClosingCmd(const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg);
     void handleGraspingCmd(const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg);
+
+    // --- Gripper action servers (franka_gripper API) ---
+    using MoveActionServer = actionlib::SimpleActionServer<franka_gripper::MoveAction>;
+    using GraspActionServer = actionlib::SimpleActionServer<franka_gripper::GraspAction>;
+    using HomingActionServer = actionlib::SimpleActionServer<franka_gripper::HomingAction>;
+    using StopActionServer = actionlib::SimpleActionServer<franka_gripper::StopAction>;
+
+    std::unique_ptr<MoveActionServer> move_action_server_;
+    std::unique_ptr<GraspActionServer> grasp_action_server_;
+    std::unique_ptr<HomingActionServer> homing_action_server_;
+    std::unique_ptr<StopActionServer> stop_action_server_;
+
+    void executeMoveAction(const franka_gripper::MoveGoalConstPtr& goal);
+    void executeGraspAction(const franka_gripper::GraspGoalConstPtr& goal);
+    void executeHomingAction(const franka_gripper::HomingGoalConstPtr& goal);
+    void executeStopAction(const franka_gripper::StopGoalConstPtr& goal);
+
+    /// Returns true if external gripper actions are currently allowed.
+    /// Only permits actions when the internal state machine is idle.
+    bool isActionAllowed() const;
 
     // --- runContactDetection decomposition ---
     void detectGripperContact(const ros::Time& time, const GripperData& gripper_snapshot);

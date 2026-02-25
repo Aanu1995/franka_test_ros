@@ -22,6 +22,8 @@
   <depend>roscpp</depend>
   <depend>std_msgs</depend>
   <depend>topic_tools</depend>
+  <depend>actionlib</depend>
+  <depend>franka_gripper</depend>
 
   <exec_depend>franka_control</exec_depend>
   <exec_depend>franka_description</exec_depend>
