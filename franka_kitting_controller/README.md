@@ -81,25 +81,34 @@ roslaunch franka_kitting_controller kitting_state_controller.launch robot_ip:=<R
 
 ## Grasp: Interaction States
 
-Eleven interaction states structure the grasp execution sequence. The controller starts in `START` and waits for the user to publish `BASELINE` before any Grasp activity begins. The user sends three commands (`BASELINE`, `CLOSING`, `GRASPING`); all subsequent states are driven internally by the automated force ramp. States are published on `/kitting_controller/state` for signal labeling and offline analysis. If recording is enabled (`record:=true`), recording starts automatically and continues through all state transitions.
+Eleven interaction states structure the grasp execution sequence. The controller starts in `START` and waits for the user to publish `BASELINE` before any Grasp activity begins. Two modes of operation:
+
+- **Manual mode**: The user sends three commands (`BASELINE`, `CLOSING`, `GRASPING`); all subsequent states are driven internally by the automated force ramp.
+- **Auto mode**: A single `AUTO` command runs the full sequence automatically with configurable delays between transitions.
+
+States are published on `/kitting_controller/state` for signal labeling and offline analysis. If recording is enabled (`record:=true`), recording starts automatically and continues through all state transitions.
 
 ```
-User commands:   BASELINE ──> CLOSING ──> CONTACT ──> GRASPING
-                                                         │
-Auto force ramp:              ┌──────────────────────────┘
-                              │
-                              v
-                          GRASPING ──> UPLIFT ──> EVALUATE ──> SUCCESS
-                              ^                       │
-                              │                  [slip detected]
-                              │                       │
-                              │                       v
-                          SETTLING <── DOWNLIFT <─────┘
-                              │
-                         [F > f_max]
-                              │
-                              v
-                            FAILED
+Manual:          BASELINE ──> CLOSING ──> CONTACT ──> GRASPING
+                 (user cmd)   (user cmd)  (auto)      (user cmd)
+
+Auto (single command):
+                 BASELINE ─(delay)─> CLOSING ─(wait)─> CONTACT ─(delay)─> GRASPING
+                                                                              │
+Force ramp (both modes):  ┌───────────────────────────────────────────────────┘
+                          │
+                          v
+                      GRASPING ──> UPLIFT ──> EVALUATE ──> SUCCESS
+                          ^                       │
+                          │                  [slip detected]
+                          │                       │
+                          │                       v
+                      SETTLING <── DOWNLIFT <─────┘
+                          │
+                     [F > f_max]
+                          │
+                          v
+                        FAILED
 ```
 
 CONTACT is auto-detected during CLOSING. SUCCESS and FAILED are terminal states.
@@ -110,7 +119,7 @@ Initial state after the controller is launched. No baseline collection, no conta
 
 - Controller is running and publishing `KittingState` data
 - No Grasp activity: no baseline statistics, no gripper commands accepted
-- All commands on `/kitting_controller/state_cmd` are rejected until `BASELINE` is published
+- All commands on `/kitting_controller/state_cmd` are rejected until `BASELINE` or `AUTO` is published
 - If `record:=true`, commands are also gated until the logger node is ready
 - Transition: publish `BASELINE` on `/kitting_controller/state_cmd`
 
@@ -215,6 +224,18 @@ Terminal state indicating grasp failure. **Auto-triggered** on any of:
 - **Recording auto-stops**: if `record:=true`, the logger detects FAILED and automatically stops recording (saves bag + metadata + CSV)
 - To retry, publish `BASELINE` (resets the entire state machine)
 
+### AUTO (Automatic Full Sequence)
+
+A single command that runs the full grasp sequence automatically. Published via `/kitting_controller/state_cmd` with `command: "AUTO"`.
+
+- Executes BASELINE → *(delay)* → CLOSING → *(wait for CONTACT)* → *(delay)* → GRASPING automatically
+- `auto_delay` parameter controls the wait time between transitions (default 5.0 seconds)
+- All BASELINE, CLOSING, and GRASPING parameters are accepted and forwarded to each stage
+- The force ramp runs autonomously after GRASPING (same as manual mode)
+- If CLOSING results in FAILED (no contact), auto mode ends at FAILED
+- Any manual command (`BASELINE`, `CLOSING`, `GRASPING`) published during auto mode cancels auto mode
+- Re-sending `AUTO` cancels the current auto sequence and starts a new one
+
 ### Topics
 
 Recording and state labeling are independent concerns.
@@ -222,7 +243,7 @@ Recording and state labeling are independent concerns.
 | Topic                                | Type                  | Direction  | Description                                |
 | ------------------------------------ | --------------------- | ---------- | ------------------------------------------ |
 | `<ns>/kitting_state_data`            | KittingState          | Published  | Full state data at 250 Hz                  |
-| `/kitting_controller/state_cmd`      | KittingGripperCommand | Subscribed | User commands: BASELINE, CLOSING, GRASPING |
+| `/kitting_controller/state_cmd`      | KittingGripperCommand | Subscribed | User commands: BASELINE, CLOSING, GRASPING, AUTO |
 | `/kitting_controller/state`          | std_msgs/String       | Published  | State labels for offline segmentation      |
 | `/kitting_controller/record_control` | std_msgs/String       | Subscribed | Recording control: STOP, ABORT             |
 | `/kitting_controller/logger_ready`   | std_msgs/Bool         | Subscribed | Latched readiness signal from logger node  |
@@ -231,7 +252,7 @@ Recording and state labeling are independent concerns.
 | `/franka_gripper/homing`             | franka_gripper/HomingAction | ActionServer | Gripper homing (recalibrate)          |
 | `/franka_gripper/stop`               | franka_gripper/StopAction   | ActionServer | Emergency gripper stop (always allowed) |
 
-- `/kitting_controller/state_cmd` — The **user** publishes a `KittingGripperCommand` with `command` field set to `BASELINE`, `CLOSING`, or `GRASPING`, plus optional per-object parameters. Any float64 parameter left at `0.0` falls back to the YAML config default. The **controller** executes the corresponding action, publishes the state label on `/kitting_controller/state`, and drives the force ramp internally.
+- `/kitting_controller/state_cmd` — The **user** publishes a `KittingGripperCommand` with `command` field set to `BASELINE`, `CLOSING`, `GRASPING`, or `AUTO`, plus optional per-object parameters. Any float64 parameter left at `0.0` falls back to the YAML config default. The **controller** executes the corresponding action, publishes the state label on `/kitting_controller/state`, and drives the force ramp internally. `AUTO` runs the full sequence automatically with configurable delays.
 - `/kitting_controller/state` — The **controller** publishes all 11 state labels: START, BASELINE, CLOSING, CONTACT, GRASPING, UPLIFT, EVALUATE, DOWNLIFT, SETTLING, SUCCESS, FAILED. States are labels for offline analysis. Terminal states (SUCCESS, FAILED) also trigger automatic recording stop when the logger is running.
 - `/kitting_controller/record_control` — The **user** publishes STOP or ABORT to end recording. Recording starts automatically when the logger launches — no START command is needed. The **logger** subscribes to this topic.
 - `/kitting_controller/logger_ready` — The **logger** publishes `true` (latched) on startup. When `record:=true`, the **controller** subscribes and gates Grasp commands behind this signal. When `record:=false`, this topic is not used.
@@ -302,6 +323,22 @@ rostopic pub /kitting_controller/record_control std_msgs/String "data: 'STOP'" -
 
 # Or abort (delete trial)
 rostopic pub /kitting_controller/record_control std_msgs/String "data: 'ABORT'" --once
+```
+
+### Auto Mode
+
+A single `AUTO` command runs the full sequence: BASELINE → *(delay)* → CLOSING → *(wait for CONTACT)* → *(delay)* → GRASPING. All parameters from BASELINE, CLOSING, and GRASPING are accepted and forwarded to each stage.
+
+```bash
+# AUTO — run full sequence automatically (default 5s delay between transitions)
+rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
+  "{command: 'AUTO', open_gripper: true}" --once
+
+# AUTO — with custom delay and parameters
+rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
+  "{command: 'AUTO', open_gripper: true, auto_delay: 3.0, \
+    closing_width: 0.01, closing_speed: 0.05, \
+    f_min: 3.0, f_max: 30.0, f_step: 3.0}" --once
 ```
 
 ## Gripper Action Servers
@@ -780,7 +817,7 @@ Per-object command published on `/kitting_controller/state_cmd`. Any float64 par
 
 | Field                  | Type    | Description                                                                        |
 | ---------------------- | ------- | ---------------------------------------------------------------------------------- |
-| `command`              | string  | `"BASELINE"`, `"CLOSING"`, or `"GRASPING"`                                         |
+| `command`              | string  | `"BASELINE"`, `"CLOSING"`, `"GRASPING"`, or `"AUTO"`                               |
 | `open_gripper`         | bool    | If true, open gripper before baseline collection (default: false)                  |
 | `open_width`           | float64 | Width to open to [m] (0 = max_width from firmware). Only if `open_gripper` is true |
 | `closing_width`        | float64 | Target width for MoveAction [m] (0 = use default)                                  |
@@ -796,12 +833,14 @@ Per-object command published on `/kitting_controller/state_cmd`. Any float64 par
 | `fr_stabilization`     | float64 | Post-grasp and post-downlift settle time [s] (0 = use default 0.5)                 |
 | `fr_slip_tau_drop`     | float64 | Drop ratio threshold (mu_early−mu_late)/mu_early (0 = use default 0.20)            |
 | `fr_slip_width_change` | float64 | Width change threshold for slip [m] (0 = use default 0.001)                        |
+| `auto_delay`           | float64 | Delay between auto transitions [s] (0 = default 5.0). Only used by `AUTO` command  |
 
 Only the parameters relevant to the command are used:
 
 - `BASELINE` uses `open_gripper` and `open_width`
 - `CLOSING` uses `closing_width` and `closing_speed`
 - `GRASPING` uses all `f_*`/`fr_*` force ramp parameters (grasp width is always from `contact_width`)
+- `AUTO` uses all of the above, plus `auto_delay`
 
 ## KittingState Message
 
@@ -883,7 +922,7 @@ The Grasp logger is written in C++ using the `rosbag::Bag` API directly and `top
 - **Separate robot launch** — the controller does not launch the robot; `franka_control.launch` must be running first (with `load_gripper:=false`)
 - **Single controller launch file** — `record:=true` enables recording, `record:=false` (default) runs without logger
 - **Logger gate** (only when `record:=true`) — controller rejects commands until logger is ready
-- **Three user commands** go through `/kitting_controller/state_cmd` — BASELINE, CLOSING, GRASPING
+- **Four user commands** go through `/kitting_controller/state_cmd` — BASELINE, CLOSING, GRASPING, AUTO
 - **BASELINE** is published once from START to begin the grasp sequence
 - **BASELINE with `open_gripper: true`** waits 3 seconds for gripper to open before collecting
 - **BASELINE** can be published from any state to reset the state machine for a new trial
@@ -930,6 +969,12 @@ The Grasp logger is written in C++ using the `rosbag::Bag` API directly and `top
 - Stop action always allowed regardless of state (thread-safe `gripper_->stop()`)
 - Move, grasp, homing actions routed through command thread to prevent concurrent libfranka calls
 - Action server shutdown before gripper thread shutdown prevents hanging futures on controller unload
+- AUTO command runs full grasp sequence: BASELINE → *(delay)* → CLOSING → *(wait for CONTACT)* → *(delay)* → GRASPING
+- AUTO mode uses configurable `auto_delay` (default 5.0 seconds) between BASELINE→CLOSING and CONTACT→GRASPING transitions
+- AUTO mode forwards all BASELINE, CLOSING, and GRASPING parameters from the single message to each stage
+- AUTO mode cancelled by any manual command (BASELINE, CLOSING, GRASPING) — allows user override at any point
+- AUTO mode ends automatically on FAILED during CLOSING (no contact detected) or after GRASPING starts (force ramp is autonomous)
+- Auto mode timers run on ROS spinner thread (non-RT); reuse existing handle functions — no duplicated logic
 
 ## License
 

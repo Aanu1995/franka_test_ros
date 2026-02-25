@@ -1,4 +1,5 @@
-// Copyright (c) 2024
+// Copyright (c) 2026
+// Author: Aanu Olakunle
 // Use of this source code is governed by the Apache-2.0 license, see LICENSE
 #pragma once
 
@@ -411,6 +412,20 @@ namespace franka_kitting_controller {
     void handleBaselineCmd(const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg);
     void handleClosingCmd(const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg);
     void handleGraspingCmd(const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg);
+
+    // --- Auto mode (single-command full grasp sequence) ---
+    bool auto_mode_{false};
+    ros::NodeHandle auto_nh_;
+    ros::Timer auto_delay_timer_;
+    ros::Timer auto_contact_poll_timer_;
+    double auto_delay_{5.0};
+    franka_kitting_controller::KittingGripperCommand auto_cmd_;
+
+    void handleAutoCmd(const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg);
+    void cancelAutoMode();
+    void autoClosingCallback(const ros::TimerEvent&);
+    void autoContactPollCallback(const ros::TimerEvent&);
+    void autoGraspingCallback(const ros::TimerEvent&);
 
     // --- Gripper action servers (franka_gripper API) ---
     using MoveActionServer = actionlib::SimpleActionServer<franka_gripper::MoveAction>;

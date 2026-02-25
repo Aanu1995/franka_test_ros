@@ -16,8 +16,13 @@
 #   f_min: 5.0
 #   f_max: 20.0
 #   (grasp width auto-uses the width captured at CONTACT)
+#
+# Example: automatic full sequence with 3s delay
+#   command: "AUTO"
+#   open_gripper: true
+#   auto_delay: 3.0
 
-# Command: "BASELINE", "CLOSING", or "GRASPING"
+# Command: "BASELINE", "CLOSING", "GRASPING", or "AUTO"
 string command
 
 # --- BASELINE parameters (used when command == "BASELINE") ---
@@ -45,3 +50,8 @@ float64 fr_epsilon           # [m]   Epsilon for ramp grasps, same for inner/out
 float64 fr_stabilization     # [s]   Post-grasp/post-downlift settle time (0 = use default 0.5)
 float64 fr_slip_tau_drop     # Drop ratio threshold (mu_early-mu_late)/mu_early (0 = use default 0.20)
 float64 fr_slip_width_change # [m]   Width change threshold for slip (0 = use default 0.001)
+
+# --- AUTO parameters (used when command == "AUTO") ---
+# AUTO runs the full sequence: BASELINE → CLOSING → GRASPING automatically.
+# All BASELINE, CLOSING, and GRASPING parameters above are forwarded to each stage.
+float64 auto_delay           # [s]   Delay between transitions (0 = default 5.0)

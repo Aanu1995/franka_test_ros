@@ -57,6 +57,9 @@ catkin_package(
 ## Controller library (loaded by ros_control)
 add_library(kitting_state_controller
   src/kitting_state_controller.cpp
+  src/kitting_gripper.cpp
+  src/kitting_commands.cpp
+  src/kitting_force_ramp.cpp
 )
 
 add_dependencies(kitting_state_controller
