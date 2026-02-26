@@ -38,16 +38,22 @@ namespace franka_kitting_controller {
                                                     const GripperData& gripper_snapshot) {
     if (current_state_.load(std::memory_order_relaxed) == GraspState::CLOSING &&
         !contact_latched_) {
-      detectGripperContact(time, gripper_snapshot);
+      // Track when the gripper move command starts executing.
+      // Stall detection is deferred until the move is confirmed running to prevent
+      // false contacts during the pre-movement window (gripper stationary, velocity ≈ 0,
+      // width gap large — looks like a stall but the move hasn't started yet).
+      if (!closing_cmd_seen_executing_) {
+        if (cmd_executing_.load(std::memory_order_relaxed)) {
+          closing_cmd_seen_executing_ = true;
+        }
+      }
 
-      // Check if move() completed without contact (gripper reached target width)
-      if (!contact_latched_) {
-        bool executing = cmd_executing_.load(std::memory_order_relaxed);
-        if (!closing_cmd_seen_executing_) {
-          if (executing) {
-            closing_cmd_seen_executing_ = true;
-          }
-        } else if (!executing) {
+      if (closing_cmd_seen_executing_) {
+        // Stall detection (only after move is confirmed executing)
+        detectGripperContact(time, gripper_snapshot);
+
+        // No-contact: move completed without triggering stall → FAILED
+        if (!contact_latched_ && !cmd_executing_.load(std::memory_order_relaxed)) {
           current_state_.store(GraspState::FAILED, std::memory_order_relaxed);
           publishStateLabel("FAILED");
           logStateTransition("FAILED",
@@ -65,6 +71,7 @@ namespace franka_kitting_controller {
       current_state_.store(GraspState::CONTACT, std::memory_order_relaxed);
       publishStateLabel("CONTACT");
       logStateTransition("CONTACT", "Gripper stopped — contact confirmed");
+      ROS_INFO("    contact_width=%.4f m", contact_width_.load(std::memory_order_relaxed));
     }
   }
 
