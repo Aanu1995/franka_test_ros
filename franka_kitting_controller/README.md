@@ -131,6 +131,7 @@ Prepare for a new grasp trial. Published via `/kitting_controller/state_cmd` wit
 
 - **Optional gripper open**: If `open_gripper: true`, the gripper opens to `open_width` (or `max_width` from firmware if not specified) at 0.1 m/s
 - Resets all state machine variables (contact latch, force ramp, trajectories) for a fresh grasp cycle
+- **Accumulated uplift correction**: If previous SUCCESS runs left the arm elevated, BASELINE automatically lowers the arm back to the original height before the next trial (cosine-smoothed downlift at `lift_speed`)
 - BASELINE is a one-shot state — publish once from START to begin the grasp sequence
 
 ### CLOSING
@@ -180,7 +181,7 @@ Assess grasp stability at the lifted position. **Auto-triggered** after UPLIFT c
 - Holds position for `uplift_hold` seconds (default 0.10 s): early window (first half) + late window (second half)
 - Uses `wrench_norm` (Cartesian external wrench) for load-transfer slip detection
 - Two-gate evaluation (see [Slip Detection](#grasp-slip-detection-load-transfer-drop-metric)):
-  - **Gate 1**: Load transfer confirmation — `delta_F > max(3*sigma_pre, 1.0)`
+  - **Gate 1**: Load transfer confirmation — `delta_F > max(3*sigma_pre, load_transfer_min)`
   - **Gate 2**: Drop ratio + width change thresholds
 - If **secure** (both gates pass): transitions to SUCCESS
 - If **slip** (either gate fails): transitions to DOWNLIFT to retry with higher force
@@ -201,17 +202,18 @@ Post-downlift stabilization before force increment. **Auto-triggered** after DOW
 - Waits for `fr_stabilization` seconds (default 0.5 s) for signals to settle
 - Increments grasp force: `f_current += f_step`
 - If `f_current > f_max`: transitions to FAILED (max force exceeded)
-- Otherwise: re-enters GRASPING with the incremented force, starting a new force ramp iteration
+- Otherwise: re-enters GRASPING with the incremented force, using the actual measured width before the last UPLIFT (not the original `contact_width` — this self-corrects if the initial contact width was inaccurate)
 
 ### SUCCESS
 
 Terminal state indicating stable grasp confirmed. **Auto-triggered** when EVALUATE finds no slip.
 
 - The grasp held at force `f_current` without slip
-- Robot remains at the lifted position holding the object
+- Robot remains at the lifted position holding the object (elevated by one `uplift_distance` from the final iteration's UPLIFT) — ready for pick-and-place transport
+- The accumulated uplift is tracked internally; the next `BASELINE` command automatically corrects the height before the next trial
 - State label published for offline analysis
 - **Recording auto-stops**: if `record:=true`, the logger detects SUCCESS and automatically stops recording (saves bag + metadata + CSV)
-- To start a new trial, publish `BASELINE` (resets the entire state machine)
+- To start a new trial, publish `BASELINE` (resets the entire state machine and corrects arm height)
 
 ### FAILED
 
@@ -316,7 +318,8 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
     f_min: 3.0, f_step: 3.0, f_max: 30.0, \
     fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
     fr_uplift_distance: 0.005, fr_lift_speed: 0.01, fr_uplift_hold: 0.10, \
-    fr_stabilization: 0.5, fr_slip_tau_drop: 0.20, fr_slip_width_change: 0.001}" --once
+    fr_stabilization: 0.5, fr_slip_tau_drop: 0.20, fr_slip_width_change: 0.001, \
+    fr_load_transfer_min: 0.5}" --once
 
 # Stop recording
 rostopic pub /kitting_controller/record_control std_msgs/String "data: 'STOP'" --once
@@ -347,7 +350,7 @@ The controller exposes four `franka_gripper`-compatible action servers under the
 
 ### State Guard
 
-Action server requests are only accepted when the internal state machine is **idle**: `START`, `SUCCESS`, or `FAILED`. During an active grasp sequence (BASELINE through EVALUATE), the state machine owns the gripper and external actions are rejected with an error describing the current state.
+Action server requests are only accepted when the internal state machine is **idle**: `START`, `SUCCESS`, or `FAILED`. During any other state (BASELINE through SETTLING), the state machine owns the gripper and external actions are rejected with an error describing the current state.
 
 ### Available Actions
 
@@ -536,10 +539,10 @@ Verify the object weight is actually on the gripper after lifting:
 
   delta_F = mu_early - mu_pre
 
-  Load transfer confirmed if:  delta_F > max(3 * sigma_pre, 1.0)
+  Load transfer confirmed if:  delta_F > max(3 * sigma_pre, load_transfer_min)
 ```
 
-The `3 * sigma_pre` threshold adapts to sensor noise. The `1.0` N floor prevents declaring load transfer from noise alone. If load transfer is NOT confirmed, the grasp is treated as unstable (SLIP) regardless of the drop ratio.
+The `3 * sigma_pre` threshold adapts to sensor noise. The `load_transfer_min` floor (default 0.5 N, configurable) prevents declaring load transfer from noise alone. Lower this for light objects (e.g., 0.1 N for a ~10 g object). If load transfer is NOT confirmed, the grasp is treated as unstable (SLIP) regardless of the drop ratio.
 
 ### Gate 2: Drop Ratio (Slip During Hold)
 
@@ -571,6 +574,7 @@ A positive `drop_ratio` means the wrench decreased from the early to late window
 | ---------------------- | ------- | ----------------------------------------------------- |
 | `fr_slip_tau_drop`     | 0.20    | Drop ratio threshold (0.20 = 20% wrench drop)        |
 | `fr_slip_width_change` | 0.001 m | Gripper width increase threshold                      |
+| `load_transfer_min`    | 0.5 N   | Floor for load transfer threshold (lower for light objects) |
 
 ### Example Log Output
 
@@ -582,7 +586,7 @@ Secure grasp (load transfer confirmed, no drop):
               width_change=0.0002 (thresh=0.0010)  SECURE
 ```
 
-- `delta_F=2.624` > `max(3*0.142, 1.0)` = 1.0 → load transfer confirmed
+- `delta_F=2.624` > `max(3*0.142, load_transfer_min)` = `max(0.426, 0.5)` = 0.5 → load transfer confirmed
 - `drop=0.021` (2.1%) < 0.20 → no significant drop
 - **Verdict: SECURE → SUCCESS**
 
@@ -594,7 +598,7 @@ Slip detected — load transferred but object slipped during hold:
               width_change=0.0014 (thresh=0.0010)  SLIP
 ```
 
-- `delta_F=2.740` > `max(0.414, 1.0)` = 1.0 → load transfer confirmed (object was lifted)
+- `delta_F=2.740` > `max(3*0.138, load_transfer_min)` = `max(0.414, 0.5)` = 0.5 → load transfer confirmed (object was lifted)
 - `drop=0.238` (23.8%) > 0.20 → wrench dropped during hold (object sliding out)
 - `width_change=0.0014` > 0.001 → gripper opened 1.4 mm (fingers pushed apart)
 - **Verdict: SLIP → DOWNLIFT → retry with more force**
@@ -607,7 +611,7 @@ Failed load transfer (object not lifted):
               width_change=0.0001 (thresh=0.0010)  SLIP
 ```
 
-- `delta_F=0.142` < `max(0.426, 1.0)` = 1.0 → load transfer NOT confirmed
+- `delta_F=0.142` < `max(3*0.142, load_transfer_min)` = `max(0.426, 0.5)` = 0.5 → load transfer NOT confirmed
 - Drop ratio and width are fine, but Gate 1 failed — object weight never appeared on the gripper
 - **Verdict: SLIP → DOWNLIFT → retry with more force**
 
@@ -619,7 +623,7 @@ Failed load transfer (object not lifted):
 | `sigma_pre` | Sensor noise during baseline — higher means noisier signal |
 | `mu_early` | Wrench right after lift — should be much higher than `mu_pre` if object is lifted |
 | `mu_late` | Wrench later in hold — should stay close to `mu_early` if no slip |
-| `delta_F` | How much wrench increased from lift; must exceed `max(3*sigma_pre, 1.0)` |
+| `delta_F` | How much wrench increased from lift; must exceed `max(3*sigma_pre, load_transfer_min)` |
 | `load_xfer` | YES/NO — did the object weight actually transfer to the gripper? |
 | `drop` | Fractional wrench decrease during hold; > 0.20 means slip |
 | `width_change` | How much the gripper opened during hold; > 0.001 m means slip |
@@ -730,6 +734,8 @@ The **velocity profile** (first derivative) is:
 | `stabilization`            | double | `0.5`   | Post-grasp settle time; also W_pre baseline window [s]              |
 | `slip_tau_drop`            | double | `0.20`  | Drop ratio threshold: (mu_early−mu_late)/mu_early                   |
 | `slip_width_change`        | double | `0.001` | Width change threshold for slip [m]                                 |
+| `load_transfer_min`        | double | `0.5`   | Floor for load transfer threshold [N] (lower for light objects)     |
+| `require_logger`           | bool   | `false` | Gate commands behind logger readiness (set true when `record:=true`)|
 
 Gripper and GRASPING parameters are **defaults**. They can be overridden per-command by setting non-zero values in the `KittingGripperCommand` message published on `/kitting_controller/state_cmd`.
 
@@ -833,6 +839,7 @@ Per-object command published on `/kitting_controller/state_cmd`. Any float64 par
 | `fr_stabilization`     | float64 | Post-grasp and post-downlift settle time [s] (0 = use default 0.5)                 |
 | `fr_slip_tau_drop`     | float64 | Drop ratio threshold (mu_early−mu_late)/mu_early (0 = use default 0.20)            |
 | `fr_slip_width_change` | float64 | Width change threshold for slip [m] (0 = use default 0.001)                        |
+| `fr_load_transfer_min` | float64 | Floor for load transfer threshold [N] (0 = use default 0.5)                        |
 | `auto_delay`           | float64 | Delay between auto transitions [s] (0 = default 5.0). Only used by `AUTO` command  |
 
 Only the parameters relevant to the command are used:
@@ -877,7 +884,7 @@ The controller claims three hardware interfaces:
 
 When not executing a trajectory, the controller operates in **passthrough mode**: it reads the robot's own desired pose (`O_T_EE_d`) and writes it back as the command every tick. This results in zero tracking error and the robot holds position. During UPLIFT/DOWNLIFT, the controller commands a cosine-smoothed trajectory. Gripper operations use the libfranka `franka::Gripper` API directly via two dedicated threads:
 
-- **Read thread**: Continuously calls `readOnce()` at firmware rate, computes width velocity via finite difference, writes `GripperData` to `RealtimeBuffer`, executes `stop()` when the RT loop sets the `stop_requested_` atomic flag, and dispatches deferred grasp commands from the RT force ramp via atomic flag polling
+- **Read thread**: Continuously calls `readOnce()` at firmware rate, computes width velocity via finite difference, writes `GripperData` to `RealtimeBuffer`, executes `stop()` when the RT loop sets the `stop_requested_` atomic flag, and dispatches deferred grasp commands from the RT force ramp via atomic flag polling (calls `stop()` before each deferred grasp to release any existing grip — prevents libfranka hang on re-grasp)
 - **Command thread**: Waits on a condition variable for queued `move()`/`grasp()`/`homing()` commands from the subscriber callback or action server threads, then executes them (blocking calls, interruptible by `stop()`)
 
 The controller also exposes four `franka_gripper`-compatible action servers (`/franka_gripper/move`, `/franka_gripper/grasp`, `/franka_gripper/homing`, `/franka_gripper/stop`) for external gripper control. Move, grasp, and homing actions are routed through the command thread; stop calls `gripper_->stop()` directly. Actions are guarded by the state machine — only allowed when idle (START, SUCCESS, FAILED). See [Gripper Action Servers](#gripper-action-servers).
@@ -901,7 +908,7 @@ The `franka_gripper` package is used only for action type definitions — `frank
 - Cartesian pose command issued every tick (1 kHz) — passthrough when idle, trajectory during UPLIFT/DOWNLIFT
 - UPLIFT/DOWNLIFT trajectories use only `std::array<double, 16>`, `std::cos()`, and `std::min()` — no allocation
 - Force ramp state machine (`runInternalTransitions`) runs at 250 Hz with only atomic stores, timestamp arithmetic, and trylock publish — fully RT-safe
-- Deferred grasp mechanism: RT thread stores params + release-stores flag; read thread acquire-loads and dispatches (no blocking calls in RT)
+- Deferred grasp mechanism: RT thread stores params + release-stores flag; read thread acquire-loads, calls `stop()` to release any existing grip, then dispatches (no blocking calls in RT)
 - `starting()` captures initial desired pose to avoid step discontinuity on controller start
 - Action server execute callbacks run in `SimpleActionServer` threads (non-RT); block on `std::future` for command completion
 - Action server state guard (`isActionAllowed()`) rejects requests during active grasp sequences — no interference with RT state machine
@@ -924,7 +931,7 @@ The Grasp logger is written in C++ using the `rosbag::Bag` API directly and `top
 - **Logger gate** (only when `record:=true`) — controller rejects commands until logger is ready
 - **Four user commands** go through `/kitting_controller/state_cmd` — BASELINE, CLOSING, GRASPING, AUTO
 - **BASELINE** is published once from START to begin the grasp sequence
-- **BASELINE with `open_gripper: true`** waits 3 seconds for gripper to open before collecting
+- **BASELINE with `open_gripper: true`** queues a gripper open command (fire-and-forget) and immediately transitions to BASELINE — the gripper opens asynchronously
 - **BASELINE** can be published from any state to reset the state machine for a new trial
 - Recording starts automatically when the logger launches — no START command needed
 - Recording continues through all state transitions until STOP, ABORT, terminal state (SUCCESS/FAILED), or node shutdown
@@ -951,11 +958,13 @@ The Grasp logger is written in C++ using the `rosbag::Bag` API directly and `top
 - Publishing GRASPING on `state_cmd` starts the automated force ramp (uses contact_width from CONTACT)
 - GRASPING timeout: 10 seconds maximum for gripper command completion, then FAILED
 - Force ramp runs autonomously after GRASPING: GRASPING → UPLIFT → EVALUATE → SUCCESS
-- Slip detected during EVALUATE: DOWNLIFT → SETTLING → GRASPING (retry with F += f_step)
+- Slip detected during EVALUATE: DOWNLIFT → SETTLING → GRASPING (retry with F += f_step, using measured width before last UPLIFT)
+- Force ramp retry calls `stop()` before dispatching deferred grasp — prevents libfranka hang when gripper is already grasped
 - Force ramp terminates with FAILED if f_current exceeds f_max
 - UPLIFT and DOWNLIFT trajectories use cosine smoothing with duration computed from distance/speed
 - UPLIFT/DOWNLIFT orientation remains unchanged throughout the motion
 - Uplift distance is clamped to 10 mm maximum (with warning)
+- SUCCESS keeps arm elevated for pick-and-place; accumulated uplift corrected automatically on next BASELINE
 - BASELINE during active force ramp clears trajectories and returns to passthrough
 - Per-command force ramp parameters override YAML defaults when non-zero
 - Parameters left at 0.0 fall back to YAML config values

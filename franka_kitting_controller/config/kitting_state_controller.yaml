@@ -24,6 +24,7 @@ kitting_state_controller:
   stabilization: 0.5 # [s] Post-grasp settle time (also W_pre window for slip baseline)
   slip_tau_drop: 0.20 # Drop ratio threshold for slip (mu_early−mu_late)/mu_early
   slip_width_change: 0.001 # [m] Width change threshold for slip
+  load_transfer_min: 0.5 # [N] Minimum load transfer threshold (lighter objects need lower value)
 
   # Recording / Logger parameters (used by launch file, see kitting_state_controller.launch)
   # Set require_logger: true to enable rosbag recording (launch arg: record:=true)

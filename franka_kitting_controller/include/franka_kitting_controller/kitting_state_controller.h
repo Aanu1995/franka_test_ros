@@ -262,6 +262,7 @@ namespace franka_kitting_controller {
     double fr_stabilization_{0.5};
     double fr_slip_tau_drop_{0.20};
     double fr_slip_width_change_{0.001};
+    double fr_load_transfer_min_{0.5};    // [N] Min floor for load transfer threshold
 
     // --- Force ramp: Realtime-local copies of resolved per-command parameters ---
     // Snapshotted in applyPendingStateTransition() when entering GRASPING.
@@ -277,6 +278,7 @@ namespace franka_kitting_controller {
     double rt_fr_stabilization_{0.5};
     double rt_fr_slip_tau_drop_{0.20};
     double rt_fr_slip_width_change_{0.001};
+    double rt_fr_load_transfer_min_{0.5};
 
     // --- Force ramp: staging variables (subscriber → realtime via state_changed_) ---
     // Written by stateCmdCallback() with resolved per-command values, before release-store
@@ -292,6 +294,7 @@ namespace franka_kitting_controller {
     double staging_fr_stabilization_{0.5};
     double staging_fr_slip_tau_drop_{0.20};
     double staging_fr_slip_width_change_{0.001};
+    double staging_fr_load_transfer_min_{0.5};
 
     // --- Force ramp: runtime state (Realtime-thread owned) ---
     double fr_f_current_{0.0};           // Current grasp force [N]
@@ -315,6 +318,7 @@ namespace franka_kitting_controller {
     int    fr_late_count_{0};             // W_hold_late: sample count
     double fr_width_before_uplift_{0.0};  // Gripper width before UPLIFT
     double fr_max_width_during_eval_{0.0}; // Maximum gripper width during EVALUATE hold
+    double accumulated_uplift_{0.0};       // Uncorrected uplift from SUCCESS [m]
 
     // --- Deferred grasp command (realtime → read thread → command thread) ---
     // Realtime thread requests a grasp command via this mechanism (can't call queueGripperCommand

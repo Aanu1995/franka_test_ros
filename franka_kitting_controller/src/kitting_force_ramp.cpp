@@ -267,7 +267,7 @@ namespace franka_kitting_controller {
 
     // Gate 1: Load transfer confirmation
     double delta_F = mu_early - mu_pre;
-    bool load_transfer = delta_F > std::max(3.0 * sigma_pre, 1.0);
+    bool load_transfer = delta_F > std::max(3.0 * sigma_pre, rt_fr_load_transfer_min_);
 
     // Gate 2: Drop ratio
     constexpr double kEpsilon = 1e-6;
@@ -291,6 +291,7 @@ namespace franka_kitting_controller {
             slip ? "SLIP" : "SECURE");
 
     if (!slip) {
+      accumulated_uplift_ += rt_fr_uplift_distance_;  // This UPLIFT wasn't DOWNLIFTed
       current_state_.store(GraspState::SUCCESS, std::memory_order_relaxed);
       publishStateLabel("SUCCESS");
       logStateTransition("SUCCESS", "Secure grasp confirmed");

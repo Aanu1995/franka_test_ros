@@ -169,6 +169,7 @@ namespace franka_kitting_controller {
     staging_fr_stabilization_     = resolveParam(msg->fr_stabilization, fr_stabilization_);
     staging_fr_slip_tau_drop_     = resolveParam(msg->fr_slip_tau_drop, fr_slip_tau_drop_);
     staging_fr_slip_width_change_ = resolveParam(msg->fr_slip_width_change, fr_slip_width_change_);
+    staging_fr_load_transfer_min_ = resolveParam(msg->fr_load_transfer_min, fr_load_transfer_min_);
 
     if (staging_fr_uplift_distance_ > kMaxUpliftDistance) {
       ROS_WARN("KittingStateController: fr_uplift_distance %.4f exceeds max %.4f, clamping",

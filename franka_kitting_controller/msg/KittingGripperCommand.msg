@@ -50,6 +50,7 @@ float64 fr_epsilon           # [m]   Epsilon for ramp grasps, same for inner/out
 float64 fr_stabilization     # [s]   Post-grasp/post-downlift settle time (0 = use default 0.5)
 float64 fr_slip_tau_drop     # Drop ratio threshold (mu_early-mu_late)/mu_early (0 = use default 0.20)
 float64 fr_slip_width_change # [m]   Width change threshold for slip (0 = use default 0.001)
+float64 fr_load_transfer_min # [N]  Min load transfer threshold floor (0 = use default 0.5)
 
 # --- AUTO parameters (used when command == "AUTO") ---
 # AUTO runs the full sequence: BASELINE → CLOSING → GRASPING automatically.

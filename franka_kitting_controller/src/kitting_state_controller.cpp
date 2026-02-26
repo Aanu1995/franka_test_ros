@@ -202,6 +202,7 @@ namespace franka_kitting_controller {
     node_handle.param("stabilization", fr_stabilization_, 0.5);
     node_handle.param("slip_tau_drop", fr_slip_tau_drop_, 0.20);
     node_handle.param("slip_width_change", fr_slip_width_change_, 0.001);
+    node_handle.param("load_transfer_min", fr_load_transfer_min_, 0.5);
 
     // Validate force ramp parameters
     if (fr_f_min_ <= 0.0) {
@@ -241,7 +242,8 @@ namespace franka_kitting_controller {
                     << " | grasp: speed=" << fr_grasp_speed_ << " eps=" << fr_epsilon_
                     << " | stab=" << fr_stabilization_
                     << " | slip: drop_thresh=" << fr_slip_tau_drop_
-                    << " width_thresh=" << fr_slip_width_change_);
+                    << " width_thresh=" << fr_slip_width_change_
+                    << " load_min=" << fr_load_transfer_min_);
 
     // --- Direct gripper connection via libfranka ---
     if (!node_handle.getParam("robot_ip", robot_ip_)) {
@@ -394,6 +396,7 @@ namespace franka_kitting_controller {
     fr_grasp_cmd_seen_executing_ = false;
     fr_grasp_stabilizing_ = false;
     fr_grasping_phase_initialized_ = false;
+    accumulated_uplift_ = 0.0;
 
     logStateTransition("START", "Controller running");
     if (require_logger_) {
@@ -442,6 +445,19 @@ namespace franka_kitting_controller {
       fr_grasping_phase_initialized_ = false;
 
       ROS_INFO("  [BASELINE]  State machine reset for new trial");
+
+      // Correct accumulated uplift from previous SUCCESS (arm stayed elevated
+      // for pick-and-place; now returning to original height for next trial).
+      if (accumulated_uplift_ > 0.001) {
+        downlift_start_pose_ = cartesian_pose_handle_->getRobotState().O_T_EE_d;
+        downlift_z_start_ = downlift_start_pose_[14];
+        downlift_elapsed_ = 0.0;
+        rt_downlift_distance_ = accumulated_uplift_;
+        rt_downlift_duration_ = accumulated_uplift_ / fr_lift_speed_;
+        downlift_active_.store(true, std::memory_order_relaxed);
+        ROS_INFO("  [BASELINE]  Correcting accumulated uplift: %.4f m", accumulated_uplift_);
+        accumulated_uplift_ = 0.0;
+      }
     }
 
     // Handle CLOSING start: snapshot command parameters for realtime contact detection
@@ -471,6 +487,7 @@ namespace franka_kitting_controller {
       rt_fr_stabilization_ = staging_fr_stabilization_;
       rt_fr_slip_tau_drop_ = staging_fr_slip_tau_drop_;
       rt_fr_slip_width_change_ = staging_fr_slip_width_change_;
+      rt_fr_load_transfer_min_ = staging_fr_load_transfer_min_;
 
       // Capture EE z-height before force ramp starts
       fr_z_initial_ = cartesian_pose_handle_->getRobotState().O_T_EE_d[14];

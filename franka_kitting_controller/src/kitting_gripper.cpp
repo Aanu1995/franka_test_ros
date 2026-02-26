@@ -68,6 +68,14 @@ namespace franka_kitting_controller {
         // Acquire-load ensures we see the parameter stores made by the Realtime thread
         // before its release-store of the flag.
         if (deferred_grasp_pending_.load(std::memory_order_acquire)) {
+          // Release any current grasp before retrying — libfranka grasp() hangs
+          // if the gripper is already in a grasped state at the target width.
+          try {
+            gripper_->stop();
+          } catch (const franka::Exception&) {
+            // Benign: no command in progress
+          }
+
           GripperCommand grasp_cmd;
           grasp_cmd.type = GripperCommandType::GRASP;
           grasp_cmd.width = deferred_grasp_width_;
