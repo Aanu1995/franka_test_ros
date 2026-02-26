@@ -356,7 +356,7 @@ namespace franka_kitting_controller {
     fr_grasping_phase_initialized_ = true;
     fr_grasp_cmd_seen_executing_ = false;
     fr_grasp_stabilizing_ = false;
-    requestDeferredGrasp(rt_fr_grasp_width_, rt_fr_grasp_speed_,
+    requestDeferredGrasp(fr_width_before_uplift_, rt_fr_grasp_speed_,
                         fr_f_current_, rt_fr_epsilon_);
     current_state_.store(GraspState::GRASPING, std::memory_order_relaxed);
     publishStateLabel("GRASPING");
