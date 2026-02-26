@@ -178,7 +178,7 @@ Validate grasp robustness under load. **Auto-triggered** by the controller after
 
 Assess grasp stability at the lifted position. **Auto-triggered** after UPLIFT completes.
 
-- Holds position for `uplift_hold` seconds (default 0.10 s): early window (first half) + late window (second half)
+- Holds position for `uplift_hold` seconds (default 1.0 s): early window (first half) + late window (second half)
 - Uses `wrench_norm` (Cartesian external wrench) for load-transfer slip detection
 - Two-gate evaluation (see [Slip Detection](#grasp-slip-detection-load-transfer-drop-metric)):
   - **Gate 1**: Load transfer confirmation — `delta_F > max(3*sigma_pre, load_transfer_min)`
@@ -317,7 +317,7 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
   "{command: 'GRASPING', \
     f_min: 3.0, f_step: 3.0, f_max: 30.0, \
     fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
-    fr_uplift_distance: 0.010, fr_lift_speed: 0.01, fr_uplift_hold: 0.10, \
+    fr_uplift_distance: 0.010, fr_lift_speed: 0.01, fr_uplift_hold: 1.0, \
     fr_stabilization: 0.5, fr_slip_tau_drop: 0.20, fr_slip_width_change: 0.001, \
     fr_load_transfer_min: 1.0}" --once
 
@@ -345,7 +345,7 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
     closing_width: 0.01, closing_speed: 0.05, \
     f_min: 3.0, f_step: 3.0, f_max: 30.0, \
     fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
-    fr_uplift_distance: 0.010, fr_lift_speed: 0.01, fr_uplift_hold: 0.10, \
+    fr_uplift_distance: 0.010, fr_lift_speed: 0.01, fr_uplift_hold: 1.0, \
     fr_stabilization: 0.5, fr_slip_tau_drop: 0.20, fr_slip_width_change: 0.001, \
     fr_load_transfer_min: 1.0}" --once
 ```
@@ -736,7 +736,7 @@ The **velocity profile** (first derivative) is:
 | `f_max`                    | double | `30.0`  | Maximum force — FAILED if exceeded [N]                              |
 | `uplift_distance`          | double | `0.010` | Micro-uplift distance per iteration [m] (max 0.02)                  |
 | `lift_speed`               | double | `0.01`  | Lift speed for UPLIFT and DOWNLIFT [m/s]                            |
-| `uplift_hold`              | double | `0.10`  | Hold time: early (first half) + late (second half) windows [s]      |
+| `uplift_hold`              | double | `1.0`   | Hold time: early (first half) + late (second half) windows [s]      |
 | `stabilization`            | double | `0.5`   | Post-grasp settle time; also W_pre baseline window [s]              |
 | `slip_tau_drop`            | double | `0.20`  | Drop ratio threshold: (mu_early−mu_late)/mu_early                   |
 | `slip_width_change`        | double | `0.001` | Width change threshold for slip [m]                                 |
@@ -839,7 +839,7 @@ Per-object command published on `/kitting_controller/state_cmd`. Any float64 par
 | `f_max`                | float64 | Maximum force — FAILED if exceeded [N] (0 = use default 30.0)                      |
 | `fr_uplift_distance`   | float64 | Micro-uplift distance per iteration [m] (0 = use default 0.010, max 0.02)          |
 | `fr_lift_speed`        | float64 | Lift speed for UPLIFT and DOWNLIFT [m/s] (0 = use default 0.01)                    |
-| `fr_uplift_hold`       | float64 | Hold time at top for evaluation [s] (0 = use default 0.10)                         |
+| `fr_uplift_hold`       | float64 | Hold time at top for evaluation [s] (0 = use default 1.0)                          |
 | `fr_grasp_speed`       | float64 | Gripper speed for ramp GraspAction [m/s] (0 = use default 0.02)                    |
 | `fr_epsilon`           | float64 | Epsilon for ramp GraspAction, inner and outer [m] (0 = use default 0.008)          |
 | `fr_stabilization`     | float64 | Post-grasp and post-downlift settle time [s] (0 = use default 0.5)                 |

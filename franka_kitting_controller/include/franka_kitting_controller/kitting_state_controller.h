@@ -256,7 +256,7 @@ namespace franka_kitting_controller {
     double fr_f_max_{30.0};
     double fr_uplift_distance_{0.010};
     double fr_lift_speed_{0.01};
-    double fr_uplift_hold_{0.10};
+    double fr_uplift_hold_{1.0};
     double fr_grasp_speed_{0.02};
     double fr_epsilon_{0.008};        // Single epsilon (inner == outer)
     double fr_stabilization_{0.5};
@@ -272,7 +272,7 @@ namespace franka_kitting_controller {
     double rt_fr_f_max_{30.0};
     double rt_fr_uplift_distance_{0.010};
     double rt_fr_lift_speed_{0.01};
-    double rt_fr_uplift_hold_{0.10};
+    double rt_fr_uplift_hold_{1.0};
     double rt_fr_grasp_speed_{0.02};
     double rt_fr_epsilon_{0.008};
     double rt_fr_stabilization_{0.5};
@@ -288,7 +288,7 @@ namespace franka_kitting_controller {
     double staging_fr_f_max_{30.0};
     double staging_fr_uplift_distance_{0.010};
     double staging_fr_lift_speed_{0.01};
-    double staging_fr_uplift_hold_{0.10};
+    double staging_fr_uplift_hold_{1.0};
     double staging_fr_grasp_speed_{0.02};
     double staging_fr_epsilon_{0.008};
     double staging_fr_stabilization_{0.5};

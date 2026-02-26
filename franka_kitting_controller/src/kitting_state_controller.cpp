@@ -196,7 +196,7 @@ namespace franka_kitting_controller {
     node_handle.param("f_max", fr_f_max_, 30.0);
     node_handle.param("uplift_distance", fr_uplift_distance_, 0.010);
     node_handle.param("lift_speed", fr_lift_speed_, 0.01);
-    node_handle.param("uplift_hold", fr_uplift_hold_, 0.10);
+    node_handle.param("uplift_hold", fr_uplift_hold_, 1.0);
     node_handle.param("grasp_speed", fr_grasp_speed_, 0.02);
     node_handle.param("epsilon", fr_epsilon_, 0.008);
     node_handle.param("stabilization", fr_stabilization_, 0.5);
