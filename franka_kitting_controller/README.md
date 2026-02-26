@@ -167,7 +167,7 @@ Initiate automated force ramp. Published via `/kitting_controller/state_cmd` wit
 
 Validate grasp robustness under load. **Auto-triggered** by the controller after GRASPING completes — not a user command.
 
-- Controller displaces end-effector upward by `fr_uplift_distance` (default 5 mm, max 10 mm)
+- Controller displaces end-effector upward by `fr_uplift_distance` (default 10 mm, max 20 mm)
 - Duration computed from distance and speed: `T = fr_uplift_distance / fr_lift_speed`
 - Cosine-smoothed trajectory `s = 0.5(1 - cos(π · s_raw))` ensures zero velocity at start and end
 - Only z-translation of `O_T_EE_d[14]` is modified — orientation and x/y unchanged
@@ -317,9 +317,9 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
   "{command: 'GRASPING', \
     f_min: 3.0, f_step: 3.0, f_max: 30.0, \
     fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
-    fr_uplift_distance: 0.005, fr_lift_speed: 0.01, fr_uplift_hold: 0.10, \
+    fr_uplift_distance: 0.010, fr_lift_speed: 0.01, fr_uplift_hold: 0.10, \
     fr_stabilization: 0.5, fr_slip_tau_drop: 0.20, fr_slip_width_change: 0.001, \
-    fr_load_transfer_min: 0.5}" --once
+    fr_load_transfer_min: 1.0}" --once
 
 # Stop recording
 rostopic pub /kitting_controller/record_control std_msgs/String "data: 'STOP'" --once
@@ -337,11 +337,17 @@ A single `AUTO` command runs the full sequence: BASELINE → *(delay)* → CLOSI
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
   "{command: 'AUTO', open_gripper: true}" --once
 
-# AUTO — with custom delay and parameters
+# AUTO — with custom delay and all parameters forwarded to each stage
+# All BASELINE, CLOSING, and GRASPING parameters are accepted in a single AUTO
+# command and forwarded to each stage when it runs. 0 = use YAML default.
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
   "{command: 'AUTO', open_gripper: true, auto_delay: 3.0, \
     closing_width: 0.01, closing_speed: 0.05, \
-    f_min: 3.0, f_max: 30.0, f_step: 3.0}" --once
+    f_min: 3.0, f_step: 3.0, f_max: 30.0, \
+    fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
+    fr_uplift_distance: 0.010, fr_lift_speed: 0.01, fr_uplift_hold: 0.10, \
+    fr_stabilization: 0.5, fr_slip_tau_drop: 0.20, fr_slip_width_change: 0.001, \
+    fr_load_transfer_min: 1.0}" --once
 ```
 
 ## Gripper Action Servers
@@ -542,7 +548,7 @@ Verify the object weight is actually on the gripper after lifting:
   Load transfer confirmed if:  delta_F > max(3 * sigma_pre, load_transfer_min)
 ```
 
-The `3 * sigma_pre` threshold adapts to sensor noise. The `load_transfer_min` floor (default 0.5 N, configurable) prevents declaring load transfer from noise alone. Lower this for light objects (e.g., 0.1 N for a ~10 g object). If load transfer is NOT confirmed, the grasp is treated as unstable (SLIP) regardless of the drop ratio.
+The `3 * sigma_pre` threshold adapts to sensor noise. The `load_transfer_min` floor (default 1.0 N, configurable) prevents declaring load transfer from noise alone. Lower this for light objects (e.g., 0.5 N for a ~51 g object). If load transfer is NOT confirmed, the grasp is treated as unstable (SLIP) regardless of the drop ratio.
 
 ### Gate 2: Drop Ratio (Slip During Hold)
 
@@ -574,7 +580,7 @@ A positive `drop_ratio` means the wrench decreased from the early to late window
 | ---------------------- | ------- | ----------------------------------------------------- |
 | `fr_slip_tau_drop`     | 0.20    | Drop ratio threshold (0.20 = 20% wrench drop)        |
 | `fr_slip_width_change` | 0.001 m | Gripper width increase threshold                      |
-| `load_transfer_min`    | 0.5 N   | Floor for load transfer threshold (lower for light objects) |
+| `load_transfer_min`    | 1.0 N   | Floor for load transfer threshold (lower for light objects) |
 
 ### Example Log Output
 
@@ -586,7 +592,7 @@ Secure grasp (load transfer confirmed, no drop):
               width_change=0.0002 (thresh=0.0010)  SECURE
 ```
 
-- `delta_F=2.624` > `max(3*0.142, load_transfer_min)` = `max(0.426, 0.5)` = 0.5 → load transfer confirmed
+- `delta_F=2.624` > `max(3*0.142, load_transfer_min)` = `max(0.426, 1.0)` = 1.0 → load transfer confirmed
 - `drop=0.021` (2.1%) < 0.20 → no significant drop
 - **Verdict: SECURE → SUCCESS**
 
@@ -598,7 +604,7 @@ Slip detected — load transferred but object slipped during hold:
               width_change=0.0014 (thresh=0.0010)  SLIP
 ```
 
-- `delta_F=2.740` > `max(3*0.138, load_transfer_min)` = `max(0.414, 0.5)` = 0.5 → load transfer confirmed (object was lifted)
+- `delta_F=2.740` > `max(3*0.138, load_transfer_min)` = `max(0.414, 1.0)` = 1.0 → load transfer confirmed (object was lifted)
 - `drop=0.238` (23.8%) > 0.20 → wrench dropped during hold (object sliding out)
 - `width_change=0.0014` > 0.001 → gripper opened 1.4 mm (fingers pushed apart)
 - **Verdict: SLIP → DOWNLIFT → retry with more force**
@@ -611,7 +617,7 @@ Failed load transfer (object not lifted):
               width_change=0.0001 (thresh=0.0010)  SLIP
 ```
 
-- `delta_F=0.142` < `max(3*0.142, load_transfer_min)` = `max(0.426, 0.5)` = 0.5 → load transfer NOT confirmed
+- `delta_F=0.142` < `max(3*0.142, load_transfer_min)` = `max(0.426, 1.0)` = 1.0 → load transfer NOT confirmed
 - Drop ratio and width are fine, but Gate 1 failed — object weight never appeared on the gripper
 - **Verdict: SLIP → DOWNLIFT → retry with more force**
 
@@ -643,7 +649,7 @@ The UPLIFT and DOWNLIFT states execute smooth Cartesian micro-lifts internally u
 
 | Symbol     | Name                      | Unit | Default  | Description                                                                |
 | ---------- | ------------------------- | ---- | -------- | -------------------------------------------------------------------------- |
-| `d`        | Lift distance             | m    | 0.005    | Total displacement along the z-axis (max 0.01)                             |
+| `d`        | Lift distance             | m    | 0.010    | Total displacement along the z-axis (max 0.02)                             |
 | `v_lift`   | Lift speed                | m/s  | 0.01     | Speed for both UPLIFT and DOWNLIFT                                         |
 | `T`        | Lift duration             | s    | computed | `T = d / v_lift` (computed from distance and speed)                        |
 | `t`        | Elapsed time              | s    | —        | Time since lift started, incremented by `Δt` (control period) each tick    |
@@ -688,7 +694,7 @@ The **velocity profile** (first derivative) is:
 | Velocity at `t = 0`     | `dz/dt = 0`                            | Zero velocity at start (no step discontinuity) |
 | Velocity at `t = T`     | `dz/dt = 0`                            | Zero velocity at end (smooth stop)             |
 | Peak velocity           | `v_max = πd/(2T)` at `t = T/2`         | Maximum speed at the midpoint of the motion    |
-| Peak velocity (default) | `v_max = π·0.005/(2·0.5) ≈ 0.0157 m/s` | ~15.7 mm/s — well within Franka limits         |
+| Peak velocity (default) | `v_max = π·0.010/(2·1.0) ≈ 0.0157 m/s` | ~15.7 mm/s — well within Franka limits         |
 
 ### Execution Details
 
@@ -705,7 +711,7 @@ The **velocity profile** (first derivative) is:
 | Constraint              | Symbol / Value | Description                                                                |
 | ----------------------- | -------------- | -------------------------------------------------------------------------- |
 | Maximum closing speed   | `v ≤ 0.10 m/s` | Hard clamp — speeds above 0.10 m/s are clamped with a warning              |
-| Maximum uplift distance | `d ≤ 0.01 m`   | Hard clamp — any `d > 10 mm` is clamped with a warning                     |
+| Maximum uplift distance | `d ≤ 0.02 m`   | Hard clamp — any `d > 20 mm` is clamped with a warning                     |
 | Precondition            | —              | GRASPING requires CONTACT state                                           |
 | BASELINE interruption   | —              | BASELINE clears active trajectories, returns to passthrough (with warning) |
 | GRASPING timeout        | 10 s           | Transitions to FAILED if gripper command does not complete                 |
@@ -728,13 +734,13 @@ The **velocity profile** (first derivative) is:
 | `f_min`                    | double | `3.0`   | Starting grasp force [N]                                            |
 | `f_step`                   | double | `3.0`   | Force increment per iteration [N]                                   |
 | `f_max`                    | double | `30.0`  | Maximum force — FAILED if exceeded [N]                              |
-| `uplift_distance`          | double | `0.005` | Micro-uplift distance per iteration [m] (max 0.01)                  |
+| `uplift_distance`          | double | `0.010` | Micro-uplift distance per iteration [m] (max 0.02)                  |
 | `lift_speed`               | double | `0.01`  | Lift speed for UPLIFT and DOWNLIFT [m/s]                            |
 | `uplift_hold`              | double | `0.10`  | Hold time: early (first half) + late (second half) windows [s]      |
 | `stabilization`            | double | `0.5`   | Post-grasp settle time; also W_pre baseline window [s]              |
 | `slip_tau_drop`            | double | `0.20`  | Drop ratio threshold: (mu_early−mu_late)/mu_early                   |
 | `slip_width_change`        | double | `0.001` | Width change threshold for slip [m]                                 |
-| `load_transfer_min`        | double | `0.5`   | Floor for load transfer threshold [N] (lower for light objects)     |
+| `load_transfer_min`        | double | `1.0`   | Floor for load transfer threshold [N] (lower for light objects)     |
 | `require_logger`           | bool   | `false` | Gate commands behind logger readiness (set true when `record:=true`)|
 
 Gripper and GRASPING parameters are **defaults**. They can be overridden per-command by setting non-zero values in the `KittingGripperCommand` message published on `/kitting_controller/state_cmd`.
@@ -831,7 +837,7 @@ Per-object command published on `/kitting_controller/state_cmd`. Any float64 par
 | `f_min`                | float64 | Starting grasp force [N] (0 = use default 3.0)                                     |
 | `f_step`               | float64 | Force increment per iteration [N] (0 = use default 3.0)                            |
 | `f_max`                | float64 | Maximum force — FAILED if exceeded [N] (0 = use default 30.0)                      |
-| `fr_uplift_distance`   | float64 | Micro-uplift distance per iteration [m] (0 = use default 0.005, max 0.01)          |
+| `fr_uplift_distance`   | float64 | Micro-uplift distance per iteration [m] (0 = use default 0.010, max 0.02)          |
 | `fr_lift_speed`        | float64 | Lift speed for UPLIFT and DOWNLIFT [m/s] (0 = use default 0.01)                    |
 | `fr_uplift_hold`       | float64 | Hold time at top for evaluation [s] (0 = use default 0.10)                         |
 | `fr_grasp_speed`       | float64 | Gripper speed for ramp GraspAction [m/s] (0 = use default 0.02)                    |
@@ -839,7 +845,7 @@ Per-object command published on `/kitting_controller/state_cmd`. Any float64 par
 | `fr_stabilization`     | float64 | Post-grasp and post-downlift settle time [s] (0 = use default 0.5)                 |
 | `fr_slip_tau_drop`     | float64 | Drop ratio threshold (mu_early−mu_late)/mu_early (0 = use default 0.20)            |
 | `fr_slip_width_change` | float64 | Width change threshold for slip [m] (0 = use default 0.001)                        |
-| `fr_load_transfer_min` | float64 | Floor for load transfer threshold [N] (0 = use default 0.5)                        |
+| `fr_load_transfer_min` | float64 | Floor for load transfer threshold [N] (0 = use default 1.0)                        |
 | `auto_delay`           | float64 | Delay between auto transitions [s] (0 = default 5.0). Only used by `AUTO` command  |
 
 Only the parameters relevant to the command are used:
@@ -963,7 +969,7 @@ The Grasp logger is written in C++ using the `rosbag::Bag` API directly and `top
 - Force ramp terminates with FAILED if f_current exceeds f_max
 - UPLIFT and DOWNLIFT trajectories use cosine smoothing with duration computed from distance/speed
 - UPLIFT/DOWNLIFT orientation remains unchanged throughout the motion
-- Uplift distance is clamped to 10 mm maximum (with warning)
+- Uplift distance is clamped to 20 mm maximum (with warning)
 - SUCCESS keeps arm elevated for pick-and-place; accumulated uplift corrected automatically on next BASELINE
 - BASELINE during active force ramp clears trajectories and returns to passthrough
 - Per-command force ramp parameters override YAML defaults when non-zero

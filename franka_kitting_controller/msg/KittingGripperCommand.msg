@@ -42,7 +42,7 @@ float64 closing_speed    # [m/s] Speed for MoveAction         (0 = use default)
 float64 f_min                # [N]   Starting grasp force (0 = use default 3.0)
 float64 f_step               # [N]   Force increment per iteration (0 = use default 3.0)
 float64 f_max                # [N]   Maximum force, FAILED if exceeded (0 = use default 30.0)
-float64 fr_uplift_distance   # [m]   Micro-uplift distance (0 = use default 0.005)
+float64 fr_uplift_distance   # [m]   Micro-uplift distance (0 = use default 0.010)
 float64 fr_lift_speed        # [m/s] Lift speed for UPLIFT and DOWNLIFT (0 = use default 0.01)
 float64 fr_uplift_hold       # [s]   Hold at top; early + late windows (0 = use default 0.10)
 float64 fr_grasp_speed       # [m/s] Gripper speed for ramp grasps (0 = use default 0.02)
@@ -50,7 +50,7 @@ float64 fr_epsilon           # [m]   Epsilon for ramp grasps, same for inner/out
 float64 fr_stabilization     # [s]   Post-grasp/post-downlift settle time (0 = use default 0.5)
 float64 fr_slip_tau_drop     # Drop ratio threshold (mu_early-mu_late)/mu_early (0 = use default 0.20)
 float64 fr_slip_width_change # [m]   Width change threshold for slip (0 = use default 0.001)
-float64 fr_load_transfer_min # [N]  Min load transfer threshold floor (0 = use default 0.5)
+float64 fr_load_transfer_min # [N]  Min load transfer threshold floor (0 = use default 1.0)
 
 # --- AUTO parameters (used when command == "AUTO") ---
 # AUTO runs the full sequence: BASELINE → CLOSING → GRASPING automatically.

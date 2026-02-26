@@ -194,7 +194,7 @@ namespace franka_kitting_controller {
     node_handle.param("f_min", fr_f_min_, 3.0);
     node_handle.param("f_step", fr_f_step_, 3.0);
     node_handle.param("f_max", fr_f_max_, 30.0);
-    node_handle.param("uplift_distance", fr_uplift_distance_, 0.005);
+    node_handle.param("uplift_distance", fr_uplift_distance_, 0.010);
     node_handle.param("lift_speed", fr_lift_speed_, 0.01);
     node_handle.param("uplift_hold", fr_uplift_hold_, 0.10);
     node_handle.param("grasp_speed", fr_grasp_speed_, 0.02);
@@ -202,7 +202,7 @@ namespace franka_kitting_controller {
     node_handle.param("stabilization", fr_stabilization_, 0.5);
     node_handle.param("slip_tau_drop", fr_slip_tau_drop_, 0.20);
     node_handle.param("slip_width_change", fr_slip_width_change_, 0.001);
-    node_handle.param("load_transfer_min", fr_load_transfer_min_, 0.5);
+    node_handle.param("load_transfer_min", fr_load_transfer_min_, 1.0);
 
     // Validate force ramp parameters
     if (fr_f_min_ <= 0.0) {
@@ -325,7 +325,7 @@ namespace franka_kitting_controller {
     // Grasp: Logger readiness gate.
     // When require_logger is true, commands are rejected until the logger publishes ready.
     // When false, commands are accepted immediately (no recording).
-    node_handle.param("require_logger", require_logger_, true);
+    node_handle.param("require_logger", require_logger_, false);
     if (require_logger_) {
       logger_ready_sub_ = root_nh.subscribe("/kitting_controller/logger_ready", 1,
                                             &KittingStateController::loggerReadyCallback, this);

@@ -18,13 +18,13 @@ kitting_state_controller:
   f_min: 3.0 # [N] Starting grasp force
   f_step: 3.0 # [N] Force increment per iteration
   f_max: 30.0 # [N] Maximum force (FAILED if exceeded)
-  uplift_distance: 0.005 # [m] Micro-uplift distance per iteration
+  uplift_distance: 0.010 # [m] Micro-uplift distance per iteration
   lift_speed: 0.01 # [m/s] Lift speed for both UPLIFT and DOWNLIFT
   uplift_hold: 0.10 # [s] Hold at top; early (0–0.05s) + late (0.05–0.10s) windows
   stabilization: 0.5 # [s] Post-grasp settle time (also W_pre window for slip baseline)
   slip_tau_drop: 0.20 # Drop ratio threshold for slip (mu_early−mu_late)/mu_early
   slip_width_change: 0.001 # [m] Width change threshold for slip
-  load_transfer_min: 0.5 # [N] Minimum load transfer threshold (lighter objects need lower value)
+  load_transfer_min: 1.0 # [N] Minimum load transfer threshold (lighter objects need lower value)
 
   # Recording / Logger parameters (used by launch file, see kitting_state_controller.launch)
   # Set require_logger: true to enable rosbag recording (launch arg: record:=true)

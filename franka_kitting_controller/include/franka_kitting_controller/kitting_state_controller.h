@@ -160,7 +160,7 @@ namespace franka_kitting_controller {
     // publisher check (getNumPublishers > 0) at the point of use. This dual check
     // prevents stale latched messages from a previous logger run and also detects
     // logger shutdown mid-session.
-    bool require_logger_{true};
+    bool require_logger_{false};
     ros::Subscriber logger_ready_sub_;
     std::atomic<bool> logger_ready_{false};
     void loggerReadyCallback(const std_msgs::Bool::ConstPtr& msg);
@@ -194,7 +194,7 @@ namespace franka_kitting_controller {
 
     // --- Grasp: Gripper default parameters (overridable per-command) ---
     double closing_width_{0.01};
-    double closing_speed_{0.02};
+    double closing_speed_{0.05};
 
     // State machine — cross-thread synchronization
     // current_state_: read by subscriber thread (precondition checks), written by Realtime thread.
@@ -239,22 +239,22 @@ namespace franka_kitting_controller {
     std::array<double, 16> uplift_start_pose_{};
     double uplift_z_start_{0.0};
     // Realtime-local copies of UPLIFT parameters — set when UPLIFT starts internally.
-    double rt_uplift_distance_{0.005};
-    double rt_uplift_duration_{0.5};
+    double rt_uplift_distance_{0.010};
+    double rt_uplift_duration_{1.0};
 
     // --- DOWNLIFT trajectory state (Realtime-thread owned) ---
     std::atomic<bool> downlift_active_{false};
     double downlift_elapsed_{0.0};
     std::array<double, 16> downlift_start_pose_{};
     double downlift_z_start_{0.0};
-    double rt_downlift_distance_{0.005};
-    double rt_downlift_duration_{0.5};
+    double rt_downlift_distance_{0.010};
+    double rt_downlift_duration_{1.0};
 
     // --- Force ramp: YAML default parameters (overridable per-command via KittingGripperCommand) ---
     double fr_f_min_{3.0};
     double fr_f_step_{3.0};
     double fr_f_max_{30.0};
-    double fr_uplift_distance_{0.005};
+    double fr_uplift_distance_{0.010};
     double fr_lift_speed_{0.01};
     double fr_uplift_hold_{0.10};
     double fr_grasp_speed_{0.02};
@@ -262,7 +262,7 @@ namespace franka_kitting_controller {
     double fr_stabilization_{0.5};
     double fr_slip_tau_drop_{0.20};
     double fr_slip_width_change_{0.001};
-    double fr_load_transfer_min_{0.5};    // [N] Min floor for load transfer threshold
+    double fr_load_transfer_min_{1.0};    // [N] Min floor for load transfer threshold
 
     // --- Force ramp: Realtime-local copies of resolved per-command parameters ---
     // Snapshotted in applyPendingStateTransition() when entering GRASPING.
@@ -270,7 +270,7 @@ namespace franka_kitting_controller {
     double rt_fr_f_min_{3.0};
     double rt_fr_f_step_{3.0};
     double rt_fr_f_max_{30.0};
-    double rt_fr_uplift_distance_{0.005};
+    double rt_fr_uplift_distance_{0.010};
     double rt_fr_lift_speed_{0.01};
     double rt_fr_uplift_hold_{0.10};
     double rt_fr_grasp_speed_{0.02};
@@ -278,7 +278,7 @@ namespace franka_kitting_controller {
     double rt_fr_stabilization_{0.5};
     double rt_fr_slip_tau_drop_{0.20};
     double rt_fr_slip_width_change_{0.001};
-    double rt_fr_load_transfer_min_{0.5};
+    double rt_fr_load_transfer_min_{1.0};
 
     // --- Force ramp: staging variables (subscriber → realtime via state_changed_) ---
     // Written by stateCmdCallback() with resolved per-command values, before release-store
@@ -286,7 +286,7 @@ namespace franka_kitting_controller {
     double staging_fr_f_min_{3.0};
     double staging_fr_f_step_{3.0};
     double staging_fr_f_max_{30.0};
-    double staging_fr_uplift_distance_{0.005};
+    double staging_fr_uplift_distance_{0.010};
     double staging_fr_lift_speed_{0.01};
     double staging_fr_uplift_hold_{0.10};
     double staging_fr_grasp_speed_{0.02};
@@ -294,7 +294,7 @@ namespace franka_kitting_controller {
     double staging_fr_stabilization_{0.5};
     double staging_fr_slip_tau_drop_{0.20};
     double staging_fr_slip_width_change_{0.001};
-    double staging_fr_load_transfer_min_{0.5};
+    double staging_fr_load_transfer_min_{1.0};
 
     // --- Force ramp: runtime state (Realtime-thread owned) ---
     double fr_f_current_{0.0};           // Current grasp force [N]
@@ -335,7 +335,7 @@ namespace franka_kitting_controller {
     static constexpr double kMaxClosingSpeed{0.10};    // [m/s] Hard cap on closing speed
     static constexpr double kGripperHoldBase{0.35};     // [s] Hold time intercept at zero speed
     static constexpr double kGripperHoldSlope{0.5};     // [s/(m/s)] Linear slope
-    static constexpr double kMaxUpliftDistance{0.01};   // [m] Safety cap on uplift distance
+    static constexpr double kMaxUpliftDistance{0.02};   // [m] Safety cap on uplift distance
 
     // --- Force ramp internal timing constants ---
     static constexpr double kGraspSettleDelay{0.1};     // [s] Wait for command thread pickup
