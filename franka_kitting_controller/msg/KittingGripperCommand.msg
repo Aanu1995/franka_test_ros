@@ -47,10 +47,11 @@ float64 fr_lift_speed        # [m/s] Lift speed for UPLIFT and DOWNLIFT (0 = use
 float64 fr_uplift_hold       # [s]   Hold at top; early + late windows (0 = use default 1.0)
 float64 fr_grasp_speed       # [m/s] Gripper speed for ramp grasps (0 = use default 0.02)
 float64 fr_epsilon           # [m]   Epsilon for ramp grasps, same for inner/outer (0 = use default 0.008)
-float64 fr_stabilization     # [s]   Post-grasp/post-downlift settle time (0 = use default 0.5)
-float64 fr_slip_tau_drop     # Drop ratio threshold (mu_early-mu_late)/mu_early (0 = use default 0.20)
-float64 fr_slip_width_change # [m]   Width change threshold for slip (0 = use default 0.001)
-float64 fr_load_transfer_min # [N]  Min load transfer threshold floor (0 = use default 1.0)
+float64 fr_slip_drop_thresh     # DF_TH: support drop normalizer for s_drop (0 = use default 0.15)
+float64 fr_slip_width_thresh    # [m] W_TH: jaw widening normalizer for s_motion (0 = use default 0.0005)
+float64 fr_load_transfer_min    # [N] Min load transfer threshold floor (0 = use default 1.0)
+float64 fr_slip_score_thresh    # S_TH: fused slip score threshold (0 = use default 0.6)
+float64 fr_slip_friction_thresh # U_TH: friction utilization normalizer (0 = use default 0.5)
 
 # --- AUTO parameters (used when command == "AUTO") ---
 # AUTO runs the full sequence: BASELINE → CLOSING → GRASPING automatically.

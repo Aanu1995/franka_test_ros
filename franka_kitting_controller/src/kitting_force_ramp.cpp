@@ -109,21 +109,23 @@ namespace franka_kitting_controller {
 
   void KittingStateController::runInternalTransitions(const ros::Time& time,
                                                       double tau_ext_norm,
-                                                      double wrench_norm,
+                                                      double support_force,
+                                                      double tangential_force,
                                                       const GripperData& gripper_snapshot) {
     switch (current_state_.load(std::memory_order_relaxed)) {
-      case GraspState::GRASPING:  tickGrasping(time, tau_ext_norm, wrench_norm, gripper_snapshot); break;
-      case GraspState::UPLIFT:    tickUplift(time, tau_ext_norm, wrench_norm, gripper_snapshot);   break;
-      case GraspState::EVALUATE:  tickEvaluate(time, tau_ext_norm, wrench_norm, gripper_snapshot); break;
-      case GraspState::DOWNLIFT:  tickDownlift(time, tau_ext_norm, wrench_norm, gripper_snapshot); break;
-      case GraspState::SETTLING:  tickSettling(time, tau_ext_norm, wrench_norm, gripper_snapshot); break;
+      case GraspState::GRASPING:  tickGrasping(time, tau_ext_norm, support_force, tangential_force, gripper_snapshot); break;
+      case GraspState::UPLIFT:    tickUplift(time, tau_ext_norm, support_force, tangential_force, gripper_snapshot);   break;
+      case GraspState::EVALUATE:  tickEvaluate(time, tau_ext_norm, support_force, tangential_force, gripper_snapshot); break;
+      case GraspState::DOWNLIFT:  tickDownlift(time, tau_ext_norm, support_force, tangential_force, gripper_snapshot); break;
+      case GraspState::SETTLING:  tickSettling(time, tau_ext_norm, support_force, tangential_force, gripper_snapshot); break;
       default: break;
     }
   }
 
   void KittingStateController::tickGrasping(const ros::Time& time,
                                             double tau_ext_norm,
-                                            double wrench_norm,
+                                            double support_force,
+                                            double tangential_force,
                                             const GripperData& gripper_snapshot) {
     // First tick after entering GRASPING: initialize phase timer
     if (!fr_grasping_phase_initialized_) {
@@ -171,12 +173,12 @@ namespace franka_kitting_controller {
       return;
     }
 
-    // Step 3: Post-grasp stabilization delay + W_pre accumulation
+    // Step 3: Post-grasp W_pre accumulation (Fn = support force, duration = uplift_hold/2)
     double stab_elapsed = (time - fr_grasp_stabilize_start_).toSec();
-    fr_pre_sum_ += wrench_norm;
-    fr_pre_sum_sq_ += wrench_norm * wrench_norm;
+    fr_pre_sum_ += support_force;
+    fr_pre_sum_sq_ += support_force * support_force;
     fr_pre_count_++;
-    if (stab_elapsed < rt_fr_stabilization_) {
+    if (stab_elapsed < (rt_fr_uplift_hold_ / 2.0)) {
       return;
     }
 
@@ -205,7 +207,8 @@ namespace franka_kitting_controller {
 
   void KittingStateController::tickUplift(const ros::Time& time,
                                           double /* tau_ext_norm */,
-                                          double /* wrench_norm */,
+                                          double /* support_force */,
+                                          double /* tangential_force */,
                                           const GripperData& gripper_snapshot) {
     if (uplift_active_.load(std::memory_order_relaxed)) {
       return;  // Trajectory still running
@@ -217,10 +220,13 @@ namespace franka_kitting_controller {
     fr_late_sum_ = 0.0;
     fr_late_count_ = 0;
     fr_max_width_during_eval_ = gripper_snapshot.width;
+    fr_friction_sum_ = 0.0;
+    fr_friction_count_ = 0;
+    fr_friction_max_ = 0.0;
 
     current_state_.store(GraspState::EVALUATE, std::memory_order_relaxed);
     publishStateLabel("EVALUATE");
-    logStateTransition("EVALUATE", "Hold + load-transfer slip detection");
+    logStateTransition("EVALUATE", "Hold + slip score evaluation");
     ROS_INFO("    early=%.2fs  late=%.2fs  (total hold=%.2fs)  W_pre samples=%d",
             rt_fr_uplift_hold_ / 2.0, rt_fr_uplift_hold_ / 2.0,
             rt_fr_uplift_hold_, fr_pre_count_);
@@ -228,10 +234,12 @@ namespace franka_kitting_controller {
 
   void KittingStateController::tickEvaluate(const ros::Time& time,
                                             double /* tau_ext_norm */,
-                                            double wrench_norm,
+                                            double support_force,
+                                            double tangential_force,
                                             const GripperData& gripper_snapshot) {
     const double kEarlyEnd = rt_fr_uplift_hold_ / 2.0;  // W_hold_early [0, half)
     const double kLateEnd  = rt_fr_uplift_hold_;         // W_hold_late  [half, hold)
+    constexpr double kEpsilon = 1e-6;
 
     double elapsed = (time - fr_phase_start_time_).toSec();
     double gw = gripper_snapshot.width;
@@ -241,62 +249,89 @@ namespace franka_kitting_controller {
       fr_max_width_during_eval_ = gw;
     }
 
-    // Accumulate early window [0, 0.3)
+    // Track friction utilization over entire hold: u = Ft / max(Fn, eps)
+    double u_sample = tangential_force / std::max(support_force, kEpsilon);
+    fr_friction_sum_ += u_sample;
+    fr_friction_count_++;
+    if (u_sample > fr_friction_max_) {
+      fr_friction_max_ = u_sample;
+    }
+
+    // Accumulate early window [0, half) — support force (Fn)
     if (elapsed < kEarlyEnd) {
-      fr_early_sum_ += wrench_norm;
+      fr_early_sum_ += support_force;
       fr_early_count_++;
       return;
     }
 
-    // Accumulate late window [0.3, 0.6)
+    // Accumulate late window [half, hold) — support force (Fn)
     if (elapsed < kLateEnd) {
-      fr_late_sum_ += wrench_norm;
+      fr_late_sum_ += support_force;
       fr_late_count_++;
       return;
     }
 
-    // --- Compute metrics after both windows complete ---
-    double mu_pre = (fr_pre_count_ > 0) ? fr_pre_sum_ / fr_pre_count_ : 0.0;
+    // ================================================================
+    // Hold complete — compute slip score
+    // ================================================================
+
+    // --- Window statistics (all based on Fn = support force) ---
+    double Fn_pre   = (fr_pre_count_ > 0) ? fr_pre_sum_ / fr_pre_count_ : 0.0;
     double sigma_pre = 0.0;
     if (fr_pre_count_ > 1) {
-      double var = fr_pre_sum_sq_ / fr_pre_count_ - mu_pre * mu_pre;
+      double var = fr_pre_sum_sq_ / fr_pre_count_ - Fn_pre * Fn_pre;
       sigma_pre = std::sqrt(std::max(var, 0.0));
     }
-    double mu_early = (fr_early_count_ > 0) ? fr_early_sum_ / fr_early_count_ : 0.0;
-    double mu_late  = (fr_late_count_ > 0)  ? fr_late_sum_ / fr_late_count_   : 0.0;
+    double Fn_early = (fr_early_count_ > 0) ? fr_early_sum_ / fr_early_count_ : 0.0;
+    double Fn_late  = (fr_late_count_ > 0)  ? fr_late_sum_ / fr_late_count_   : 0.0;
 
-    // Gate 1: Load transfer confirmation
-    double delta_F = mu_early - mu_pre;
-    bool load_transfer = delta_F > std::max(3.0 * sigma_pre, rt_fr_load_transfer_min_);
+    // --- Step A: Load Transfer Gate (mandatory) ---
+    double deltaF = Fn_early - Fn_pre;
+    double load_thresh = std::max(3.0 * sigma_pre, rt_fr_load_transfer_min_);
+    bool load_transferred = deltaF > load_thresh;
 
-    // Gate 2: Drop ratio
-    constexpr double kEpsilon = 1e-6;
-    double drop_ratio = (mu_early - mu_late) / std::max(mu_early, kEpsilon);
+    // --- Step B: Primary kitting cue — support force decay (s_drop) ---
+    double dF = (Fn_early - Fn_late) / std::max(Fn_early, kEpsilon);  // relative decay
+    double s_drop = std::max(0.0, std::min(1.0, dF / rt_fr_slip_drop_thresh_));
 
-    // Width change (existing criterion)
-    double width_change = fr_max_width_during_eval_ - fr_width_before_uplift_;
+    // --- Step C: Secondary cue — jaw widening (s_motion) ---
+    double dw = fr_max_width_during_eval_ - fr_width_before_uplift_;
+    double s_motion = std::max(0.0, std::min(1.0, dw / rt_fr_slip_width_thresh_));
 
-    // Final decision: SECURE requires all gates pass
-    bool secure = load_transfer &&
-                  (drop_ratio <= rt_fr_slip_tau_drop_) &&
-                  (width_change <= rt_fr_slip_width_change_);
-    bool slip = !secure;
+    // --- Step D: Optional low-priority cue — friction utilization (s_force) ---
+    double u_hold = (fr_friction_count_ > 0) ? fr_friction_sum_ / fr_friction_count_ : 0.0;
+    double u_peak = fr_friction_max_;
+    double s_force = std::max(0.0, std::min(1.0, u_hold / rt_fr_slip_friction_thresh_));
+    s_force = std::max(s_force,
+        std::max(0.0, std::min(1.0, u_peak / (rt_fr_slip_friction_thresh_ * 1.1))));
+    // Combine friction utilization with support drop
+    s_force = std::max(s_force, s_drop);
 
-    ROS_INFO("  [EVALUATE]  mu_pre=%.3f  sigma_pre=%.3f  mu_early=%.3f  mu_late=%.3f  "
-            "delta_F=%.3f  load_xfer=%s  drop=%.3f (thresh=%.3f)  "
-            "width_change=%.4f (thresh=%.4f)  %s",
-            mu_pre, sigma_pre, mu_early, mu_late,
-            delta_F, load_transfer ? "YES" : "NO", drop_ratio, rt_fr_slip_tau_drop_,
-            width_change, rt_fr_slip_width_change_,
-            slip ? "SLIP" : "SECURE");
+    // --- Step E: Fused slip score (soft-OR) ---
+    double slip_score = 1.0 - (1.0 - s_motion) * (1.0 - std::max(s_drop, s_force));
+    bool is_slipping = !load_transferred || (slip_score > rt_fr_slip_score_thresh_);
 
-    if (!slip) {
+    // --- Terminal logging: each sub-score on its own line with threshold ---
+    ROS_INFO("  [SLIP] Load Transfer:  deltaF=%.3f N  threshold=%.3f N  (Fn_pre=%.3f  sigma=%.3f  Fn_early=%.3f)  %s",
+             deltaF, load_thresh, Fn_pre, sigma_pre, Fn_early,
+             load_transferred ? "PASSED" : "FAILED");
+    ROS_INFO("  [SLIP] s_drop:         %.3f / %.3f  (dF=%.1f%%  DF_TH=%.0f%%)",
+             s_drop, rt_fr_slip_drop_thresh_, dF * 100.0, rt_fr_slip_drop_thresh_ * 100.0);
+    ROS_INFO("  [SLIP] s_motion:       %.3f / %.3f  (dw=%.4f m  W_TH=%.4f m)",
+             s_motion, rt_fr_slip_width_thresh_, dw, rt_fr_slip_width_thresh_);
+    ROS_INFO("  [SLIP] s_force:        %.3f / %.3f  (u_hold=%.3f  u_peak=%.3f  U_TH=%.3f)",
+             s_force, rt_fr_slip_friction_thresh_, u_hold, u_peak, rt_fr_slip_friction_thresh_);
+    ROS_INFO("  [SLIP] slip_score:     %.3f / %.3f  -> %s",
+             slip_score, rt_fr_slip_score_thresh_,
+             is_slipping ? "SLIPPING" : "SECURE");
+
+    if (!is_slipping) {
       accumulated_uplift_ += rt_fr_uplift_distance_;  // This UPLIFT wasn't DOWNLIFTed
       current_state_.store(GraspState::SUCCESS, std::memory_order_relaxed);
       publishStateLabel("SUCCESS");
       logStateTransition("SUCCESS", "Secure grasp confirmed");
-      ROS_INFO("    F=%.1f N  iter=%d  delta_F=%.3f  drop=%.3f  width_change=%.4f",
-              fr_f_current_, fr_iteration_, delta_F, drop_ratio, width_change);
+      ROS_INFO("    F=%.1f N  iter=%d  slip_score=%.3f",
+              fr_f_current_, fr_iteration_, slip_score);
     } else {
       // Initialize DOWNLIFT trajectory
       downlift_start_pose_ = cartesian_pose_handle_->getRobotState().O_T_EE_d;
@@ -309,15 +344,16 @@ namespace franka_kitting_controller {
       current_state_.store(GraspState::DOWNLIFT, std::memory_order_relaxed);
       publishStateLabel("DOWNLIFT");
       logStateTransition("DOWNLIFT", "Returning before force increment");
-      ROS_INFO("    %s  distance=%.4f m  duration=%.2f s",
-              load_transfer ? "Drop detected" : "No load transfer",
-              rt_downlift_distance_, rt_downlift_duration_);
+      ROS_INFO("    %s  slip_score=%.3f  distance=%.4f m  duration=%.2f s",
+              load_transferred ? "Slip detected" : "No load transfer",
+              slip_score, rt_downlift_distance_, rt_downlift_duration_);
     }
   }
 
   void KittingStateController::tickDownlift(const ros::Time& time,
                                             double /* tau_ext_norm */,
-                                            double /* wrench_norm */,
+                                            double /* support_force */,
+                                            double /* tangential_force */,
                                             const GripperData& /* gripper_snapshot */) {
     if (downlift_active_.load(std::memory_order_relaxed)) {
       return;  // Trajectory still running
@@ -327,15 +363,16 @@ namespace franka_kitting_controller {
     current_state_.store(GraspState::SETTLING, std::memory_order_relaxed);
     publishStateLabel("SETTLING");
     ROS_INFO("  [STATE]  >>  SETTLING  <<  Post-downlift stabilization (%.2fs)",
-            rt_fr_stabilization_);
+            rt_fr_uplift_hold_ / 2.0);
   }
 
   void KittingStateController::tickSettling(const ros::Time& time,
                                             double /* tau_ext_norm */,
-                                            double /* wrench_norm */,
+                                            double /* support_force */,
+                                            double /* tangential_force */,
                                             const GripperData& /* gripper_snapshot */) {
     double elapsed = (time - fr_phase_start_time_).toSec();
-    if (elapsed < rt_fr_stabilization_) {
+    if (elapsed < (rt_fr_uplift_hold_ / 2.0)) {
       return;  // Still settling
     }
 

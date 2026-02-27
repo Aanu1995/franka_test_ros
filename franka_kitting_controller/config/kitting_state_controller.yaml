@@ -21,10 +21,11 @@ kitting_state_controller:
   uplift_distance: 0.010 # [m] Micro-uplift distance per iteration
   lift_speed: 0.01 # [m/s] Lift speed for both UPLIFT and DOWNLIFT
   uplift_hold: 1.0  # [s] Hold at top; early (0–0.5s) + late (0.5–1.0s) windows
-  stabilization: 0.5 # [s] Post-grasp settle time (also W_pre window for slip baseline)
-  slip_tau_drop: 0.20 # Drop ratio threshold for slip (mu_early−mu_late)/mu_early
-  slip_width_change: 0.001 # [m] Width change threshold for slip
-  load_transfer_min: 1.0 # [N] Minimum load transfer threshold (lighter objects need lower value)
+  slip_drop_thresh: 0.15    # DF_TH: support force drop normalizer (15% = full s_drop score)
+  slip_width_thresh: 0.0005 # [m] W_TH: jaw widening normalizer (0.5mm = full s_motion score)
+  load_transfer_min: 1.0    # [N] Minimum load transfer threshold (lighter objects need lower value)
+  slip_score_thresh: 0.6    # S_TH: fused slip score threshold for declaring slip
+  slip_friction_thresh: 0.5  # U_TH: friction utilization normalizer (u = Ft/Fn)
 
   # Recording / Logger parameters (used by launch file, see kitting_state_controller.launch)
   # Set require_logger: true to enable rosbag recording (launch arg: record:=true)

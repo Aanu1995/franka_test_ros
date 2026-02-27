@@ -29,6 +29,7 @@ namespace franka_kitting_controller {
   constexpr double KittingStateController::kGripperHoldBase;
   constexpr double KittingStateController::kGripperHoldSlope;
   constexpr double KittingStateController::kMaxUpliftDistance;
+  constexpr double KittingStateController::kMinUpliftHold;
   constexpr double KittingStateController::kGraspSettleDelay;
   constexpr double KittingStateController::kGraspTimeout;
 
@@ -199,10 +200,11 @@ namespace franka_kitting_controller {
     node_handle.param("uplift_hold", fr_uplift_hold_, 1.0);
     node_handle.param("grasp_speed", fr_grasp_speed_, 0.02);
     node_handle.param("epsilon", fr_epsilon_, 0.008);
-    node_handle.param("stabilization", fr_stabilization_, 0.5);
-    node_handle.param("slip_tau_drop", fr_slip_tau_drop_, 0.20);
-    node_handle.param("slip_width_change", fr_slip_width_change_, 0.001);
+    node_handle.param("slip_drop_thresh", fr_slip_drop_thresh_, 0.15);
+    node_handle.param("slip_width_thresh", fr_slip_width_thresh_, 0.0005);
     node_handle.param("load_transfer_min", fr_load_transfer_min_, 1.0);
+    node_handle.param("slip_score_thresh", fr_slip_score_thresh_, 0.6);
+    node_handle.param("slip_friction_thresh", fr_slip_friction_thresh_, 0.5);
 
     // Validate force ramp parameters
     if (fr_f_min_ <= 0.0) {
@@ -233,6 +235,11 @@ namespace franka_kitting_controller {
                 fr_lift_speed_);
       return false;
     }
+    if (fr_uplift_hold_ < kMinUpliftHold) {
+      ROS_WARN("KittingStateController: uplift_hold %.2f below min %.2f, clamping",
+              fr_uplift_hold_, kMinUpliftHold);
+      fr_uplift_hold_ = kMinUpliftHold;
+    }
 
     ROS_INFO_STREAM("KittingStateController: Force ramp config"
                     << " | f: min=" << fr_f_min_ << " step=" << fr_f_step_
@@ -240,9 +247,10 @@ namespace franka_kitting_controller {
                     << " | uplift: dist=" << fr_uplift_distance_
                     << " speed=" << fr_lift_speed_ << " hold=" << fr_uplift_hold_
                     << " | grasp: speed=" << fr_grasp_speed_ << " eps=" << fr_epsilon_
-                    << " | stab=" << fr_stabilization_
-                    << " | slip: drop_thresh=" << fr_slip_tau_drop_
-                    << " width_thresh=" << fr_slip_width_change_
+                    << " | slip: DF_TH=" << fr_slip_drop_thresh_
+                    << " W_TH=" << fr_slip_width_thresh_
+                    << " U_TH=" << fr_slip_friction_thresh_
+                    << " S_TH=" << fr_slip_score_thresh_
                     << " load_min=" << fr_load_transfer_min_);
 
     // --- Direct gripper connection via libfranka ---
@@ -397,6 +405,9 @@ namespace franka_kitting_controller {
     fr_grasp_stabilizing_ = false;
     fr_grasping_phase_initialized_ = false;
     accumulated_uplift_ = 0.0;
+    fr_friction_sum_ = 0.0;
+    fr_friction_count_ = 0;
+    fr_friction_max_ = 0.0;
 
     logStateTransition("START", "Controller running");
     if (require_logger_) {
@@ -443,6 +454,9 @@ namespace franka_kitting_controller {
       fr_grasp_cmd_seen_executing_ = false;
       fr_grasp_stabilizing_ = false;
       fr_grasping_phase_initialized_ = false;
+      fr_friction_sum_ = 0.0;
+      fr_friction_count_ = 0;
+      fr_friction_max_ = 0.0;
 
       ROS_INFO("  [BASELINE]  State machine reset for new trial");
 
@@ -484,10 +498,11 @@ namespace franka_kitting_controller {
       rt_fr_uplift_hold_ = staging_fr_uplift_hold_;
       rt_fr_grasp_speed_ = staging_fr_grasp_speed_;
       rt_fr_epsilon_ = staging_fr_epsilon_;
-      rt_fr_stabilization_ = staging_fr_stabilization_;
-      rt_fr_slip_tau_drop_ = staging_fr_slip_tau_drop_;
-      rt_fr_slip_width_change_ = staging_fr_slip_width_change_;
+      rt_fr_slip_drop_thresh_ = staging_fr_slip_drop_thresh_;
+      rt_fr_slip_width_thresh_ = staging_fr_slip_width_thresh_;
       rt_fr_load_transfer_min_ = staging_fr_load_transfer_min_;
+      rt_fr_slip_score_thresh_ = staging_fr_slip_score_thresh_;
+      rt_fr_slip_friction_thresh_ = staging_fr_slip_friction_thresh_;
 
       // Capture EE z-height before force ramp starts
       fr_z_initial_ = cartesian_pose_handle_->getRobotState().O_T_EE_d[14];
@@ -600,6 +615,12 @@ namespace franka_kitting_controller {
       double tau_ext_norm = arrayNorm(robot_state.tau_ext_hat_filtered);
       double wrench_norm = arrayNorm(robot_state.O_F_ext_hat_K);
 
+      // Directional force decomposition: O_F_ext_hat_K = [Fx, Fy, Fz, Tx, Ty, Tz]
+      double support_force = std::abs(robot_state.O_F_ext_hat_K[2]);       // Fn = |Fz|
+      double tangential_force = std::sqrt(
+          robot_state.O_F_ext_hat_K[0] * robot_state.O_F_ext_hat_K[0] +
+          robot_state.O_F_ext_hat_K[1] * robot_state.O_F_ext_hat_K[1]);   // Ft = sqrt(Fx²+Fy²)
+
       std::array<double, 6> ee_velocity{};
       for (size_t row = 0; row < 6; ++row) {
         for (size_t col = 0; col < 7; ++col) {
@@ -618,7 +639,8 @@ namespace franka_kitting_controller {
         if (fr_state == GraspState::GRASPING || fr_state == GraspState::UPLIFT ||
             fr_state == GraspState::EVALUATE || fr_state == GraspState::DOWNLIFT ||
             fr_state == GraspState::SETTLING) {
-          runInternalTransitions(time, tau_ext_norm, wrench_norm, gripper_snapshot);
+          runInternalTransitions(time, tau_ext_norm, support_force, tangential_force,
+                                gripper_snapshot);
         }
       }
 
@@ -637,8 +659,10 @@ namespace franka_kitting_controller {
         } else if (state == GraspState::GRASPING || state == GraspState::UPLIFT ||
                   state == GraspState::EVALUATE || state == GraspState::DOWNLIFT ||
                   state == GraspState::SETTLING) {
-          ROS_INFO("  [SIGNAL]  %s  |  F=%.1f  iter=%d",
-                  stateToString(state), fr_f_current_, fr_iteration_);
+          double u_live = tangential_force / std::max(support_force, 1e-6);
+          ROS_INFO("  [SIGNAL]  %s  |  F=%.1f  iter=%d  Fn=%.2f  Ft=%.2f  u=%.3f",
+                  stateToString(state), fr_f_current_, fr_iteration_,
+                  support_force, tangential_force, u_live);
         }
       }
 
