@@ -123,9 +123,9 @@ namespace franka_kitting_controller {
   }
 
   void KittingStateController::tickGrasping(const ros::Time& time,
-                                            double tau_ext_norm,
+                                            double /* tau_ext_norm */,
                                             double support_force,
-                                            double tangential_force,
+                                            double /* tangential_force */,
                                             const GripperData& gripper_snapshot) {
     // First tick after entering GRASPING: initialize phase timer
     if (!fr_grasping_phase_initialized_) {
@@ -184,10 +184,10 @@ namespace franka_kitting_controller {
 
     ROS_INFO("    Grasp force applied: %.2f N (iteration %d)", fr_f_current_, fr_iteration_);
 
-    // Step 4: Record reference width before UPLIFT
-    fr_width_before_uplift_ = gripper_snapshot.width;
+    // Snapshot gripper width right before uplift — used for retry grasp
+    fr_grasp_width_snapshot_ = gripper_snapshot.width;
 
-    // Step 5: Initialize UPLIFT trajectory
+    // Step 4: Initialize UPLIFT trajectory
     uplift_start_pose_ = cartesian_pose_handle_->getRobotState().O_T_EE_d;
     uplift_z_start_ = uplift_start_pose_[14];
     uplift_elapsed_ = 0.0;
@@ -195,13 +195,13 @@ namespace franka_kitting_controller {
     rt_uplift_duration_ = rt_fr_uplift_distance_ / rt_fr_lift_speed_;
     uplift_active_.store(true, std::memory_order_relaxed);
 
-    // Step 6: Transition to UPLIFT
+    // Step 5: Transition to UPLIFT
     current_state_.store(GraspState::UPLIFT, std::memory_order_relaxed);
     publishStateLabel("UPLIFT");
     logStateTransition("UPLIFT", "Micro-lift starting");
-    ROS_INFO("    iter=%d  F=%.1f N  width_before=%.4f  "
+    ROS_INFO("    iter=%d  F=%.1f N  width=%.4f  "
             "distance=%.4f  duration=%.2f",
-            fr_iteration_, fr_f_current_, fr_width_before_uplift_,
+            fr_iteration_, fr_f_current_, gripper_snapshot.width,
             rt_fr_uplift_distance_, rt_uplift_duration_);
   }
 
@@ -209,7 +209,7 @@ namespace franka_kitting_controller {
                                           double /* tau_ext_norm */,
                                           double /* support_force */,
                                           double /* tangential_force */,
-                                          const GripperData& gripper_snapshot) {
+                                          const GripperData& /* gripper_snapshot */) {
     if (uplift_active_.load(std::memory_order_relaxed)) {
       return;  // Trajectory still running
     }
@@ -219,7 +219,8 @@ namespace franka_kitting_controller {
     fr_early_count_ = 0;
     fr_late_sum_ = 0.0;
     fr_late_count_ = 0;
-    fr_max_width_during_eval_ = gripper_snapshot.width;
+    fr_width_samples_.clear();
+    fr_width_samples_.reserve(static_cast<size_t>(rt_fr_uplift_hold_ * kWidthSamplesPerSec) + 100);
     fr_friction_sum_ = 0.0;
     fr_friction_count_ = 0;
     fr_friction_max_ = 0.0;
@@ -244,10 +245,8 @@ namespace franka_kitting_controller {
     double elapsed = (time - fr_phase_start_time_).toSec();
     double gw = gripper_snapshot.width;
 
-    // Track max gripper width over entire hold
-    if (gw > fr_max_width_during_eval_) {
-      fr_max_width_during_eval_ = gw;
-    }
+    // Collect width samples for P5/P95 percentile computation
+    fr_width_samples_.push_back(gw);
 
     // Track friction utilization over entire hold: u = Ft / max(Fn, eps)
     double u_sample = tangential_force / std::max(support_force, kEpsilon);
@@ -295,7 +294,20 @@ namespace franka_kitting_controller {
     double s_drop = std::max(0.0, std::min(1.0, dF / rt_fr_slip_drop_thresh_));
 
     // --- Step C: Secondary cue — jaw widening (s_motion) ---
-    double dw = fr_max_width_during_eval_ - fr_width_before_uplift_;
+    // dw = P95 - P5 of width over entire hold — robust to transient outliers
+    double p5 = 0.0, p95 = 0.0, dw = 0.0;
+    int n = static_cast<int>(fr_width_samples_.size());
+    if (n >= 20) {
+      int i5  = static_cast<int>(0.05 * (n - 1));
+      int i95 = static_cast<int>(0.95 * (n - 1));
+      std::nth_element(fr_width_samples_.begin(), fr_width_samples_.begin() + i5,
+                       fr_width_samples_.end());
+      p5 = fr_width_samples_[i5];
+      std::nth_element(fr_width_samples_.begin() + i5 + 1, fr_width_samples_.begin() + i95,
+                       fr_width_samples_.end());
+      p95 = fr_width_samples_[i95];
+      dw = p95 - p5;
+    }
     double s_motion = std::max(0.0, std::min(1.0, dw / rt_fr_slip_width_thresh_));
 
     // --- Step D: Optional low-priority cue — friction utilization (s_force) ---
@@ -317,8 +329,8 @@ namespace franka_kitting_controller {
              load_transferred ? "PASSED" : "FAILED");
     ROS_INFO("  [SLIP] s_drop:         %.3f / %.3f  (dF=%.1f%%  DF_TH=%.0f%%)",
              s_drop, rt_fr_slip_drop_thresh_, dF * 100.0, rt_fr_slip_drop_thresh_ * 100.0);
-    ROS_INFO("  [SLIP] s_motion:       %.3f / %.3f  (dw=%.4f m  W_TH=%.4f m)",
-             s_motion, rt_fr_slip_width_thresh_, dw, rt_fr_slip_width_thresh_);
+    ROS_INFO("  [SLIP] s_motion:       %.3f / %.4f  (P95-P5=%.5f m  P5=%.5f  P95=%.5f  W_TH=%.4f m)",
+             s_motion, rt_fr_slip_width_thresh_, dw, p5, p95, rt_fr_slip_width_thresh_);
     ROS_INFO("  [SLIP] s_force:        %.3f / %.3f  (u_hold=%.3f  u_peak=%.3f  U_TH=%.3f)",
              s_force, rt_fr_slip_friction_thresh_, u_hold, u_peak, rt_fr_slip_friction_thresh_);
     ROS_INFO("  [SLIP] slip_score:     %.3f / %.3f  -> %s",
@@ -394,7 +406,7 @@ namespace franka_kitting_controller {
     fr_grasping_phase_initialized_ = true;
     fr_grasp_cmd_seen_executing_ = false;
     fr_grasp_stabilizing_ = false;
-    requestDeferredGrasp(fr_width_before_uplift_, rt_fr_grasp_speed_,
+    requestDeferredGrasp(fr_grasp_width_snapshot_, rt_fr_grasp_speed_,
                         fr_f_current_, rt_fr_epsilon_);
     current_state_.store(GraspState::GRASPING, std::memory_order_relaxed);
     publishStateLabel("GRASPING");

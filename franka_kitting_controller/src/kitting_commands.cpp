@@ -183,8 +183,6 @@ namespace franka_kitting_controller {
       staging_fr_uplift_hold_ = kMinUpliftHold;
     }
 
-    fr_grasp_width_ = width;
-
     // Queue first grasp command at f_min
     GripperCommand gripper_cmd;
     gripper_cmd.type = GripperCommandType::GRASP;

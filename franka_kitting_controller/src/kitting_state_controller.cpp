@@ -30,6 +30,7 @@ namespace franka_kitting_controller {
   constexpr double KittingStateController::kGripperHoldSlope;
   constexpr double KittingStateController::kMaxUpliftDistance;
   constexpr double KittingStateController::kMinUpliftHold;
+  constexpr int    KittingStateController::kWidthSamplesPerSec;
   constexpr double KittingStateController::kGraspSettleDelay;
   constexpr double KittingStateController::kGraspTimeout;
 
@@ -399,8 +400,6 @@ namespace franka_kitting_controller {
     // Reset force ramp state
     fr_f_current_ = 0.0;
     fr_iteration_ = 0;
-    fr_z_initial_ = 0.0;
-    fr_grasp_width_ = 0.0;
     fr_grasp_cmd_seen_executing_ = false;
     fr_grasp_stabilizing_ = false;
     fr_grasping_phase_initialized_ = false;
@@ -408,6 +407,7 @@ namespace franka_kitting_controller {
     fr_friction_sum_ = 0.0;
     fr_friction_count_ = 0;
     fr_friction_max_ = 0.0;
+    fr_width_samples_.clear();
 
     logStateTransition("START", "Controller running");
     if (require_logger_) {
@@ -427,8 +427,7 @@ namespace franka_kitting_controller {
       return;
     }
     // acquire: guarantees visibility of all stores preceding the subscriber's
-    // release-store of state_changed_ (including staging_fr_* parameters, fr_grasp_width_,
-    // and pending_state_).
+    // release-store of state_changed_ (including staging_fr_* parameters and pending_state_).
     GraspState new_state = pending_state_.load(std::memory_order_relaxed);
 
     // Handle BASELINE start: reset all state-machine variables for a fresh grasp cycle.
@@ -504,13 +503,9 @@ namespace franka_kitting_controller {
       rt_fr_slip_score_thresh_ = staging_fr_slip_score_thresh_;
       rt_fr_slip_friction_thresh_ = staging_fr_slip_friction_thresh_;
 
-      // Capture EE z-height before force ramp starts
-      fr_z_initial_ = cartesian_pose_handle_->getRobotState().O_T_EE_d[14];
-
       // Initialize force ramp state
       fr_f_current_ = rt_fr_f_min_;
       fr_iteration_ = 0;
-      rt_fr_grasp_width_ = fr_grasp_width_;
       fr_grasping_phase_initialized_ = false;  // Set on first runInternalTransitions tick
       fr_grasp_cmd_seen_executing_ = false;
       fr_grasp_stabilizing_ = false;
@@ -556,6 +551,7 @@ namespace franka_kitting_controller {
       const std::array<double, 7>& coriolis,
       const std::array<double, 6>& ee_velocity,
       double tau_ext_norm, double wrench_norm,
+      double support_force, double tangential_force,
       const GripperData& gripper_snapshot) {
     kitting_publisher_.msg_.header.stamp = time;
 
@@ -581,6 +577,8 @@ namespace franka_kitting_controller {
               kitting_publisher_.msg_.ee_velocity.begin());
     kitting_publisher_.msg_.tau_ext_norm = tau_ext_norm;
     kitting_publisher_.msg_.wrench_norm = wrench_norm;
+    kitting_publisher_.msg_.support_force = support_force;
+    kitting_publisher_.msg_.tangential_force = tangential_force;
 
     // Gripper signals
     kitting_publisher_.msg_.gripper_width = gripper_snapshot.width;
@@ -678,6 +676,7 @@ namespace franka_kitting_controller {
       if (kitting_publisher_.trylock()) {
         fillKittingStateMsg(time, robot_state, jacobian, gravity, coriolis,
                             ee_velocity, tau_ext_norm, wrench_norm,
+                            support_force, tangential_force,
                             gripper_snapshot);
         kitting_publisher_.unlockAndPublish();
       }

@@ -11,6 +11,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <controller_interface/multi_interface_controller.h>
 #include <hardware_interface/robot_hw.h>
@@ -302,9 +303,6 @@ namespace franka_kitting_controller {
     // --- Force ramp: runtime state (Realtime-thread owned) ---
     double fr_f_current_{0.0};           // Current grasp force [N]
     int fr_iteration_{0};                // Current iteration (0 = first attempt)
-    double fr_z_initial_{0.0};           // EE z-height when force ramp started
-    double fr_grasp_width_{0.0};         // Width for GraspAction (always from contact_width_)
-    double rt_fr_grasp_width_{0.0};      // Realtime-local snapshot of fr_grasp_width_
     ros::Time fr_phase_start_time_;      // Phase timing via timestamps
     bool fr_grasping_phase_initialized_{false};  // First tick of GRASPING has set timer
     bool fr_grasp_cmd_seen_executing_{false};  // Has cmd_executing_ gone true yet?
@@ -319,8 +317,8 @@ namespace franka_kitting_controller {
     int    fr_early_count_{0};            // W_hold_early: sample count
     double fr_late_sum_{0.0};             // W_hold_late: Σ Fn
     int    fr_late_count_{0};             // W_hold_late: sample count
-    double fr_width_before_uplift_{0.0};  // Gripper width before UPLIFT
-    double fr_max_width_during_eval_{0.0}; // Maximum gripper width during EVALUATE hold
+    double fr_grasp_width_snapshot_{0.0}; // Gripper width snapshot taken right before UPLIFT — used for retry grasp
+    std::vector<double> fr_width_samples_;  // Width samples during EVALUATE for P5/P95 (reserved in tickUplift)
     double accumulated_uplift_{0.0};       // Uncorrected uplift from SUCCESS [m]
 
     // Friction utilization accumulators (over W_hold = full EVALUATE window)
@@ -345,6 +343,7 @@ namespace franka_kitting_controller {
     static constexpr double kGripperHoldSlope{0.5};     // [s/(m/s)] Linear slope
     static constexpr double kMaxUpliftDistance{0.02};   // [m] Safety cap on uplift distance
     static constexpr double kMinUpliftHold{0.5};        // [s] Minimum uplift hold (ensures W_pre ≥ 0.25s)
+    static constexpr int kWidthSamplesPerSec{250};        // Width sample rate [Hz] — for reserve sizing
 
     // --- Force ramp internal timing constants ---
     static constexpr double kGraspSettleDelay{0.1};     // [s] Wait for command thread pickup
@@ -397,6 +396,7 @@ namespace franka_kitting_controller {
                             const std::array<double, 7>& coriolis,
                             const std::array<double, 6>& ee_velocity,
                             double tau_ext_norm, double wrench_norm,
+                            double support_force, double tangential_force,
                             const GripperData& gripper_snapshot);
 
     /// Request the read thread to call stop(). Realtime-safe (atomic store only).
