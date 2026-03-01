@@ -196,12 +196,13 @@ Validate grasp robustness under load. **Auto-triggered** by the controller after
 Assess grasp stability at the lifted position. **Auto-triggered** after UPLIFT completes.
 
 - Holds position for `uplift_hold` seconds (default 1.0 s): early window (first half) + late window (second half)
-- Uses `wrench_norm` (Cartesian external wrench) for load-transfer slip detection
-- Two-gate evaluation (see [Slip Detection](#grasp-slip-detection-load-transfer-drop-metric)):
-  - **Gate 1**: Load transfer confirmation — `delta_F > max(3*sigma_pre, load_transfer_min)`
-  - **Gate 2**: Drop ratio + width change thresholds
-- If **secure** (both gates pass): transitions to SUCCESS
-- If **slip** (either gate fails): transitions to SLIP
+- Uses directional force decomposition for slip detection
+- Three-gate AND evaluation (see [Slip Detection](#grasp-slip-detection-directional-force-decomposition--and-gating)):
+  - **Gate 1**: Load transfer confirmation — `deltaF > max(3*sigma_pre, load_transfer_min)`
+  - **Gate 2**: Support drop check — `dF <= slip_drop_thresh`
+  - **Gate 3**: Jaw widening check — `P95-P5 <= slip_width_thresh`
+- If **secure** (all gates pass): transitions to SUCCESS
+- If **slip** (any gate fails): transitions to SLIP
 
 ### SLIP
 
@@ -340,8 +341,7 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
     fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
     fr_uplift_distance: 0.010, fr_lift_speed: 0.01, fr_uplift_hold: 1.0, \
     fr_slip_drop_thresh: 0.15, fr_slip_width_thresh: 0.0005, \
-    fr_load_transfer_min: 1.0, fr_slip_score_thresh: 0.6, \
-    fr_slip_friction_thresh: 0.5}" --once
+    fr_load_transfer_min: 1.0}" --once
 
 # Stop recording
 rostopic pub /kitting_controller/record_control std_msgs/String "data: 'STOP'" --once
@@ -369,8 +369,7 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
     fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
     fr_uplift_distance: 0.010, fr_lift_speed: 0.01, fr_uplift_hold: 1.0, \
     fr_slip_drop_thresh: 0.15, fr_slip_width_thresh: 0.0005, \
-    fr_load_transfer_min: 1.0, fr_slip_score_thresh: 0.6, \
-    fr_slip_friction_thresh: 0.5}" --once
+    fr_load_transfer_min: 1.0}" --once
 ```
 
 ## Gripper Action Servers
@@ -536,13 +535,13 @@ This value is then used for all stall debounce checks during that CLOSING state.
 
 Once CONTACT is declared, it is **latched** — the detector stops evaluating. This prevents oscillation at the contact boundary. A new BASELINE command resets the latch for the next trial.
 
-## Grasp: Slip Detection (Directional Force Decomposition + Slip Score)
+## Grasp: Slip Detection (Directional Force Decomposition + AND-Gating)
 
-After each UPLIFT, the controller evaluates grasp quality using directional force decomposition and a fused slip score. Instead of using `wrench_norm` (the L2 norm of the full 6D wrench), the controller decomposes `O_F_ext_hat_K` into **support force** Fn = |Fz| (along the lift direction) and **tangential force** Ft = sqrt(Fx² + Fy²). This gives physically meaningful signals for kitting operations where slip is primarily gravity-driven.
+After each UPLIFT, the controller evaluates grasp quality using directional force decomposition and rigid AND-gating across three independent boolean gates. Instead of using `wrench_norm` (the L2 norm of the full 6D wrench), the controller decomposes `O_F_ext_hat_K` into **support force** Fn = |Fz| (along the lift direction). This gives physically meaningful signals for kitting operations where slip is primarily gravity-driven.
 
-### Why Fn/Ft Instead of wrench_norm
+### Why Fn Instead of wrench_norm
 
-The previous approach used `wrench_norm = ||[Fx,Fy,Fz,Tx,Ty,Tz]||` — the L2 norm of all 6 wrench components including torques. This mixes all force and torque directions into a single scalar, making it impossible to distinguish gravity-driven slip (Fz decay) from tangential disturbance (Fx,Fy) or torque noise (Tx,Ty,Tz). Kitting operations use a vertical lift, so decomposing into Fn = |Fz| (support along lift direction) and Ft = sqrt(Fx² + Fy²) (tangential) gives physically interpretable signals. Fn directly measures how much of the object's weight the gripper is supporting, while Ft measures lateral disturbance. Torques (Tx,Ty,Tz) are excluded — they add noise without contributing useful slip information for parallel grippers.
+The controller uses `Fn = |Fz|` — the absolute z-component of the external force estimate `O_F_ext_hat_K` — as the slip detection signal instead of `wrench_norm = ||[Fx,Fy,Fz,Tx,Ty,Tz]||`. The wrench norm combines all 6 force and torque components into a single scalar, which makes it impossible to isolate gravity-driven slip from unrelated disturbances. During a vertical lift, an object slipping through the fingers loses support along the z-axis — this shows up directly as a drop in Fn. Using wrench_norm, that same drop would be diluted by Fx, Fy, and torque components (Tx, Ty, Tz) that carry no useful slip information for parallel grippers. By extracting Fn alone, the controller gets a physically interpretable signal that maps directly to "how much of the object's weight is the gripper still supporting?"
 
 ### Time Windows
 
@@ -559,7 +558,6 @@ The slip evaluation uses three time windows across the grasp-lift-hold sequence:
   ├── W_pre [uplift_hold/2]   [lift]         ├── W_hold_early [0, hold/2)
   │   Fn_pre, sigma_pre                      └── W_hold_late  [hold/2, hold)
   │                                               Fn_early, Fn_late
-  │                                           Friction u = Ft/Fn tracked over full hold
 ```
 
 ### Load Transfer Gate (Mandatory)
@@ -578,120 +576,104 @@ The load transfer gate confirms the object is actually supported by the gripper 
 
 The `3 * sigma_pre` threshold adapts to sensor noise. The `load_transfer_min` floor (default 1.0 N, configurable) prevents declaring load transfer from noise alone. Lower this for light objects (e.g., 0.5 N for a ~51 g object).
 
-### s_drop — Support Force Decay (Primary Kitting Cue)
+### Gate 2: Support Drop Check
 
-In kitting operations (horizontal approach, vertical lift), gravity-driven slip manifests as decay in the support force Fn during the hold. If the object slides down between the fingers, the gripper supports less of its weight, so Fn_late < Fn_early. This is the dominant physics signal for vertical kitting operations and is weighted as the primary cue.
+In kitting operations (horizontal approach, vertical lift), gravity-driven slip manifests as a drop in the support force Fn during the hold. If the object slides down between the fingers, the gripper supports less of its weight, so Fn_late < Fn_early. This is the dominant physics signal for vertical kitting operations.
 
 ```
   dF = (Fn_early - Fn_late) / max(Fn_early, 1e-6)    # relative decay [0,1]
-  s_drop = clamp(dF / slip_drop_thresh, 0, 1)         # normalized to [0,1]
+
+  drop_ok = (dF <= slip_drop_thresh)                   # binary pass/fail
 ```
 
-A `dF` of 15% (the default threshold) produces `s_drop = 1.0`. Smaller drops produce proportionally smaller scores.
+A `dF` exceeding `slip_drop_thresh` (default 15%) means the support force dropped too much during the hold — the object is slipping.
 
-### s_motion — Jaw Widening (Secondary Confirmation)
+### Gate 3: Jaw Widening
 
-Gripper width increase during hold is a direct mechanical indicator of slip — if the object moves, it pushes the fingers apart. This is a secondary confirmation because: (a) it is lower bandwidth than force (gripper width updates slower than the 1 kHz force signal), (b) small slips may not produce measurable width change, but (c) when present it is a strong confirmation signal. Together with s_drop, it eliminates false positives where force changes come from arm dynamics rather than actual slip.
+Gripper width increase during hold is a direct mechanical indicator of slip — if the object moves, it pushes the fingers apart. This is a secondary confirmation because: (a) it is lower bandwidth than force (gripper width updates slower than the 1 kHz force signal), (b) small slips may not produce measurable width change, but (c) when present it is a strong confirmation signal. Together with the support drop gate, it eliminates false positives where force changes come from arm dynamics rather than actual slip.
 
 ```
   dw = P95(width) - P5(width)      # percentile spread over entire hold
-  s_motion = clamp(dw / slip_width_thresh, 0, 1)      # normalized to [0,1]
+
+  width_ok = (dw <= slip_width_thresh)                 # binary pass/fail
 ```
 
-### s_force — Friction Utilization (Optional, Lowest Priority)
+### AND-Gating Verdict
 
-Friction utilization u = Ft/Fn measures what fraction of the normal support force is being consumed by tangential demand. High u means the contact is near the friction cone boundary and close to sliding. This is useful for lateral disturbances that support drop alone might miss. It is the lowest priority cue because in pure vertical kitting the tangential forces are typically small. It is included for robustness against non-ideal conditions (object rotation during lift, asymmetric grasps).
-
-```
-  u_hold = mean(Ft/Fn over hold)
-  u_peak = max(Ft/Fn over hold)
-  s_force = max(clamp(u_hold / slip_friction_thresh, 0, 1),
-                clamp(u_peak / (slip_friction_thresh * 1.1), 0, 1))
-  s_force = max(s_force, s_drop)     # combine with support drop
-```
-
-### Slip Score Fusion (Soft-OR)
-
-The old approach used rigid AND-gating: `secure = Gate1 AND Gate2 AND Gate3`, which is fragile — a noisy width signal could trigger false slip even when forces are clean. The new approach uses a soft-OR fusion where either strong motion OR strong force decay can independently indicate slip, and both together produce higher confidence. The continuous [0,1] score also enables post-hoc analysis and threshold tuning.
+All three gates must pass for the grasp to be declared secure. If any gate fails, the grasp is declared slipping and the controller transitions to SLIP → DOWNLIFT for a retry with increased force.
 
 ```
-  slip_score = 1 - (1 - s_motion) * (1 - max(s_drop, s_force))
+  secure = load_transferred AND drop_ok AND width_ok
 
-  is_slipping = !load_transferred OR (slip_score > slip_score_thresh)
+  is_slipping = !secure
 ```
+
+This rigid AND-gating approach ensures that: (1) the object was actually picked up (Gate 1), (2) the support force has not dropped (Gate 2), and (3) the jaw width is stable (Gate 3). Each gate addresses a distinct failure mode, and all three must be satisfied simultaneously.
 
 ### Slip Detection Parameters
 
 | Parameter               | Default  | Description                                                        |
 | ----------------------- | -------- | ------------------------------------------------------------------ |
-| `slip_drop_thresh`      | 0.15     | DF_TH: support force drop normalizer (0.15 = 15% drop → s_drop=1) |
-| `slip_width_thresh`     | 0.0005 m | W_TH: jaw widening (P95-P5) normalizer (0.5 mm spread → s_motion=1)|
-| `slip_friction_thresh`  | 0.5      | U_TH: friction utilization normalizer (u=0.5 → s_force=1)         |
-| `slip_score_thresh`     | 0.6      | S_TH: fused slip score threshold for declaring slip                |
+| `slip_drop_thresh`      | 0.15     | DF_TH: maximum allowed relative support force drop (15% = fail)    |
+| `slip_width_thresh`     | 0.0005 m | W_TH: maximum allowed jaw widening P95-P5 [m] (0.5 mm = fail)     |
 | `load_transfer_min`     | 1.0 N    | Floor for load transfer threshold (lower for light objects)        |
 
 ### Example Log Output
 
-Secure grasp (load transfer confirmed, low slip score):
+Secure grasp (all three gates pass):
 
 ```
-  [SLIP] Load Transfer:  deltaF=2.624 N  threshold=1.000 N  (Fn_pre=3.210  sigma=0.142  Fn_early=5.834)  PASSED
-  [SLIP] s_drop:         0.139 / 0.150  (dF=2.1%  DF_TH=15%)
-  [SLIP] s_motion:       0.400 / 0.0005  (P95-P5=0.00020 m  P5=0.03410  P95=0.03430  W_TH=0.0005 m)
-  [SLIP] s_force:        0.139 / 0.500  (u_hold=0.045  u_peak=0.062  U_TH=0.500)
-  [SLIP] slip_score:     0.483 / 0.600  -> SECURE
+  [SLIP] Gate 1 — Load Transfer:  deltaF=2.624 N  threshold=1.000 N  (Fn_pre=3.210  sigma=0.142  Fn_early=5.834)  PASS
+  [SLIP] Gate 2 — Support Drop:    dF=2.1%  threshold=15%  PASS
+  [SLIP] Gate 3 — Jaw Widening:   P95-P5=0.00020 m  threshold=0.0005 m  (P5=0.03410  P95=0.03430)  PASS
+  [SLIP] Verdict: SECURE
 ```
 
-- `deltaF=2.624` > `max(3*0.142, 1.0)` = 1.0 → load transfer confirmed
-- All sub-scores below 1.0, slip_score=0.483 < 0.6
+- Gate 1: `deltaF=2.624` > `max(3*0.142, 1.0)` = 1.0 → PASS
+- Gate 2: `dF=2.1%` ≤ 15% → PASS
+- Gate 3: `P95-P5=0.20 mm` ≤ 0.50 mm → PASS
 - **Verdict: SECURE → SUCCESS**
 
 Slip detected — load transferred but object slipped during hold:
 
 ```
-  [SLIP] Load Transfer:  deltaF=2.740 N  threshold=1.000 N  (Fn_pre=3.180  sigma=0.138  Fn_early=5.920)  PASSED
-  [SLIP] s_drop:         1.000 / 0.150  (dF=23.8%  DF_TH=15%)
-  [SLIP] s_motion:       1.000 / 0.0005  (P95-P5=0.00140 m  P5=0.03400  P95=0.03540  W_TH=0.0005 m)
-  [SLIP] s_force:        1.000 / 0.500  (u_hold=0.312  u_peak=0.410  U_TH=0.500)
-  [SLIP] slip_score:     1.000 / 0.600  -> SLIPPING
+  [SLIP] Gate 1 — Load Transfer:  deltaF=2.740 N  threshold=1.000 N  (Fn_pre=3.180  sigma=0.138  Fn_early=5.920)  PASS
+  [SLIP] Gate 2 — Support Drop:    dF=23.8%  threshold=15%  FAIL
+  [SLIP] Gate 3 — Jaw Widening:   P95-P5=0.00140 m  threshold=0.0005 m  (P5=0.03400  P95=0.03540)  FAIL
+  [SLIP] Verdict: SLIPPING
 ```
 
-- Load transfer confirmed, but s_drop saturated at 1.0 (23.8% drop >> 15% threshold)
-- s_motion also saturated (P95-P5 = 1.4 mm >> 0.5 mm threshold)
+- Gate 1: PASS (load transferred)
+- Gate 2: FAIL (23.8% decay >> 15% threshold)
+- Gate 3: FAIL (P95-P5 = 1.4 mm >> 0.5 mm threshold)
 - **Verdict: SLIPPING → SLIP → DOWNLIFT → retry with more force**
 
 Failed load transfer (object not lifted):
 
 ```
-  [SLIP] Load Transfer:  deltaF=0.142 N  threshold=1.000 N  (Fn_pre=3.210  sigma=0.142  Fn_early=3.352)  FAILED
-  [SLIP] s_drop:         0.107 / 0.150  (dF=1.6%  DF_TH=15%)
-  [SLIP] s_motion:       0.200 / 0.0005  (P95-P5=0.00010 m  P5=0.03415  P95=0.03425  W_TH=0.0005 m)
-  [SLIP] s_force:        0.107 / 0.500  (u_hold=0.021  u_peak=0.035  U_TH=0.500)
-  [SLIP] slip_score:     0.286 / 0.600  -> SLIPPING
+  [SLIP] Gate 1 — Load Transfer:  deltaF=0.142 N  threshold=1.000 N  (Fn_pre=3.210  sigma=0.142  Fn_early=3.352)  FAIL
+  [SLIP] Gate 2 — Support Drop:    dF=1.6%  threshold=15%  PASS
+  [SLIP] Gate 3 — Jaw Widening:   P95-P5=0.00010 m  threshold=0.0005 m  (P5=0.03415  P95=0.03425)  PASS
+  [SLIP] Verdict: SLIPPING
 ```
 
-- `deltaF=0.142` < 1.0 → load transfer FAILED (object weight never appeared on gripper)
-- Sub-scores are low, but gate failure alone triggers SLIPPING
+- Gate 1: FAIL (`deltaF=0.142` < 1.0 — object weight never appeared on gripper)
+- Gates 2 & 3 pass, but Gate 1 failure alone triggers SLIPPING
 - **Verdict: SLIPPING → SLIP → DOWNLIFT → retry with more force**
 
 ### How to Read the Log
 
 | Field | What it tells you |
 | ----- | ----------------- |
-| `deltaF` | How much support force increased from lift; must exceed `max(3*sigma, load_transfer_min)` |
-| `Load Transfer` | PASSED/FAILED — did the object weight actually transfer to the gripper? |
-| `s_drop` | Support force decay sub-score [0,1]; shows dF% vs DF_TH%. Primary kitting cue |
-| `s_motion` | Jaw widening sub-score [0,1]; shows P95-P5 spread vs W_TH. Secondary confirmation |
-| `s_force` | Friction utilization sub-score [0,1]; shows u_hold and u_peak vs U_TH. Lowest priority |
-| `slip_score` | Fused score [0,1]; soft-OR of s_motion and max(s_drop, s_force). Compared to S_TH |
-| `SECURE/SLIPPING` | Final verdict — SECURE if load transferred AND slip_score ≤ S_TH |
+| `Gate 1 — Load Transfer` | PASS/FAIL — did the object weight actually transfer to the gripper? deltaF must exceed `max(3*sigma, load_transfer_min)` |
+| `Gate 2 — Support Drop` | PASS/FAIL — has support force dropped during hold? dF% must be ≤ slip_drop_thresh |
+| `Gate 3 — Jaw Widening` | PASS/FAIL — are the jaws stable during hold? P95-P5 must be ≤ slip_width_thresh |
+| `Verdict` | SECURE (all gates pass) or SLIPPING (any gate fails) |
 
 **Quick diagnostic guide:**
-- `Load Transfer: FAILED` → object not gripped or too light; increase force or lower `load_transfer_min`
-- `s_drop` high → support force decaying during hold (object sliding down); increase force
-- `s_motion` high → gripper opening during hold (fingers pushed apart); increase force
-- `s_force` high → high tangential demand (near friction cone boundary); increase force or check grip alignment
-- `slip_score` just above `S_TH` → borderline; consider tuning thresholds or increasing force slightly
+- `Gate 1: FAIL` → object not gripped or too light; increase force or lower `load_transfer_min`
+- `Gate 2: FAIL` → support force dropped during hold (object sliding down); increase force
+- `Gate 3: FAIL` → gripper opening during hold (fingers pushed apart); increase force
 
 ## Grasp: UPLIFT / DOWNLIFT Trajectory Mathematics
 
@@ -789,11 +771,9 @@ The **velocity profile** (first derivative) is:
 | `uplift_distance`          | double | `0.010` | Micro-uplift distance per iteration [m] (max 0.02)                  |
 | `lift_speed`               | double | `0.01`  | Lift speed for UPLIFT and DOWNLIFT [m/s]                            |
 | `uplift_hold`              | double | `1.0`   | Hold time: early (first half) + late (second half) windows [s]. Also determines W_pre = uplift_hold/2 and settling time = uplift_hold/2 |
-| `slip_drop_thresh`         | double | `0.15`   | DF_TH: support force drop normalizer (15% = full s_drop score)     |
-| `slip_width_thresh`        | double | `0.0005` | W_TH: jaw widening normalizer [m] (P95-P5 ≥ 0.5 mm → s_motion=1)  |
+| `slip_drop_thresh`         | double | `0.15`   | DF_TH: max allowed relative support force drop (15% = fail)         |
+| `slip_width_thresh`        | double | `0.0005` | W_TH: max allowed jaw widening P95-P5 [m] (0.5 mm = fail)          |
 | `load_transfer_min`        | double | `1.0`    | Floor for load transfer threshold [N] (lower for light objects)     |
-| `slip_score_thresh`        | double | `0.6`    | S_TH: fused slip score threshold for declaring slip                 |
-| `slip_friction_thresh`     | double | `0.5`    | U_TH: friction utilization normalizer (u = Ft/Fn)                   |
 | `require_logger`           | bool   | `false` | Gate commands behind logger readiness (set true when `record:=true`)|
 
 Gripper and GRASPING parameters are **defaults**. They can be overridden per-command by setting non-zero values in the `KittingGripperCommand` message published on `/kitting_controller/state_cmd`.
@@ -895,11 +875,9 @@ Per-object command published on `/kitting_controller/state_cmd`. Any float64 par
 | `fr_uplift_hold`       | float64 | Hold time at top for evaluation [s] (0 = use default 1.0)                          |
 | `fr_grasp_speed`       | float64 | Gripper speed for ramp GraspAction [m/s] (0 = use default 0.02)                    |
 | `fr_epsilon`           | float64 | Epsilon for ramp GraspAction, inner and outer [m] (0 = use default 0.008)          |
-| `fr_slip_drop_thresh`     | float64 | DF_TH: support drop normalizer for s_drop (0 = use default 0.15)                |
-| `fr_slip_width_thresh`    | float64 | W_TH: jaw widening (P95-P5) normalizer for s_motion [m] (0 = use default 0.0005)|
+| `fr_slip_drop_thresh`     | float64 | DF_TH: max allowed relative support force drop (0 = use default 0.15)           |
+| `fr_slip_width_thresh`    | float64 | W_TH: max allowed jaw widening P95-P5 [m] (0 = use default 0.0005)             |
 | `fr_load_transfer_min`    | float64 | Floor for load transfer threshold [N] (0 = use default 1.0)                     |
-| `fr_slip_score_thresh`    | float64 | S_TH: fused slip score threshold (0 = use default 0.6)                          |
-| `fr_slip_friction_thresh` | float64 | U_TH: friction utilization normalizer (0 = use default 0.5)                     |
 | `auto_delay`           | float64 | Delay between auto transitions [s] (0 = default 5.0). Only used by `AUTO` command  |
 
 Only the parameters relevant to the command are used:

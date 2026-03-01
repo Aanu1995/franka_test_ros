@@ -210,8 +210,6 @@ namespace franka_kitting_controller {
     node_handle.param("slip_drop_thresh", fr_slip_drop_thresh_, 0.15);
     node_handle.param("slip_width_thresh", fr_slip_width_thresh_, 0.0005);
     node_handle.param("load_transfer_min", fr_load_transfer_min_, 1.0);
-    node_handle.param("slip_score_thresh", fr_slip_score_thresh_, 0.6);
-    node_handle.param("slip_friction_thresh", fr_slip_friction_thresh_, 0.5);
 
     // Validate force ramp parameters
     if (fr_f_min_ <= 0.0) {
@@ -256,8 +254,6 @@ namespace franka_kitting_controller {
                     << " | grasp: speed=" << fr_grasp_speed_ << " eps=" << fr_epsilon_
                     << " | slip: DF_TH=" << fr_slip_drop_thresh_
                     << " W_TH=" << fr_slip_width_thresh_
-                    << " U_TH=" << fr_slip_friction_thresh_
-                    << " S_TH=" << fr_slip_score_thresh_
                     << " load_min=" << fr_load_transfer_min_);
 
     // --- Direct gripper connection via libfranka ---
@@ -426,9 +422,6 @@ namespace franka_kitting_controller {
     fr_grasp_cmd_seen_executing_ = false;
     fr_grasp_stabilizing_ = false;
     fr_grasping_phase_initialized_ = false;
-    fr_friction_sum_ = 0.0;
-    fr_friction_count_ = 0;
-    fr_friction_max_ = 0.0;
     fr_width_samples_.clear();
   }
 
@@ -503,8 +496,6 @@ namespace franka_kitting_controller {
       rt_fr_slip_drop_thresh_ = staging_fr_slip_drop_thresh_;
       rt_fr_slip_width_thresh_ = staging_fr_slip_width_thresh_;
       rt_fr_load_transfer_min_ = staging_fr_load_transfer_min_;
-      rt_fr_slip_score_thresh_ = staging_fr_slip_score_thresh_;
-      rt_fr_slip_friction_thresh_ = staging_fr_slip_friction_thresh_;
 
       // Initialize force ramp state
       fr_f_current_ = rt_fr_f_min_;
@@ -640,7 +631,7 @@ namespace franka_kitting_controller {
       {
         GraspState fr_state = current_state_.load(std::memory_order_relaxed);
         if (isForceRampPhase(fr_state)) {
-          runInternalTransitions(time, tau_ext_norm, support_force, tangential_force,
+          runInternalTransitions(time, tau_ext_norm, support_force,
                                 gripper_snapshot);
         }
       }
@@ -658,10 +649,9 @@ namespace franka_kitting_controller {
                   gripper_snapshot.width_dot,
                   grip_stall ? "STALL" : "moving");
         } else if (isForceRampPhase(state)) {
-          double u_live = tangential_force / std::max(support_force, 1e-6);
-          ROS_INFO("  [SIGNAL]  %s  |  F=%.1f  iter=%d  Fn=%.2f  Ft=%.2f  u=%.3f",
+          ROS_INFO("  [SIGNAL]  %s  |  F=%.1f  iter=%d  Fn=%.2f",
                   stateToString(state), fr_f_current_, fr_iteration_,
-                  support_force, tangential_force, u_live);
+                  support_force);
         }
       }
 

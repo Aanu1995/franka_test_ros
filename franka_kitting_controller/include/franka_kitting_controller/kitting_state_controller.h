@@ -268,8 +268,6 @@ namespace franka_kitting_controller {
     double fr_slip_drop_thresh_{0.15};       // DF_TH: support drop normalizer for s_drop
     double fr_slip_width_thresh_{0.0005};    // [m] W_TH: jaw widening normalizer for s_motion
     double fr_load_transfer_min_{1.0};       // [N] Min floor for load transfer threshold
-    double fr_slip_score_thresh_{0.6};       // S_TH: fused slip score decision threshold
-    double fr_slip_friction_thresh_{0.5};    // U_TH: friction utilization normalizer
 
     // --- Force ramp: Realtime-local copies of resolved per-command parameters ---
     // Snapshotted in applyPendingStateTransition() when entering GRASPING.
@@ -285,8 +283,6 @@ namespace franka_kitting_controller {
     double rt_fr_slip_drop_thresh_{0.15};
     double rt_fr_slip_width_thresh_{0.0005};
     double rt_fr_load_transfer_min_{1.0};
-    double rt_fr_slip_score_thresh_{0.6};
-    double rt_fr_slip_friction_thresh_{0.5};
 
     // --- Force ramp: staging variables (subscriber → realtime via state_changed_) ---
     // Written by stateCmdCallback() with resolved per-command values, before release-store
@@ -302,8 +298,6 @@ namespace franka_kitting_controller {
     double staging_fr_slip_drop_thresh_{0.15};
     double staging_fr_slip_width_thresh_{0.0005};
     double staging_fr_load_transfer_min_{1.0};
-    double staging_fr_slip_score_thresh_{0.6};
-    double staging_fr_slip_friction_thresh_{0.5};
 
     // --- Force ramp: runtime state (Realtime-thread owned) ---
     double fr_f_current_{0.0};           // Current grasp force [N]
@@ -325,11 +319,6 @@ namespace franka_kitting_controller {
     double fr_grasp_width_snapshot_{0.0}; // Gripper width snapshot taken right before UPLIFT — used for retry grasp
     std::vector<double> fr_width_samples_;  // Width samples during EVALUATE for P5/P95 (reserved in tickUplift)
     double accumulated_uplift_{0.0};       // Uncorrected uplift from SUCCESS [m]
-
-    // Friction utilization accumulators (over W_hold = full EVALUATE window)
-    double fr_friction_sum_{0.0};         // W_hold: Σ u (friction utilization Ft/Fn)
-    int    fr_friction_count_{0};         // W_hold: sample count
-    double fr_friction_max_{0.0};         // W_hold: max(u) peak
 
     // --- Deferred grasp command (realtime → read thread → command thread) ---
     // Realtime thread requests a grasp command via this mechanism (can't call queueGripperCommand
@@ -386,7 +375,7 @@ namespace franka_kitting_controller {
     /// Called at 250Hz from update(). Drives all internal state transitions.
     void runInternalTransitions(const ros::Time& time,
                                 double tau_ext_norm,
-                                double support_force, double tangential_force,
+                                double support_force,
                                 const GripperData& gripper_snapshot);
 
     /// Reset force ramp runtime state for a fresh grasp cycle. Realtime-safe.
@@ -494,22 +483,22 @@ namespace franka_kitting_controller {
 
     // --- runInternalTransitions decomposition ---
     void tickGrasping(const ros::Time& time, double tau_ext_norm,
-                      double support_force, double tangential_force,
+                      double support_force,
                       const GripperData& gripper_snapshot);
     void tickUplift(const ros::Time& time, double tau_ext_norm,
-                    double support_force, double tangential_force,
+                    double support_force,
                     const GripperData& gripper_snapshot);
     void tickEvaluate(const ros::Time& time, double tau_ext_norm,
-                      double support_force, double tangential_force,
+                      double support_force,
                       const GripperData& gripper_snapshot);
     void tickSlip(const ros::Time& time, double tau_ext_norm,
-                  double support_force, double tangential_force,
+                  double support_force,
                   const GripperData& gripper_snapshot);
     void tickDownlift(const ros::Time& time, double tau_ext_norm,
-                      double support_force, double tangential_force,
+                      double support_force,
                       const GripperData& gripper_snapshot);
     void tickSettling(const ros::Time& time, double tau_ext_norm,
-                      double support_force, double tangential_force,
+                      double support_force,
                       const GripperData& gripper_snapshot);
   };
 

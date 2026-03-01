@@ -171,8 +171,6 @@ namespace franka_kitting_controller {
     staging_fr_slip_drop_thresh_     = resolveParam(msg->fr_slip_drop_thresh, fr_slip_drop_thresh_);
     staging_fr_slip_width_thresh_    = resolveParam(msg->fr_slip_width_thresh, fr_slip_width_thresh_);
     staging_fr_load_transfer_min_    = resolveParam(msg->fr_load_transfer_min, fr_load_transfer_min_);
-    staging_fr_slip_score_thresh_    = resolveParam(msg->fr_slip_score_thresh, fr_slip_score_thresh_);
-    staging_fr_slip_friction_thresh_ = resolveParam(msg->fr_slip_friction_thresh, fr_slip_friction_thresh_);
 
     if (staging_fr_uplift_distance_ > kMaxUpliftDistance) {
       ROS_WARN("KittingStateController: fr_uplift_distance %.4f exceeds max %.4f, clamping",
@@ -208,9 +206,8 @@ namespace franka_kitting_controller {
             staging_fr_uplift_distance_, staging_fr_lift_speed_, staging_fr_uplift_hold_);
     ROS_INFO("    grasp: speed=%.4f m/s  eps=%.4f m",
             staging_fr_grasp_speed_, staging_fr_epsilon_);
-    ROS_INFO("    slip: DF_TH=%.3f  W_TH=%.4f m  U_TH=%.3f  S_TH=%.3f  load_min=%.2f N",
+    ROS_INFO("    slip: DF_TH=%.3f  W_TH=%.4f m  load_min=%.2f N",
             staging_fr_slip_drop_thresh_, staging_fr_slip_width_thresh_,
-            staging_fr_slip_friction_thresh_, staging_fr_slip_score_thresh_,
             staging_fr_load_transfer_min_);
   }
 
@@ -282,14 +279,12 @@ namespace franka_kitting_controller {
     ROS_INFO("KittingStateController: AUTO -> forwarding to GRASPING"
             " (f_min=%.1f, f_max=%.1f, f_step=%.1f, uplift_dist=%.4f,"
             " uplift_hold=%.2f, lift_speed=%.4f, grasp_speed=%.4f,"
-            " eps=%.4f, DF_TH=%.3f, W_TH=%.4f,"
-            " U_TH=%.3f, S_TH=%.3f, load_min=%.2f)",
+            " eps=%.4f, DF_TH=%.3f, W_TH=%.4f, load_min=%.2f)",
             auto_cmd_.f_min, auto_cmd_.f_max, auto_cmd_.f_step,
             auto_cmd_.fr_uplift_distance, auto_cmd_.fr_uplift_hold,
             auto_cmd_.fr_lift_speed, auto_cmd_.fr_grasp_speed,
             auto_cmd_.fr_epsilon,
             auto_cmd_.fr_slip_drop_thresh, auto_cmd_.fr_slip_width_thresh,
-            auto_cmd_.fr_slip_friction_thresh, auto_cmd_.fr_slip_score_thresh,
             auto_cmd_.fr_load_transfer_min);
     handleGraspingCmd(msg);
     auto_mode_ = false;

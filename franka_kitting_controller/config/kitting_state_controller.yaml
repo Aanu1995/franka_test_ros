@@ -11,7 +11,7 @@ kitting_state_controller:
 
   # Grasping parameters (overridable per-command via KittingGripperCommand)
   # After GRASPING command, controller runs: GRASPING -> UPLIFT -> EVALUATE -> SUCCESS
-  # On slip: DOWNLIFT -> SETTLING -> GRASPING (retry with F += f_step)
+  # On slip: SLIP -> DOWNLIFT -> SETTLING -> GRASPING (retry with F += f_step)
   # grasp_width is always the contact_width captured at CONTACT (not configurable)
   grasp_speed: 0.02 # [m/s] Gripper speed for GraspAction
   epsilon: 0.008 # [m] Epsilon for GraspAction (same for inner/outer)
@@ -24,8 +24,6 @@ kitting_state_controller:
   slip_drop_thresh: 0.15    # DF_TH: support force drop normalizer (15% = full s_drop score)
   slip_width_thresh: 0.0005 # [m] W_TH: jaw widening normalizer (0.5mm = full s_motion score)
   load_transfer_min: 1.0    # [N] Minimum load transfer threshold (lighter objects need lower value)
-  slip_score_thresh: 0.6    # S_TH: fused slip score threshold for declaring slip
-  slip_friction_thresh: 0.5  # U_TH: friction utilization normalizer (u = Ft/Fn)
 
   # Recording / Logger parameters (used by launch file, see kitting_state_controller.launch)
   # Set require_logger: true to enable rosbag recording (launch arg: record:=true)

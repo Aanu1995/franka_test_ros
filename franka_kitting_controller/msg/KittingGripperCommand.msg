@@ -50,8 +50,6 @@ float64 fr_epsilon           # [m]   Epsilon for ramp grasps, same for inner/out
 float64 fr_slip_drop_thresh     # DF_TH: support drop normalizer for s_drop (0 = use default 0.15)
 float64 fr_slip_width_thresh    # [m] W_TH: jaw widening normalizer for s_motion (0 = use default 0.0005)
 float64 fr_load_transfer_min    # [N] Min load transfer threshold floor (0 = use default 1.0)
-float64 fr_slip_score_thresh    # S_TH: fused slip score threshold (0 = use default 0.6)
-float64 fr_slip_friction_thresh # U_TH: friction utilization normalizer (0 = use default 0.5)
 
 # --- AUTO parameters (used when command == "AUTO") ---
 # AUTO runs the full sequence: BASELINE → CLOSING → GRASPING automatically.
