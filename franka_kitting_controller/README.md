@@ -157,7 +157,7 @@ Observe approach dynamics before contact. Published **automatically** by the con
 Contact detected — gripper decelerating. Published **automatically** by the controller on contact detection.
 
 - Fn drops below baseline by more than `force_drop_thresh` (default 0.3 N), sustained for `force_drop_debounce_time` (default 0.05 s) (see [Force-Drop Contact Detection](#force-drop-contact-detection))
-- `contact_width` is saved immediately at contact detection — used as the grasp width in GRASPING
+- `contact_width` is saved when the gripper has physically stopped (CONTACT) — used as the grasp width in GRASPING
 - `franka::Gripper::stop()` is requested via the read thread to halt the motor
 - Data recorded during this state captures the gripper deceleration dynamics
 - Transitions to **CONTACT** when the gripper has physically stopped (`gripper_stopped_` flag)
@@ -436,7 +436,7 @@ Detects contact by monitoring the support force (Fn = |Fz|) during CLOSING. When
 1. **Baseline collection**: During BASELINE state (after any accumulated-uplift correction completes), collect the first 50 samples of Fn (0.2 s at 250 Hz) and compute the mean as `Fn_baseline`. This captures the at-rest support force before any gripper motion.
 2. **Drop detection**: Check if `Fn_baseline - Fn > force_drop_thresh` (default 0.3 N) using the current Fn reading each tick.
 3. **Debounce**: The drop condition must persist for `force_drop_debounce_time` (default 0.05 s) before triggering contact.
-4. **On trigger**: Sets `contact_latched_`, stores `contact_width_`, transitions to `CONTACT_CONFIRMED`, calls `requestGripperStop()`.
+4. **On trigger**: Sets `contact_latched_`, transitions to `CONTACT_CONFIRMED`, calls `requestGripperStop()`. `contact_width_` is captured later when the gripper has physically stopped (CONTACT).
 
 #### Symbols
 
@@ -451,9 +451,9 @@ Detects contact by monitoring the support force (Fn = |Fz|) during CLOSING. When
 
 When contact is detected, the controller stops the gripper and transitions through two contact states:
 
-1. **Contact detected (RT thread)**: Sets `contact_latched_`, stores `contact_width_`, sets `stop_requested_`, and transitions to **CONTACT_CONFIRMED** immediately.
+1. **Contact detected (RT thread)**: Sets `contact_latched_`, sets `stop_requested_`, and transitions to **CONTACT_CONFIRMED** immediately.
 2. **Read thread executes stop**: Checks `stop_requested_` after each `readOnce()`, calls `franka::Gripper::stop()` to physically halt the motor, then sets `gripper_stopped_` to signal the RT thread.
-3. **Deferred transition (RT thread)**: On the next tick, sees `contact_latched_ && CONTACT_CONFIRMED && gripper_stopped_` and transitions to **CONTACT**.
+3. **Deferred transition (RT thread)**: On the next tick, sees `contact_latched_ && CONTACT_CONFIRMED && gripper_stopped_` and transitions to **CONTACT**. `contact_width_` is captured from the current gripper width at this point.
 4. **One-shot guard**: `gripper_stop_sent_` flag prevents duplicate stop requests; `contact_latched_` prevents re-detection.
 
 The atomic stores in `update()` are single-word writes (nanoseconds), fully RT-safe. The actual `stop()` call executes in the non-RT read thread. The state transition is deferred by ~20–30 ms (one gripper firmware update period) to ensure the gripper has physically stopped before CONTACT data is recorded.
