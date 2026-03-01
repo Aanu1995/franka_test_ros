@@ -41,6 +41,14 @@ namespace franka_kitting_controller {
 
     if ((state == GraspState::CLOSING_COMMAND || state == GraspState::CLOSING) &&
         !contact_latched_) {
+      // First-tick hold: ensure CLOSING_COMMAND label is published and at least one
+      // kitting_state_data sample captures it before transitioning to CLOSING.
+      // Without this, the label can be overwritten by CLOSING on the same 250Hz tick.
+      if (closing_command_entered_) {
+        closing_command_entered_ = false;
+        return;
+      }
+
       // Track when the gripper move command starts executing.
       // Stall detection is deferred until the move is confirmed running to prevent
       // false contacts during the pre-movement window (gripper stationary, velocity ≈ 0,

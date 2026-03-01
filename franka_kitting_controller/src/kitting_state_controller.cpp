@@ -478,6 +478,8 @@ namespace franka_kitting_controller {
       gripper_stop_sent_.store(false, std::memory_order_relaxed);
       gripper_stopped_.store(false, std::memory_order_relaxed);
       closing_cmd_seen_executing_ = false;
+      closing_command_entered_ = true;
+      publishStateLabel("CLOSING_COMMAND");
       ROS_INFO("  [CLOSING_COMMAND]  T_hold_gripper=%.3fs (from speed=%.4f m/s)",
               rt_T_hold_gripper_, rt_closing_v_cmd_);
     }

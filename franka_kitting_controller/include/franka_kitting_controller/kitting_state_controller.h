@@ -232,6 +232,7 @@ namespace franka_kitting_controller {
     double rt_closing_v_cmd_{0.05};  // Realtime-local copy
     double rt_T_hold_gripper_{0.35}; // Computed from rt_closing_v_cmd_ when CLOSING starts
     bool closing_cmd_seen_executing_{false};  ///< True once move() seen running during CLOSING
+    bool closing_command_entered_{false};     ///< First-tick flag: ensures CLOSING_COMMAND label is published before transition
 
     // Slow-rate logger for contact signal monitoring (2 Hz — readable in terminal)
     franka_hw::TriggerRate signal_log_trigger_{2.0};

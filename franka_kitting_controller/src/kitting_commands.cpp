@@ -145,7 +145,8 @@ namespace franka_kitting_controller {
 
     pending_state_.store(GraspState::CLOSING_COMMAND, std::memory_order_relaxed);
     state_changed_.store(true, std::memory_order_release);
-    publishStateLabel("CLOSING_COMMAND");
+    // Label published from RT thread in applyPendingStateTransition() to prevent
+    // RealtimePublisher race — timer thread publish can be overwritten before delivery.
     logStateTransition("CLOSING_COMMAND", "Gripper close queued — awaiting execution");
     ROS_INFO("    width=%.4f m  speed=%.4f m/s", width, speed);
   }
