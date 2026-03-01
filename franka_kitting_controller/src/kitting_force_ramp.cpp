@@ -88,6 +88,7 @@ namespace franka_kitting_controller {
         current_state_.load(std::memory_order_relaxed) == GraspState::CONTACT_CONFIRMED &&
         gripper_stopped_.load(std::memory_order_relaxed)) {
       current_state_.store(GraspState::CONTACT, std::memory_order_relaxed);
+      contact_width_.store(gripper_snapshot.width, std::memory_order_relaxed);
       publishStateLabel("CONTACT");
       logStateTransition("CONTACT", "Gripper stopped — contact confirmed");
       ROS_INFO("    contact_width=%.4f m", contact_width_.load(std::memory_order_relaxed));
@@ -132,7 +133,6 @@ namespace franka_kitting_controller {
       logStateTransition("CONTACT_CONFIRMED", "Force drop detected — gripper stopping");
 
       requestGripperStop("Contact");
-      contact_width_.store(gripper_snapshot.width, std::memory_order_relaxed);
 
       ROS_INFO("  [CONTACT_CONFIRMED]  Force drop detected: "
               "Fn_baseline=%.3f  Fn=%.3f  drop=%.3f  thresh=%.3f  debounce=%.3fs  w=%.4f",
