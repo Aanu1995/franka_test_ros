@@ -322,9 +322,14 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
   "{command: 'CLOSING', closing_width: 0.01, closing_speed: 0.05}" --once
 
-# CLOSING — use force-drop with a custom threshold (default is 0.3 N)
+# CLOSING — override force-drop detection parameters
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
-  "{command: 'CLOSING', force_drop_thresh: 0.5}" --once
+  "{command: 'CLOSING', force_drop_thresh: 0.5, force_drop_debounce_time: 0.08}" --once
+
+# CLOSING — override all closing parameters for a specific object
+rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
+  "{command: 'CLOSING', closing_width: 0.01, closing_speed: 0.05, \
+    force_drop_thresh: 0.3, force_drop_debounce_time: 0.05}" --once
 
 # ... CONTACT is published by the controller automatically ...
 
@@ -369,6 +374,7 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
   "{command: 'AUTO', open_gripper: true, auto_delay: 3.0, \
     closing_width: 0.01, closing_speed: 0.05, \
+    force_drop_thresh: 0.3, force_drop_debounce_time: 0.05, \
     f_min: 3.0, f_step: 3.0, f_max: 30.0, \
     fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
     fr_uplift_distance: 0.010, fr_lift_speed: 0.01, fr_uplift_hold: 1.0, \
