@@ -143,12 +143,31 @@ namespace franka_kitting_controller {
     closing_w_cmd_ = width;
     closing_v_cmd_ = speed;
 
+    // Resolve contact method (empty string = use YAML default)
+    if (!msg->contact_method.empty()) {
+      if (msg->contact_method == "force_drop") {
+        closing_contact_method_ = ContactMethod::FORCE_DROP;
+      } else if (msg->contact_method == "stall") {
+        closing_contact_method_ = ContactMethod::STALL;
+      } else {
+        ROS_WARN("KittingStateController: Unknown contact_method '%s', using YAML default",
+                 msg->contact_method.c_str());
+        closing_contact_method_ = contact_method_;
+      }
+    } else {
+      closing_contact_method_ = contact_method_;
+    }
+    closing_force_drop_thresh_ = resolveParam(msg->force_drop_thresh, force_drop_thresh_);
+
     pending_state_.store(GraspState::CLOSING_COMMAND, std::memory_order_relaxed);
     state_changed_.store(true, std::memory_order_release);
     // Label published from RT thread in applyPendingStateTransition() to prevent
     // RealtimePublisher race — timer thread publish can be overwritten before delivery.
+    const char* method_str = (closing_contact_method_ == ContactMethod::FORCE_DROP) ?
+                             "force_drop" : "stall";
     logStateTransition("CLOSING_COMMAND", "Gripper close queued — awaiting execution");
-    ROS_INFO("    width=%.4f m  speed=%.4f m/s", width, speed);
+    ROS_INFO("    width=%.4f m  speed=%.4f m/s  contact_method=%s",
+            width, speed, method_str);
   }
 
   void KittingStateController::handleGraspingCmd(
@@ -240,8 +259,9 @@ namespace franka_kitting_controller {
 
     auto msg = boost::make_shared<KittingGripperCommand>(auto_cmd_);
     ROS_INFO("KittingStateController: AUTO -> forwarding to CLOSING"
-            " (closing_width=%.4f, closing_speed=%.4f)",
-            auto_cmd_.closing_width, auto_cmd_.closing_speed);
+            " (closing_width=%.4f, closing_speed=%.4f, contact_method=%s)",
+            auto_cmd_.closing_width, auto_cmd_.closing_speed,
+            auto_cmd_.contact_method.empty() ? "default" : auto_cmd_.contact_method.c_str());
     handleClosingCmd(msg);
 
     // Poll for CONTACT or FAILED at 10 Hz

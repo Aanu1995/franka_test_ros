@@ -57,7 +57,7 @@ namespace franka_kitting_controller {
     BASELINE,        // Collecting reference signals
     CLOSING_COMMAND, // Gripper close queued — awaiting execution confirmation
     CLOSING,            // Gripper confirmed moving toward object
-    CONTACT_CONFIRMED,  // Stall detected — gripper stopping
+    CONTACT_CONFIRMED,  // Contact detected (stall or force-drop) — gripper stopping
     CONTACT,            // Gripper stopped — contact confirmed
     GRASPING,     // Applying grasp force, waiting for completion + stabilization
     UPLIFT,       // Cosine-smoothed micro-lift trajectory
@@ -71,6 +71,9 @@ namespace franka_kitting_controller {
 
   /// Command types for the gripper command thread.
   enum class GripperCommandType { NONE, MOVE, GRASP, HOMING };
+
+  /// Contact detection method selection.
+  enum class ContactMethod { STALL, FORCE_DROP };
 
   /// Command queued from subscriber thread to the gripper command thread.
   struct GripperCommand {
@@ -218,6 +221,13 @@ namespace franka_kitting_controller {
     double stall_velocity_threshold_{0.008};  // [m/s] Speed below this = stalled
     double width_gap_threshold_{0.002};       // [m] Min gap: (w - w_cmd) > this
 
+    // --- Force-drop contact detection: YAML defaults ---
+    ContactMethod contact_method_{ContactMethod::FORCE_DROP};
+    double force_drop_thresh_{0.3};           // [N] Fn drop below baseline to trigger
+    int force_drop_baseline_samples_{50};     // Samples for baseline mean
+    int force_drop_filter_samples_{10};       // Sliding window size for Fn smoothing
+    static constexpr double kForceDropDebounceTime{0.05};  // [s] Internal debounce constant
+
     // Debounce state (Realtime-thread owned)
     DebounceState gripper_debounce_;
     std::atomic<bool> gripper_stop_sent_{false};  // Written by realtime, read by command thread
@@ -233,6 +243,28 @@ namespace franka_kitting_controller {
     double rt_T_hold_gripper_{0.35}; // Computed from rt_closing_v_cmd_ when CLOSING starts
     bool closing_cmd_seen_executing_{false};  ///< True once move() seen running during CLOSING
     bool closing_command_entered_{false};     ///< First-tick flag: ensures CLOSING_COMMAND label is published before transition
+
+    // Contact method staging (subscriber → RT via CLOSING_COMMAND snapshot)
+    ContactMethod closing_contact_method_{ContactMethod::FORCE_DROP};
+    double closing_force_drop_thresh_{0.3};
+
+    // Contact method RT-local copies
+    ContactMethod rt_contact_method_{ContactMethod::FORCE_DROP};
+    double rt_force_drop_thresh_{0.3};
+
+    // Force-drop runtime state (RT-thread owned)
+    double fd_baseline_sum_{0.0};
+    int    fd_baseline_count_{0};
+    double fd_baseline_{0.0};
+    bool   fd_baseline_ready_{false};
+
+    // Sliding window filter for current Fn (avoids false positives from single-sample spikes)
+    static constexpr int FD_FILTER_MAX = 50;
+    double fd_filter_buf_[FD_FILTER_MAX]{};
+    int    fd_filter_size_{10};       // actual window size (from force_drop_filter_samples_)
+    int    fd_filter_idx_{0};         // circular buffer write index
+    double fd_filter_sum_{0.0};       // running sum of values in buffer
+    int    fd_filter_count_{0};       // number of values filled so far (≤ fd_filter_size_)
 
     // Slow-rate logger for contact signal monitoring (2 Hz — readable in terminal)
     franka_hw::TriggerRate signal_log_trigger_{2.0};
@@ -370,7 +402,8 @@ namespace franka_kitting_controller {
 
     /// Run closing-phase transitions (CLOSING_COMMAND→CLOSING→CONTACT_CONFIRMED→CONTACT or →FAILED).
     void runClosingTransitions(const ros::Time& time,
-                               const GripperData& gripper_snapshot);
+                               const GripperData& gripper_snapshot,
+                               double support_force);
 
     /// Run internal force ramp transitions (GRASPING→UPLIFT→EVALUATE→...).
     /// Called at 250Hz from update(). Drives all internal state transitions.
@@ -481,6 +514,9 @@ namespace franka_kitting_controller {
 
     // --- runClosingTransitions decomposition ---
     void detectGripperContact(const ros::Time& time, const GripperData& gripper_snapshot);
+    void detectForceDropContact(const ros::Time& time,
+                                const GripperData& gripper_snapshot,
+                                double support_force);
 
     // --- runInternalTransitions decomposition ---
     void tickGrasping(const ros::Time& time, double tau_ext_norm,

@@ -36,7 +36,8 @@ namespace franka_kitting_controller {
   // ============================================================================
 
   void KittingStateController::runClosingTransitions(const ros::Time& time,
-                                                      const GripperData& gripper_snapshot) {
+                                                      const GripperData& gripper_snapshot,
+                                                      double support_force) {
     auto state = current_state_.load(std::memory_order_relaxed);
 
     if ((state == GraspState::CLOSING_COMMAND || state == GraspState::CLOSING) &&
@@ -67,18 +68,24 @@ namespace franka_kitting_controller {
       }
 
       if (closing_cmd_seen_executing_) {
-        // Stall detection (only after move is confirmed executing).
-        // On stall: detectGripperContact transitions to CONTACT_CONFIRMED internally.
-        detectGripperContact(time, gripper_snapshot);
+        // Contact detection (only after move is confirmed executing).
+        // On detection: transitions to CONTACT_CONFIRMED internally.
+        if (rt_contact_method_ == ContactMethod::FORCE_DROP) {
+          detectForceDropContact(time, gripper_snapshot, support_force);
+        } else {
+          detectGripperContact(time, gripper_snapshot);
+        }
 
-        // No-contact: move completed without triggering stall → FAILED
+        // No-contact: move completed without triggering contact → FAILED
         if (!contact_latched_ && !cmd_executing_.load(std::memory_order_relaxed)) {
           current_state_.store(GraspState::FAILED, std::memory_order_relaxed);
           publishStateLabel("FAILED");
+          const char* method_str = (rt_contact_method_ == ContactMethod::FORCE_DROP) ?
+                                   "force_drop" : "stall";
           logStateTransition("FAILED",
               "Gripper closed to target width — no contact detected");
-          ROS_WARN("  [CLOSING]  No contact: w=%.4f  w_cmd=%.4f  -> FAILED",
-                   gripper_snapshot.width, rt_closing_w_cmd_);
+          ROS_WARN("  [CLOSING]  No contact (%s): w=%.4f  w_cmd=%.4f  -> FAILED",
+                   method_str, gripper_snapshot.width, rt_closing_w_cmd_);
         }
       }
     }
@@ -124,6 +131,65 @@ namespace franka_kitting_controller {
       ROS_INFO("  [CONTACT_CONFIRMED]  Stall detected, waiting for gripper stop: "
               "w=%.4f  w_cmd=%.4f  gap=%.4f  w_dot=%.6f  hold=%.3fs",
               w, rt_closing_w_cmd_, w - rt_closing_w_cmd_, w_dot, hold_elapsed);
+    }
+  }
+
+  void KittingStateController::detectForceDropContact(const ros::Time& time,
+                                                        const GripperData& gripper_snapshot,
+                                                        double support_force) {
+    // Validate gripper data freshness (same guard as stall method)
+    bool gripper_data_valid = (gripper_snapshot.stamp != ros::Time(0)) &&
+                              ((time - gripper_snapshot.stamp).toSec() < 0.5);
+    if (!gripper_data_valid) {
+      return;
+    }
+
+    // Phase 1 — Baseline collection: accumulate Fn samples to compute mean
+    if (!fd_baseline_ready_) {
+      fd_baseline_sum_ += support_force;
+      fd_baseline_count_++;
+      if (fd_baseline_count_ >= force_drop_baseline_samples_) {
+        fd_baseline_ = fd_baseline_sum_ / fd_baseline_count_;
+        fd_baseline_ready_ = true;
+        ROS_INFO("  [FORCE_DROP]  Baseline ready: Fn_baseline=%.3f N  (from %d samples)",
+                fd_baseline_, fd_baseline_count_);
+      }
+      return;
+    }
+
+    // Phase 2 — Sliding window filter: smooth current Fn reading
+    if (fd_filter_count_ < fd_filter_size_) {
+      // Still filling the window
+      fd_filter_buf_[fd_filter_idx_] = support_force;
+      fd_filter_sum_ += support_force;
+      fd_filter_count_++;
+    } else {
+      // Window full — subtract oldest, add new
+      fd_filter_sum_ -= fd_filter_buf_[fd_filter_idx_];
+      fd_filter_buf_[fd_filter_idx_] = support_force;
+      fd_filter_sum_ += support_force;
+    }
+    fd_filter_idx_ = (fd_filter_idx_ + 1) % fd_filter_size_;
+    double fn_filtered = fd_filter_sum_ / fd_filter_count_;
+
+    // Phase 3 — Drop detection with debounce
+    double drop = fd_baseline_ - fn_filtered;
+    bool drop_detected = (drop > rt_force_drop_thresh_);
+
+    if (gripper_debounce_.check(drop_detected, time, kForceDropDebounceTime)) {
+      contact_latched_ = true;
+      contact_width_.store(gripper_snapshot.width, std::memory_order_relaxed);
+
+      // Publish CONTACT_CONFIRMED immediately at the point of detection
+      current_state_.store(GraspState::CONTACT_CONFIRMED, std::memory_order_relaxed);
+      publishStateLabel("CONTACT_CONFIRMED");
+      logStateTransition("CONTACT_CONFIRMED", "Force drop detected — gripper stopping");
+
+      requestGripperStop("ForceDrop");
+      ROS_INFO("  [CONTACT_CONFIRMED]  Force drop detected: "
+              "Fn_baseline=%.3f  Fn_filtered=%.3f  drop=%.3f  thresh=%.3f  w=%.4f",
+              fd_baseline_, fn_filtered, drop, rt_force_drop_thresh_,
+              gripper_snapshot.width);
     }
   }
 
