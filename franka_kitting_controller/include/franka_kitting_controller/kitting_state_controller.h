@@ -78,8 +78,8 @@ namespace franka_kitting_controller {
     double width{0.0};
     double speed{0.0};
     double force{0.0};
-    double epsilon_inner{0.008};
-    double epsilon_outer{0.008};
+    double epsilon_inner{0.04};
+    double epsilon_outer{0.04};
     std::shared_ptr<std::promise<bool>> result_promise;  // nullptr = fire-and-forget
   };
 
@@ -279,7 +279,7 @@ namespace franka_kitting_controller {
     double fr_lift_speed_{0.01};
     double fr_uplift_hold_{1.0};
     double fr_grasp_speed_{0.02};
-    double fr_epsilon_{0.008};        // Single epsilon (inner == outer)
+    double fr_epsilon_{0.04};         // Single epsilon (inner == outer)
     double fr_slip_drop_thresh_{0.15};       // DF_TH: max allowed relative support force drop (15% = fail)
     double fr_slip_width_thresh_{0.0005};    // [m] W_TH: max allowed jaw widening P95-P5 (0.5mm = fail)
     double fr_load_transfer_min_{2.0};       // [N] Min floor for load transfer threshold
@@ -294,7 +294,7 @@ namespace franka_kitting_controller {
     double rt_fr_lift_speed_{0.01};
     double rt_fr_uplift_hold_{1.0};
     double rt_fr_grasp_speed_{0.02};
-    double rt_fr_epsilon_{0.008};
+    double rt_fr_epsilon_{0.04};
     double rt_fr_slip_drop_thresh_{0.15};
     double rt_fr_slip_width_thresh_{0.0005};
     double rt_fr_load_transfer_min_{2.0};
@@ -309,7 +309,7 @@ namespace franka_kitting_controller {
     double staging_fr_lift_speed_{0.01};
     double staging_fr_uplift_hold_{1.0};
     double staging_fr_grasp_speed_{0.02};
-    double staging_fr_epsilon_{0.008};
+    double staging_fr_epsilon_{0.04};
     double staging_fr_slip_drop_thresh_{0.15};
     double staging_fr_slip_width_thresh_{0.0005};
     double staging_fr_load_transfer_min_{2.0};

@@ -212,7 +212,7 @@ namespace franka_kitting_controller {
     node_handle.param("lift_speed", fr_lift_speed_, 0.01);
     node_handle.param("uplift_hold", fr_uplift_hold_, 1.0);
     node_handle.param("grasp_speed", fr_grasp_speed_, 0.02);
-    node_handle.param("epsilon", fr_epsilon_, 0.008);
+    node_handle.param("epsilon", fr_epsilon_, 0.04);
     node_handle.param("slip_drop_thresh", fr_slip_drop_thresh_, 0.15);
     node_handle.param("slip_width_thresh", fr_slip_width_thresh_, 0.0005);
     node_handle.param("load_transfer_min", fr_load_transfer_min_, 2.0);

@@ -347,7 +347,7 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
   "{command: 'GRASPING', \
     f_min: 3.0, f_step: 3.0, f_max: 30.0, \
-    fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
+    fr_grasp_speed: 0.02, fr_epsilon: 0.04, \
     fr_uplift_distance: 0.010, fr_lift_speed: 0.01, fr_uplift_hold: 1.0, \
     fr_slip_drop_thresh: 0.15, fr_slip_width_thresh: 0.0005, \
     fr_load_transfer_min: 2.0}" --once
@@ -376,7 +376,7 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
     closing_width: 0.01, closing_speed: 0.05, \
     force_drop_thresh: 0.3, force_drop_debounce_time: 0.05, \
     f_min: 3.0, f_step: 3.0, f_max: 30.0, \
-    fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
+    fr_grasp_speed: 0.02, fr_epsilon: 0.04, \
     fr_uplift_distance: 0.010, fr_lift_speed: 0.01, fr_uplift_hold: 1.0, \
     fr_slip_drop_thresh: 0.15, fr_slip_width_thresh: 0.0005, \
     fr_load_transfer_min: 2.0}" --once
@@ -691,7 +691,7 @@ The **velocity profile** (first derivative) is:
 | `force_drop_thresh`        | double | `0.3`   | Fn drop below baseline to trigger contact [N]                       |
 | `force_drop_debounce_time` | double | `0.05`  | Sustained drop duration before triggering contact [s]               |
 | `grasp_speed`              | double | `0.02`  | Gripper speed for GraspAction [m/s]                                 |
-| `epsilon`                  | double | `0.008` | Epsilon for GraspAction (inner and outer) [m]                       |
+| `epsilon`                  | double | `0.04`  | Epsilon for GraspAction (inner and outer) [m]                       |
 | `f_min`                    | double | `3.0`   | Starting grasp force [N]                                            |
 | `f_step`                   | double | `3.0`   | Force increment per iteration [N]                                   |
 | `f_max`                    | double | `30.0`  | Maximum force — FAILED if exceeded [N]                              |
@@ -802,7 +802,7 @@ Per-object command published on `/kitting_controller/state_cmd`. Any float64 par
 | `fr_lift_speed`        | float64 | Lift speed for UPLIFT and DOWNLIFT [m/s] (0 = use default 0.01)                    |
 | `fr_uplift_hold`       | float64 | Hold time at top for evaluation [s] (0 = use default 1.0)                          |
 | `fr_grasp_speed`       | float64 | Gripper speed for ramp GraspAction [m/s] (0 = use default 0.02)                    |
-| `fr_epsilon`           | float64 | Epsilon for ramp GraspAction, inner and outer [m] (0 = use default 0.008)          |
+| `fr_epsilon`           | float64 | Epsilon for ramp GraspAction, inner and outer [m] (0 = use default 0.04)           |
 | `fr_slip_drop_thresh`     | float64 | DF_TH: max allowed relative support force drop (0 = use default 0.15)           |
 | `fr_slip_width_thresh`    | float64 | W_TH: max allowed jaw widening P95-P5 [m] (0 = use default 0.0005)             |
 | `fr_load_transfer_min`    | float64 | Floor for load transfer threshold [N] (0 = use default 2.0)                     |
