@@ -45,19 +45,24 @@ namespace franka_kitting_controller {
   /// just Cartesian passthrough and state data publishing. The grasp state machine
   /// begins when the user explicitly publishes BASELINE on /kitting_controller/state_cmd.
   ///
-  /// User-commanded: START→BASELINE, →CLOSING, →GRASPING
-  /// Automatic:      CLOSING→CONTACT (contact detection)
+  /// User-commanded: START→BASELINE, →CLOSING_COMMAND, →GRASPING
+  /// Automatic:      CLOSING_COMMAND→CLOSING (gripper move confirmed)
+  ///                 CLOSING→CONTACT_CONFIRMED (stall detected)
+  ///                 CONTACT_CONFIRMED→CONTACT (gripper stopped)
   /// Internal (realtime):  GRASPING→UPLIFT→EVALUATE→SUCCESS
-  ///                 On slip: EVALUATE→DOWNLIFT→SETTLING→GRASPING (retry)
+  ///                 On slip: EVALUATE→SLIP→DOWNLIFT→SETTLING→GRASPING (retry)
   ///                 On F > f_max: SETTLING→FAILED
   enum class GraspState {
-    START,        // Initial state: controller running, awaiting BASELINE command
-    BASELINE,     // Collecting reference signals
-    CLOSING,      // Gripper approaching object
-    CONTACT,      // Contact detected
+    START,           // Initial state: controller running, awaiting BASELINE command
+    BASELINE,        // Collecting reference signals
+    CLOSING_COMMAND, // Gripper close queued — awaiting execution confirmation
+    CLOSING,            // Gripper confirmed moving toward object
+    CONTACT_CONFIRMED,  // Stall detected — gripper stopping
+    CONTACT,            // Gripper stopped — contact confirmed
     GRASPING,     // Applying grasp force, waiting for completion + stabilization
     UPLIFT,       // Cosine-smoothed micro-lift trajectory
     EVALUATE,     // Hold + slip detection (hold for uplift_hold, then evaluate immediately)
+    SLIP,         // Slip detected — preparing DOWNLIFT
     DOWNLIFT,     // Returning to z_initial before force increment
     SETTLING,     // Post-downlift stabilization
     SUCCESS,      // Stable grasp confirmed
@@ -373,9 +378,9 @@ namespace franka_kitting_controller {
     /// Generate and send the Cartesian pose command for this tick (1kHz).
     void updateCartesianCommand(const ros::Duration& period);
 
-    /// Run Grasp contact detection (gripper stall detection during CLOSING).
-    void runContactDetection(const ros::Time& time,
-                            const GripperData& gripper_snapshot);
+    /// Run closing-phase transitions (CLOSING_COMMAND→CLOSING→CONTACT_CONFIRMED→CONTACT or →FAILED).
+    void runClosingTransitions(const ros::Time& time,
+                               const GripperData& gripper_snapshot);
 
     /// Run internal force ramp transitions (GRASPING→UPLIFT→EVALUATE→...).
     /// Called at 250Hz from update(). Drives all internal state transitions.
@@ -383,6 +388,9 @@ namespace franka_kitting_controller {
                                 double tau_ext_norm,
                                 double support_force, double tangential_force,
                                 const GripperData& gripper_snapshot);
+
+    /// Reset force ramp runtime state for a fresh grasp cycle. Realtime-safe.
+    void resetForceRampState();
 
     /// Request a deferred grasp command from the Realtime thread.
     /// Realtime-safe: only atomic stores, no mutex or allocation.
@@ -403,6 +411,20 @@ namespace franka_kitting_controller {
     void requestGripperStop(const char* source);
 
     // --- Static helpers ---
+
+    /// State predicate: CLOSING_COMMAND, CLOSING, or CONTACT_CONFIRMED.
+    static bool isClosingPhase(GraspState s) {
+      return s == GraspState::CLOSING_COMMAND ||
+             s == GraspState::CLOSING ||
+             s == GraspState::CONTACT_CONFIRMED;
+    }
+
+    /// State predicate: GRASPING, UPLIFT, EVALUATE, DOWNLIFT, or SETTLING.
+    static bool isForceRampPhase(GraspState s) {
+      return s == GraspState::GRASPING || s == GraspState::UPLIFT ||
+             s == GraspState::EVALUATE || s == GraspState::SLIP ||
+             s == GraspState::DOWNLIFT || s == GraspState::SETTLING;
+    }
 
     /// Resolve a per-command parameter: use msg_value if positive, else default_value.
     static inline double resolveParam(double msg_value, double default_value) {
@@ -461,7 +483,13 @@ namespace franka_kitting_controller {
     /// Only permits actions when the internal state machine is idle.
     bool isActionAllowed() const;
 
-    // --- runContactDetection decomposition ---
+    /// Common boilerplate for gripper action servers: guard, queue, await result.
+    template <typename ActionServer, typename Result>
+    void executeGripperActionImpl(ActionServer& server,
+                                  GripperCommand cmd,
+                                  const char* action_name);
+
+    // --- runClosingTransitions decomposition ---
     void detectGripperContact(const ros::Time& time, const GripperData& gripper_snapshot);
 
     // --- runInternalTransitions decomposition ---
@@ -474,6 +502,9 @@ namespace franka_kitting_controller {
     void tickEvaluate(const ros::Time& time, double tau_ext_norm,
                       double support_force, double tangential_force,
                       const GripperData& gripper_snapshot);
+    void tickSlip(const ros::Time& time, double tau_ext_norm,
+                  double support_force, double tangential_force,
+                  const GripperData& gripper_snapshot);
     void tickDownlift(const ros::Time& time, double tau_ext_norm,
                       double support_force, double tangential_force,
                       const GripperData& gripper_snapshot);

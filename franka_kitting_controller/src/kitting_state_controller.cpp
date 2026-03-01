@@ -44,8 +44,12 @@ namespace franka_kitting_controller {
         return "START";
       case GraspState::BASELINE:
         return "BASELINE";
+      case GraspState::CLOSING_COMMAND:
+        return "CLOSING_COMMAND";
       case GraspState::CLOSING:
         return "CLOSING";
+      case GraspState::CONTACT_CONFIRMED:
+        return "CONTACT_CONFIRMED";
       case GraspState::CONTACT:
         return "CONTACT";
       case GraspState::GRASPING:
@@ -54,6 +58,8 @@ namespace franka_kitting_controller {
         return "UPLIFT";
       case GraspState::EVALUATE:
         return "EVALUATE";
+      case GraspState::SLIP:
+        return "SLIP";
       case GraspState::DOWNLIFT:
         return "DOWNLIFT";
       case GraspState::SETTLING:
@@ -398,16 +404,8 @@ namespace franka_kitting_controller {
     deferred_grasp_pending_.store(false, std::memory_order_relaxed);
 
     // Reset force ramp state
-    fr_f_current_ = 0.0;
-    fr_iteration_ = 0;
-    fr_grasp_cmd_seen_executing_ = false;
-    fr_grasp_stabilizing_ = false;
-    fr_grasping_phase_initialized_ = false;
+    resetForceRampState();
     accumulated_uplift_ = 0.0;
-    fr_friction_sum_ = 0.0;
-    fr_friction_count_ = 0;
-    fr_friction_max_ = 0.0;
-    fr_width_samples_.clear();
 
     logStateTransition("START", "Controller running");
     if (require_logger_) {
@@ -421,6 +419,18 @@ namespace franka_kitting_controller {
   // ============================================================================
   // Realtime-safe helpers for update() (no locks, no allocation)
   // ============================================================================
+
+  void KittingStateController::resetForceRampState() {
+    fr_f_current_ = 0.0;
+    fr_iteration_ = 0;
+    fr_grasp_cmd_seen_executing_ = false;
+    fr_grasp_stabilizing_ = false;
+    fr_grasping_phase_initialized_ = false;
+    fr_friction_sum_ = 0.0;
+    fr_friction_count_ = 0;
+    fr_friction_max_ = 0.0;
+    fr_width_samples_.clear();
+  }
 
   void KittingStateController::applyPendingStateTransition() {
     if (!state_changed_.load(std::memory_order_acquire)) {
@@ -448,14 +458,7 @@ namespace franka_kitting_controller {
       contact_width_.store(0.0, std::memory_order_relaxed);
 
       // Reset force ramp state
-      fr_f_current_ = 0.0;
-      fr_iteration_ = 0;
-      fr_grasp_cmd_seen_executing_ = false;
-      fr_grasp_stabilizing_ = false;
-      fr_grasping_phase_initialized_ = false;
-      fr_friction_sum_ = 0.0;
-      fr_friction_count_ = 0;
-      fr_friction_max_ = 0.0;
+      resetForceRampState();
 
       ROS_INFO("  [BASELINE]  State machine reset for new trial");
 
@@ -473,8 +476,8 @@ namespace franka_kitting_controller {
       }
     }
 
-    // Handle CLOSING start: snapshot command parameters for realtime contact detection
-    if (new_state == GraspState::CLOSING) {
+    // Handle CLOSING_COMMAND start: snapshot command parameters for realtime closing transitions
+    if (new_state == GraspState::CLOSING_COMMAND) {
       rt_closing_w_cmd_ = closing_w_cmd_;
       rt_closing_v_cmd_ = closing_v_cmd_;
       rt_T_hold_gripper_ = computeGripperHoldTime(rt_closing_v_cmd_);
@@ -482,7 +485,7 @@ namespace franka_kitting_controller {
       gripper_stop_sent_.store(false, std::memory_order_relaxed);
       gripper_stopped_.store(false, std::memory_order_relaxed);
       closing_cmd_seen_executing_ = false;
-      ROS_INFO("  [CLOSING]  T_hold_gripper=%.3fs (from speed=%.4f m/s)",
+      ROS_INFO("  [CLOSING_COMMAND]  T_hold_gripper=%.3fs (from speed=%.4f m/s)",
               rt_T_hold_gripper_, rt_closing_v_cmd_);
     }
 
@@ -583,9 +586,11 @@ namespace franka_kitting_controller {
     // Gripper signals
     kitting_publisher_.msg_.gripper_width = gripper_snapshot.width;
     kitting_publisher_.msg_.gripper_width_dot = gripper_snapshot.width_dot;
-    kitting_publisher_.msg_.gripper_width_cmd =
-        (current_state_.load(std::memory_order_relaxed) == GraspState::CLOSING)
-            ? rt_closing_w_cmd_ : 0.0;
+    {
+      auto s = current_state_.load(std::memory_order_relaxed);
+      kitting_publisher_.msg_.gripper_width_cmd =
+          isClosingPhase(s) ? rt_closing_w_cmd_ : 0.0;
+    }
     kitting_publisher_.msg_.gripper_max_width = gripper_snapshot.max_width;
     kitting_publisher_.msg_.gripper_is_grasped = gripper_snapshot.is_grasped;
 
@@ -629,14 +634,12 @@ namespace franka_kitting_controller {
       // Single gripper snapshot per tick — all consumers see consistent data
       const GripperData gripper_snapshot = *gripper_data_buf_.readFromRT();
 
-      runContactDetection(time, gripper_snapshot);
+      runClosingTransitions(time, gripper_snapshot);
 
       // Run internal force ramp transitions (GRASPING→UPLIFT→EVALUATE→...)
       {
         GraspState fr_state = current_state_.load(std::memory_order_relaxed);
-        if (fr_state == GraspState::GRASPING || fr_state == GraspState::UPLIFT ||
-            fr_state == GraspState::EVALUATE || fr_state == GraspState::DOWNLIFT ||
-            fr_state == GraspState::SETTLING) {
+        if (isForceRampPhase(fr_state)) {
           runInternalTransitions(time, tau_ext_norm, support_force, tangential_force,
                                 gripper_snapshot);
         }
@@ -646,17 +649,15 @@ namespace franka_kitting_controller {
       // Re-read state since runInternalTransitions may have changed it
       const GraspState state = current_state_.load(std::memory_order_relaxed);
       if (signal_log_trigger_()) {
-        if (state == GraspState::CLOSING) {
+        if (isClosingPhase(state)) {
           double grip_gap = gripper_snapshot.width - rt_closing_w_cmd_;
           bool grip_stall = (std::abs(gripper_snapshot.width_dot) < stall_velocity_threshold_) &&
                             (grip_gap > width_gap_threshold_);
-          ROS_INFO("  [SIGNAL]  CLOSING  |  grip: w=%.4f w_cmd=%.4f gap=%.4f w_dot=%.6f %s",
-                  gripper_snapshot.width, rt_closing_w_cmd_, grip_gap,
+          ROS_INFO("  [SIGNAL]  %s  |  grip: w=%.4f w_cmd=%.4f gap=%.4f w_dot=%.6f %s",
+                  stateToString(state), gripper_snapshot.width, rt_closing_w_cmd_, grip_gap,
                   gripper_snapshot.width_dot,
                   grip_stall ? "STALL" : "moving");
-        } else if (state == GraspState::GRASPING || state == GraspState::UPLIFT ||
-                  state == GraspState::EVALUATE || state == GraspState::DOWNLIFT ||
-                  state == GraspState::SETTLING) {
+        } else if (isForceRampPhase(state)) {
           double u_live = tangential_force / std::max(support_force, 1e-6);
           ROS_INFO("  [SIGNAL]  %s  |  F=%.1f  iter=%d  Fn=%.2f  Ft=%.2f  u=%.3f",
                   stateToString(state), fr_f_current_, fr_iteration_,
@@ -664,8 +665,8 @@ namespace franka_kitting_controller {
         }
       }
 
-      // Gripper velocity — 10 Hz during CLOSING (DEBUG level to minimize realtime allocation)
-      if (state == GraspState::CLOSING && gripper_log_trigger_()) {
+      // Gripper velocity — 10 Hz during closing phase (DEBUG level to minimize realtime allocation)
+      if (isClosingPhase(state) && gripper_log_trigger_()) {
         ROS_DEBUG("  [GRIP]  w=%.5f  w_dot=%.6f m/s  gap=%.5f  %s",
                   gripper_snapshot.width,
                   gripper_snapshot.width_dot,

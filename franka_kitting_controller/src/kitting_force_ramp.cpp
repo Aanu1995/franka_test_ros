@@ -31,12 +31,15 @@ namespace franka_kitting_controller {
   }
 
   // ============================================================================
-  // Contact detection during CLOSING
+  // Closing-phase transitions
+  // CLOSING_COMMAND → CLOSING → CONTACT_CONFIRMED → CONTACT  or  → FAILED
   // ============================================================================
 
-  void KittingStateController::runContactDetection(const ros::Time& time,
-                                                    const GripperData& gripper_snapshot) {
-    if (current_state_.load(std::memory_order_relaxed) == GraspState::CLOSING &&
+  void KittingStateController::runClosingTransitions(const ros::Time& time,
+                                                      const GripperData& gripper_snapshot) {
+    auto state = current_state_.load(std::memory_order_relaxed);
+
+    if ((state == GraspState::CLOSING_COMMAND || state == GraspState::CLOSING) &&
         !contact_latched_) {
       // Track when the gripper move command starts executing.
       // Stall detection is deferred until the move is confirmed running to prevent
@@ -45,11 +48,19 @@ namespace franka_kitting_controller {
       if (!closing_cmd_seen_executing_) {
         if (cmd_executing_.load(std::memory_order_relaxed)) {
           closing_cmd_seen_executing_ = true;
+          // Transition CLOSING_COMMAND → CLOSING now that gripper is confirmed moving
+          if (state == GraspState::CLOSING_COMMAND) {
+            current_state_.store(GraspState::CLOSING, std::memory_order_relaxed);
+            state = GraspState::CLOSING;
+            publishStateLabel("CLOSING");
+            logStateTransition("CLOSING", "Gripper move confirmed — closing");
+          }
         }
       }
 
       if (closing_cmd_seen_executing_) {
-        // Stall detection (only after move is confirmed executing)
+        // Stall detection (only after move is confirmed executing).
+        // On stall: detectGripperContact transitions to CONTACT_CONFIRMED internally.
         detectGripperContact(time, gripper_snapshot);
 
         // No-contact: move completed without triggering stall → FAILED
@@ -66,7 +77,7 @@ namespace franka_kitting_controller {
 
     // Deferred CONTACT transition: wait for gripper to physically stop
     if (contact_latched_ &&
-        current_state_.load(std::memory_order_relaxed) == GraspState::CLOSING &&
+        current_state_.load(std::memory_order_relaxed) == GraspState::CONTACT_CONFIRMED &&
         gripper_stopped_.load(std::memory_order_relaxed)) {
       current_state_.store(GraspState::CONTACT, std::memory_order_relaxed);
       publishStateLabel("CONTACT");
@@ -93,10 +104,16 @@ namespace franka_kitting_controller {
     if (gripper_debounce_.check(stall_detected, time, rt_T_hold_gripper_)) {
       double hold_elapsed = (time - gripper_debounce_.start_time).toSec();
       contact_latched_ = true;
-      requestGripperStop("Stall"); // Request gripper closing to stop
-
       contact_width_.store(gripper_snapshot.width, std::memory_order_relaxed);
-      ROS_INFO("  [CLOSING]  Stall detected, waiting for gripper stop: "
+
+      // Publish CONTACT_CONFIRMED immediately at the point of detection,
+      // before requesting gripper stop — earliest possible label for data analysis.
+      current_state_.store(GraspState::CONTACT_CONFIRMED, std::memory_order_relaxed);
+      publishStateLabel("CONTACT_CONFIRMED");
+      logStateTransition("CONTACT_CONFIRMED", "Stall detected — gripper stopping");
+
+      requestGripperStop("Stall");
+      ROS_INFO("  [CONTACT_CONFIRMED]  Stall detected, waiting for gripper stop: "
               "w=%.4f  w_cmd=%.4f  gap=%.4f  w_dot=%.6f  hold=%.3fs",
               w, rt_closing_w_cmd_, w - rt_closing_w_cmd_, w_dot, hold_elapsed);
     }
@@ -116,6 +133,7 @@ namespace franka_kitting_controller {
       case GraspState::GRASPING:  tickGrasping(time, tau_ext_norm, support_force, tangential_force, gripper_snapshot); break;
       case GraspState::UPLIFT:    tickUplift(time, tau_ext_norm, support_force, tangential_force, gripper_snapshot);   break;
       case GraspState::EVALUATE:  tickEvaluate(time, tau_ext_norm, support_force, tangential_force, gripper_snapshot); break;
+      case GraspState::SLIP:      tickSlip(time, tau_ext_norm, support_force, tangential_force, gripper_snapshot);     break;
       case GraspState::DOWNLIFT:  tickDownlift(time, tau_ext_norm, support_force, tangential_force, gripper_snapshot); break;
       case GraspState::SETTLING:  tickSettling(time, tau_ext_norm, support_force, tangential_force, gripper_snapshot); break;
       default: break;
@@ -345,21 +363,32 @@ namespace franka_kitting_controller {
       ROS_INFO("    F=%.1f N  iter=%d  slip_score=%.3f",
               fr_f_current_, fr_iteration_, slip_score);
     } else {
-      // Initialize DOWNLIFT trajectory
-      downlift_start_pose_ = cartesian_pose_handle_->getRobotState().O_T_EE_d;
-      downlift_z_start_ = downlift_start_pose_[14];
-      downlift_elapsed_ = 0.0;
-      rt_downlift_distance_ = rt_fr_uplift_distance_;
-      rt_downlift_duration_ = rt_fr_uplift_distance_ / rt_fr_lift_speed_;
-      downlift_active_.store(true, std::memory_order_relaxed);
-
-      current_state_.store(GraspState::DOWNLIFT, std::memory_order_relaxed);
-      publishStateLabel("DOWNLIFT");
-      logStateTransition("DOWNLIFT", "Returning before force increment");
-      ROS_INFO("    %s  slip_score=%.3f  distance=%.4f m  duration=%.2f s",
-              load_transferred ? "Slip detected" : "No load transfer",
-              slip_score, rt_downlift_distance_, rt_downlift_duration_);
+      current_state_.store(GraspState::SLIP, std::memory_order_relaxed);
+      publishStateLabel("SLIP");
+      logStateTransition("SLIP", load_transferred ? "Slip detected" : "No load transfer");
+      ROS_INFO("    slip_score=%.3f  F=%.1f N  iter=%d",
+              slip_score, fr_f_current_, fr_iteration_);
     }
+  }
+
+  void KittingStateController::tickSlip(const ros::Time& /* time */,
+                                        double /* tau_ext_norm */,
+                                        double /* support_force */,
+                                        double /* tangential_force */,
+                                        const GripperData& /* gripper_snapshot */) {
+    // Initialize DOWNLIFT trajectory
+    downlift_start_pose_ = cartesian_pose_handle_->getRobotState().O_T_EE_d;
+    downlift_z_start_ = downlift_start_pose_[14];
+    downlift_elapsed_ = 0.0;
+    rt_downlift_distance_ = rt_fr_uplift_distance_;
+    rt_downlift_duration_ = rt_fr_uplift_distance_ / rt_fr_lift_speed_;
+    downlift_active_.store(true, std::memory_order_relaxed);
+
+    current_state_.store(GraspState::DOWNLIFT, std::memory_order_relaxed);
+    publishStateLabel("DOWNLIFT");
+    logStateTransition("DOWNLIFT", "Returning before force increment");
+    ROS_INFO("    distance=%.4f m  duration=%.2f s",
+            rt_downlift_distance_, rt_downlift_duration_);
   }
 
   void KittingStateController::tickDownlift(const ros::Time& time,

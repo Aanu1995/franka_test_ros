@@ -117,8 +117,10 @@ namespace franka_kitting_controller {
 
   void KittingStateController::handleClosingCmd(
       const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg) {
-    if (current_state_.load(std::memory_order_relaxed) == GraspState::CLOSING) {
-      ROS_DEBUG("KittingStateController: Already in CLOSING, ignoring duplicate");
+    auto cur_state = current_state_.load(std::memory_order_relaxed);
+    if (isClosingPhase(cur_state)) {
+      ROS_DEBUG("KittingStateController: Already in %s, ignoring duplicate CLOSING",
+                stateToString(cur_state));
       return;
     }
 
@@ -141,10 +143,10 @@ namespace franka_kitting_controller {
     closing_w_cmd_ = width;
     closing_v_cmd_ = speed;
 
-    pending_state_.store(GraspState::CLOSING, std::memory_order_relaxed);
+    pending_state_.store(GraspState::CLOSING_COMMAND, std::memory_order_relaxed);
     state_changed_.store(true, std::memory_order_release);
-    publishStateLabel("CLOSING");
-    logStateTransition("CLOSING", "Gripper approaching object");
+    publishStateLabel("CLOSING_COMMAND");
+    logStateTransition("CLOSING_COMMAND", "Gripper close queued — awaiting execution");
     ROS_INFO("    width=%.4f m  speed=%.4f m/s", width, speed);
   }
 

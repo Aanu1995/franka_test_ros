@@ -38,7 +38,7 @@ float64 closing_speed    # [m/s] Speed for MoveAction         (0 = use default)
 # All parameters are per-command overridable. 0 = use YAML default.
 # The controller runs an automated force ramp loop:
 #   GRASPING → UPLIFT → EVALUATE → SUCCESS
-#   On slip: DOWNLIFT → SETTLING → GRASPING (retry with F += f_step)
+#   On slip: SLIP → DOWNLIFT → SETTLING → GRASPING (retry with F += f_step)
 float64 f_min                # [N]   Starting grasp force (0 = use default 3.0)
 float64 f_step               # [N]   Force increment per iteration (0 = use default 3.0)
 float64 f_max                # [N]   Maximum force, FAILED if exceeded (0 = use default 30.0)

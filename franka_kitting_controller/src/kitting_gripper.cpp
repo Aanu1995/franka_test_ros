@@ -181,43 +181,39 @@ namespace franka_kitting_controller {
            state == GraspState::FAILED;
   }
 
-  void KittingStateController::executeMoveAction(const franka_gripper::MoveGoalConstPtr& goal) {
-    franka_gripper::MoveResult result;
+  template <typename ActionServer, typename Result>
+  void KittingStateController::executeGripperActionImpl(
+      ActionServer& server, GripperCommand cmd, const char* action_name) {
+    Result result;
     if (!isActionAllowed()) {
       result.success = false;
       result.error = "Gripper busy — state machine in " +
                      std::string(stateToString(current_state_.load(std::memory_order_relaxed)));
-      move_action_server_->setAborted(result, result.error);
+      server.setAborted(result, result.error);
       return;
     }
     auto promise = std::make_shared<std::promise<bool>>();
-    auto future = promise->get_future();
+    cmd.result_promise = promise;
+    queueGripperCommand(cmd);
+    result.success = promise->get_future().get();
+    if (result.success) {
+      server.setSucceeded(result);
+    } else {
+      result.error = std::string(action_name) + " failed";
+      server.setAborted(result, result.error);
+    }
+  }
+
+  void KittingStateController::executeMoveAction(const franka_gripper::MoveGoalConstPtr& goal) {
     GripperCommand cmd;
     cmd.type = GripperCommandType::MOVE;
     cmd.width = goal->width;
     cmd.speed = goal->speed;
-    cmd.result_promise = promise;
-    queueGripperCommand(cmd);
-    result.success = future.get();
-    if (result.success) {
-      move_action_server_->setSucceeded(result);
-    } else {
-      result.error = "move() failed";
-      move_action_server_->setAborted(result, result.error);
-    }
+    executeGripperActionImpl<MoveActionServer, franka_gripper::MoveResult>(
+        *move_action_server_, cmd, "move()");
   }
 
   void KittingStateController::executeGraspAction(const franka_gripper::GraspGoalConstPtr& goal) {
-    franka_gripper::GraspResult result;
-    if (!isActionAllowed()) {
-      result.success = false;
-      result.error = "Gripper busy — state machine in " +
-                     std::string(stateToString(current_state_.load(std::memory_order_relaxed)));
-      grasp_action_server_->setAborted(result, result.error);
-      return;
-    }
-    auto promise = std::make_shared<std::promise<bool>>();
-    auto future = promise->get_future();
     GripperCommand cmd;
     cmd.type = GripperCommandType::GRASP;
     cmd.width = goal->width;
@@ -225,39 +221,15 @@ namespace franka_kitting_controller {
     cmd.force = goal->force;
     cmd.epsilon_inner = goal->epsilon.inner;
     cmd.epsilon_outer = goal->epsilon.outer;
-    cmd.result_promise = promise;
-    queueGripperCommand(cmd);
-    result.success = future.get();
-    if (result.success) {
-      grasp_action_server_->setSucceeded(result);
-    } else {
-      result.error = "grasp() failed";
-      grasp_action_server_->setAborted(result, result.error);
-    }
+    executeGripperActionImpl<GraspActionServer, franka_gripper::GraspResult>(
+        *grasp_action_server_, cmd, "grasp()");
   }
 
   void KittingStateController::executeHomingAction(const franka_gripper::HomingGoalConstPtr& /*goal*/) {
-    franka_gripper::HomingResult result;
-    if (!isActionAllowed()) {
-      result.success = false;
-      result.error = "Gripper busy — state machine in " +
-                     std::string(stateToString(current_state_.load(std::memory_order_relaxed)));
-      homing_action_server_->setAborted(result, result.error);
-      return;
-    }
-    auto promise = std::make_shared<std::promise<bool>>();
-    auto future = promise->get_future();
     GripperCommand cmd;
     cmd.type = GripperCommandType::HOMING;
-    cmd.result_promise = promise;
-    queueGripperCommand(cmd);
-    result.success = future.get();
-    if (result.success) {
-      homing_action_server_->setSucceeded(result);
-    } else {
-      result.error = "homing() failed";
-      homing_action_server_->setAborted(result, result.error);
-    }
+    executeGripperActionImpl<HomingActionServer, franka_gripper::HomingResult>(
+        *homing_action_server_, cmd, "homing()");
   }
 
   void KittingStateController::executeStopAction(const franka_gripper::StopGoalConstPtr& /*goal*/) {

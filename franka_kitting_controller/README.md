@@ -13,7 +13,7 @@ This controller runs inside the `ros_control` real-time loop provided by `franka
 
 **Grasp** adds:
 
-- 11-state grasp machine with automated force ramp: `START` → `BASELINE` → `CLOSING` → `CONTACT` → `GRASPING` → `UPLIFT` → `EVALUATE` → `SUCCESS` (with slip retry loop via `DOWNLIFT` → `SETTLING` → `GRASPING`)
+- 14-state grasp machine with automated force ramp: `START` → `BASELINE` → `CLOSING_COMMAND` → `CLOSING` → `CONTACT_CONFIRMED` → `CONTACT` → `GRASPING` → `UPLIFT` → `EVALUATE` → `SUCCESS` (with slip retry loop via `SLIP` → `DOWNLIFT` → `SETTLING` → `GRASPING`)
 - Gripper stall contact detection during CLOSING
 - Immediate gripper stop on contact: calls `franka::Gripper::stop()` to physically halt the motor
 - Automated force ramp: increments grasp force from `f_min` to `f_max` in `f_step` increments until stable grasp or failure
@@ -81,7 +81,7 @@ roslaunch franka_kitting_controller kitting_state_controller.launch robot_ip:=<R
 
 ## Grasp: Interaction States
 
-Eleven interaction states structure the grasp execution sequence. The controller starts in `START` and waits for the user to publish `BASELINE` before any Grasp activity begins. Two modes of operation:
+Fourteen interaction states structure the grasp execution sequence. The controller starts in `START` and waits for the user to publish `BASELINE` before any Grasp activity begins. Two modes of operation:
 
 - **Manual mode**: The user sends three commands (`BASELINE`, `CLOSING`, `GRASPING`); all subsequent states are driven internally by the automated force ramp.
 - **Auto mode**: A single `AUTO` command runs the full sequence automatically with configurable delays between transitions.
@@ -89,11 +89,11 @@ Eleven interaction states structure the grasp execution sequence. The controller
 States are published on `/kitting_controller/state` for signal labeling and offline analysis. If recording is enabled (`record:=true`), recording starts automatically and continues through all state transitions.
 
 ```
-Manual:          BASELINE ──> CLOSING ──> CONTACT ──> GRASPING
-                 (user cmd)   (user cmd)  (auto)      (user cmd)
+Manual:          BASELINE ──> CLOSING_COMMAND ──> CLOSING ──> CONTACT_CONFIRMED ──> CONTACT ──> GRASPING
+                 (user cmd)   (user cmd)          (auto)      (auto)                (auto)      (user cmd)
 
 Auto (single command):
-                 BASELINE ─(delay)─> CLOSING ─(wait)─> CONTACT ─(delay)─> GRASPING
+                 BASELINE ─(delay)─> CLOSING_COMMAND ──> CLOSING ─(wait)─> CONTACT_CONFIRMED ──> CONTACT ─(delay)─> GRASPING
                                                                               │
 Force ramp (both modes):  ┌───────────────────────────────────────────────────┘
                           │
@@ -103,7 +103,7 @@ Force ramp (both modes):  ┌─────────────────
                           │                  [slip detected]
                           │                       │
                           │                       v
-                      SETTLING <── DOWNLIFT <─────┘
+                      SETTLING <── DOWNLIFT <── SLIP
                           │
                      [F > f_max]
                           │
@@ -111,7 +111,7 @@ Force ramp (both modes):  ┌─────────────────
                         FAILED
 ```
 
-CONTACT is auto-detected during CLOSING. SUCCESS and FAILED are terminal states.
+CLOSING_COMMAND transitions to CLOSING when the gripper move is confirmed executing. CONTACT_CONFIRMED is published immediately on stall detection; CONTACT follows when the gripper has physically stopped. SUCCESS and FAILED are terminal states.
 
 ### START
 
@@ -134,23 +134,40 @@ Prepare for a new grasp trial. Published via `/kitting_controller/state_cmd` wit
 - **Accumulated uplift correction**: If previous SUCCESS runs left the arm elevated, BASELINE automatically lowers the arm back to the original height before the next trial (cosine-smoothed downlift at `lift_speed`)
 - BASELINE is a one-shot state — publish once from START to begin the grasp sequence
 
+### CLOSING_COMMAND
+
+Gripper close queued — awaiting execution confirmation. Published via `/kitting_controller/state_cmd` with `command: "CLOSING"`.
+
+- Published immediately when the CLOSING command is received, before the gripper starts moving
+- Gripper move command is queued to the command thread but may not yet be executing
+- No contact detection runs in this state — data recorded here reflects true pre-closing conditions
+- Transitions to **CLOSING** automatically when `cmd_executing_` confirms the gripper move has started
+
 ### CLOSING
 
-Observe approach dynamics before contact.
+Observe approach dynamics before contact. Published **automatically** by the controller when gripper movement is confirmed.
 
-- Gripper begins closing toward object at width `w` and speed `v` (max 0.10 m/s)
+- Gripper is confirmed moving toward object at width `w` and speed `v` (max 0.10 m/s)
 - Gripper stall contact detection runs: finger width velocity stalls while gap to target width remains
-- CONTACT is latched immediately when detected
+- On stall detection, transitions immediately to **CONTACT_CONFIRMED**
 - If gripper reaches target width without stalling (no object present), transitions to **FAILED** — "no contact detected"
+
+### CONTACT_CONFIRMED
+
+Stall detected — gripper decelerating. Published **automatically** by the controller on stall detection.
+
+- Width velocity drops below `stall_velocity_threshold` (0.008 m/s) while `(width - w_cmd) > width_gap_threshold` (0.002 m), sustained for `T_hold_gripper` seconds (computed dynamically from `closing_speed`; see [Dynamic Gripper Debounce Time](#dynamic-gripper-debounce-time-t_hold_gripper))
+- `contact_width` is saved immediately at stall detection — used as the grasp width in GRASPING
+- `franka::Gripper::stop()` is requested via the read thread to halt the motor
+- Data recorded during this state captures the gripper deceleration dynamics
+- Transitions to **CONTACT** when the gripper has physically stopped (`gripper_stopped_` flag)
 
 ### CONTACT
 
-Detect first stable physical interaction. Published **automatically** by the controller.
+Gripper stopped — contact confirmed. Published **automatically** by the controller.
 
-- Object touches gripper fingers — detected by gripper stall detection
-- Width velocity drops below `stall_velocity_threshold` (0.008 m/s) while `(width - w_cmd) > width_gap_threshold` (0.002 m), sustained for `T_hold_gripper` seconds (computed dynamically from `closing_speed`; see [Dynamic Gripper Debounce Time](#dynamic-gripper-debounce-time-t_hold_gripper))
-- `contact_width` is saved immediately at stall detection — used as the grasp width in GRASPING
-- **Deferred transition**: On stall detection, `franka::Gripper::stop()` is requested via the read thread. The state remains CLOSING until the gripper has physically stopped (`gripper_stopped_` flag set by the read thread), then transitions to CONTACT. This ensures all data recorded during CONTACT reflects a stopped gripper.
+- Gripper motor has fully stopped after stall detection and stop request
+- All data recorded during CONTACT reflects a stopped gripper
 - CONTACT is **latched** once detected — cannot return to CLOSING
 
 ### GRASPING
@@ -184,11 +201,15 @@ Assess grasp stability at the lifted position. **Auto-triggered** after UPLIFT c
   - **Gate 1**: Load transfer confirmation — `delta_F > max(3*sigma_pre, load_transfer_min)`
   - **Gate 2**: Drop ratio + width change thresholds
 - If **secure** (both gates pass): transitions to SUCCESS
-- If **slip** (either gate fails): transitions to DOWNLIFT to retry with higher force
+- If **slip** (either gate fails): transitions to SLIP
+
+### SLIP
+
+Intermediate label indicating slip was detected. **Auto-triggered** after EVALUATE detects slip. Published for one tick so the admin can observe the slip event; immediately transitions to DOWNLIFT on the next cycle.
 
 ### DOWNLIFT
 
-Return end-effector to pre-lift height after slip detection. **Auto-triggered** after EVALUATE detects slip.
+Return end-effector to pre-lift height after slip detection. **Auto-triggered** after SLIP.
 
 - Controller displaces end-effector downward by `fr_uplift_distance` (same distance as UPLIFT)
 - Same cosine-smoothed trajectory as UPLIFT but descending: `z(t) = z_start - s * d`
@@ -230,7 +251,7 @@ Terminal state indicating grasp failure. **Auto-triggered** on any of:
 
 A single command that runs the full grasp sequence automatically. Published via `/kitting_controller/state_cmd` with `command: "AUTO"`.
 
-- Executes BASELINE → *(delay)* → CLOSING → *(wait for CONTACT)* → *(delay)* → GRASPING automatically
+- Executes BASELINE → *(delay)* → CLOSING_COMMAND → CLOSING → *(wait for CONTACT_CONFIRMED → CONTACT)* → *(delay)* → GRASPING automatically
 - `auto_delay` parameter controls the wait time between transitions (default 5.0 seconds)
 - All BASELINE, CLOSING, and GRASPING parameters are accepted and forwarded to each stage
 - The force ramp runs autonomously after GRASPING (same as manual mode)
@@ -255,7 +276,7 @@ Recording and state labeling are independent concerns.
 | `/franka_gripper/stop`               | franka_gripper/StopAction   | ActionServer | Emergency gripper stop (always allowed) |
 
 - `/kitting_controller/state_cmd` — The **user** publishes a `KittingGripperCommand` with `command` field set to `BASELINE`, `CLOSING`, `GRASPING`, or `AUTO`, plus optional per-object parameters. Any float64 parameter left at `0.0` falls back to the YAML config default. The **controller** executes the corresponding action, publishes the state label on `/kitting_controller/state`, and drives the force ramp internally. `AUTO` runs the full sequence automatically with configurable delays.
-- `/kitting_controller/state` — The **controller** publishes all 11 state labels: START, BASELINE, CLOSING, CONTACT, GRASPING, UPLIFT, EVALUATE, DOWNLIFT, SETTLING, SUCCESS, FAILED. States are labels for offline analysis. Terminal states (SUCCESS, FAILED) also trigger automatic recording stop when the logger is running.
+- `/kitting_controller/state` — The **controller** publishes all 14 state labels: START, BASELINE, CLOSING_COMMAND, CLOSING, CONTACT_CONFIRMED, CONTACT, GRASPING, UPLIFT, EVALUATE, SLIP, DOWNLIFT, SETTLING, SUCCESS, FAILED. States are labels for offline analysis. Terminal states (SUCCESS, FAILED) also trigger automatic recording stop when the logger is running.
 - `/kitting_controller/record_control` — The **user** publishes STOP or ABORT to end recording. Recording starts automatically when the logger launches — no START command is needed. The **logger** subscribes to this topic.
 - `/kitting_controller/logger_ready` — The **logger** publishes `true` (latched) on startup. When `record:=true`, the **controller** subscribes and gates Grasp commands behind this signal. When `record:=false`, this topic is not used.
 
@@ -331,7 +352,7 @@ rostopic pub /kitting_controller/record_control std_msgs/String "data: 'ABORT'" 
 
 ### Auto Mode
 
-A single `AUTO` command runs the full sequence: BASELINE → *(delay)* → CLOSING → *(wait for CONTACT)* → *(delay)* → GRASPING. All parameters from BASELINE, CLOSING, and GRASPING are accepted and forwarded to each stage.
+A single `AUTO` command runs the full sequence: BASELINE → *(delay)* → CLOSING_COMMAND → CLOSING → *(wait for CONTACT_CONFIRMED → CONTACT)* → *(delay)* → GRASPING. All parameters from BASELINE, CLOSING, and GRASPING are accepted and forwarded to each stage.
 
 ```bash
 # AUTO — run full sequence automatically (default 5s delay between transitions)
@@ -447,11 +468,11 @@ The **width gap check** is essential: without it, normal gripper completion (vel
 
 ### Gripper Stop on Contact
 
-When stall contact is detected, the controller stops the gripper and defers the CONTACT state transition until the stop is confirmed:
+When stall contact is detected, the controller stops the gripper and transitions through two contact states:
 
-1. **Stall detected (RT thread)**: Sets `contact_latched_`, stores `contact_width_`, and sets `stop_requested_` (single atomic store, nanoseconds). State remains **CLOSING**.
+1. **Stall detected (RT thread)**: Sets `contact_latched_`, stores `contact_width_`, sets `stop_requested_`, and transitions to **CONTACT_CONFIRMED** immediately.
 2. **Read thread executes stop**: Checks `stop_requested_` after each `readOnce()`, calls `franka::Gripper::stop()` to physically halt the motor, then sets `gripper_stopped_` to signal the RT thread.
-3. **Deferred transition (RT thread)**: On the next tick, sees `contact_latched_ && gripper_stopped_` and transitions to **CONTACT**.
+3. **Deferred transition (RT thread)**: On the next tick, sees `contact_latched_ && CONTACT_CONFIRMED && gripper_stopped_` and transitions to **CONTACT**.
 4. **One-shot guard**: `gripper_stop_sent_` flag prevents duplicate stop requests; `contact_latched_` prevents re-detection.
 
 The atomic stores in `update()` are single-word writes (nanoseconds), fully RT-safe. The actual `stop()` call executes in the non-RT read thread. The state transition is deferred by ~20–30 ms (one gripper firmware update period) to ensure the gripper has physically stopped before CONTACT data is recorded.
@@ -503,7 +524,7 @@ All computed values are above the experimentally determined minimum working thre
 
 #### Implementation
 
-The hold time is computed once when the RT thread transitions to CLOSING (in `applyPendingStateTransition()`), using the RT-local copy of closing speed:
+The hold time is computed once when the RT thread transitions to CLOSING_COMMAND (in `applyPendingStateTransition()`), using the RT-local copy of closing speed:
 
 ```
   rt_T_hold_gripper_ = computeGripperHoldTime(rt_closing_v_cmd_)
@@ -637,7 +658,7 @@ Slip detected — load transferred but object slipped during hold:
 
 - Load transfer confirmed, but s_drop saturated at 1.0 (23.8% drop >> 15% threshold)
 - s_motion also saturated (P95-P5 = 1.4 mm >> 0.5 mm threshold)
-- **Verdict: SLIPPING → DOWNLIFT → retry with more force**
+- **Verdict: SLIPPING → SLIP → DOWNLIFT → retry with more force**
 
 Failed load transfer (object not lifted):
 
@@ -651,7 +672,7 @@ Failed load transfer (object not lifted):
 
 - `deltaF=0.142` < 1.0 → load transfer FAILED (object weight never appeared on gripper)
 - Sub-scores are low, but gate failure alone triggers SLIPPING
-- **Verdict: SLIPPING → DOWNLIFT → retry with more force**
+- **Verdict: SLIPPING → SLIP → DOWNLIFT → retry with more force**
 
 ### How to Read the Log
 
@@ -907,7 +928,7 @@ Only the parameters relevant to the command are used:
 | `wrench_norm`  | float64     | Euclidean norm of `wrench_ext`                    |
 | `gripper_width` | float64    | Measured finger width [m]                         |
 | `gripper_width_dot` | float64 | Finger width velocity (finite difference) [m/s]  |
-| `gripper_width_cmd` | float64 | Commanded closing width [m] (0 if not CLOSING)   |
+| `gripper_width_cmd` | float64 | Commanded closing width [m] (0 if not CLOSING_COMMAND/CLOSING/CONTACT_CONFIRMED) |
 | `gripper_max_width` | float64 | Maximum gripper opening width [m]                |
 | `gripper_is_grasped` | bool   | Firmware-level grasp detection flag               |
 | `grasp_force`  | float64     | Current grasp force [N] (0 if not in force ramp)  |
@@ -976,7 +997,7 @@ The Grasp logger is written in C++ using the `rosbag::Bag` API directly and `top
 - Recording continues through all state transitions until STOP, ABORT, terminal state (SUCCESS/FAILED), or node shutdown
 - Recording auto-stops on SUCCESS or FAILED (terminal state message is written to bag before closing)
 - Recording and state labeling are independent
-- State labels on `/kitting_controller/state` are published by the controller for offline segmentation (11 states)
+- State labels on `/kitting_controller/state` are published by the controller for offline segmentation (14 states)
 - State labels merged into CSV from `/kitting_controller/state` topic for per-sample state identification
 - One rosbag per trial containing all signals and all state transitions
 - STOP saves bag + metadata + CSV, ABORT deletes trial (no CSV)
@@ -987,17 +1008,17 @@ The Grasp logger is written in C++ using the `rosbag::Bag` API directly and `top
 - metadata.yaml contains bag_filename, csv_filename, total_samples, start/stop times, and detector parameters
 - Gripper stall contact detection: velocity < threshold AND width gap > threshold for T_hold_gripper (computed: 0.35 + 0.5 \* closing_speed)
 - Free closing (no object): width reaches w_cmd, gap ~0 → no false CONTACT → transitions to FAILED ("no contact detected")
-- Object contact: width stalls before w_cmd, w_dot ~0, gap > threshold → CONTACT
+- Object contact: width stalls before w_cmd, w_dot ~0, gap > threshold → CONTACT_CONFIRMED immediately, then CONTACT when gripper stopped
 - Gripper stop requested immediately on contact: `stop()` called via atomic flag and read thread
-- CONTACT state transition deferred until gripper has physically stopped (`gripper_stopped_` flag)
+- CONTACT_CONFIRMED published at stall detection; CONTACT deferred until gripper has physically stopped (`gripper_stopped_` flag)
 - Contact width saved at stall detection — used as the grasp width in GRASPING
 - KittingState contains robot signals, gripper signals, and force ramp state — all published at 250 Hz
-- Publishing CLOSING on `state_cmd` triggers gripper `move()` + state label
+- Publishing CLOSING on `state_cmd` triggers gripper `move()` + CLOSING_COMMAND state label (transitions to CLOSING when move confirmed executing)
 - Publishing BASELINE on `state_cmd` prepares for new trial (optionally opens gripper)
 - Publishing GRASPING on `state_cmd` starts the automated force ramp (uses contact_width from CONTACT)
 - GRASPING timeout: 10 seconds maximum for gripper command completion, then FAILED
 - Force ramp runs autonomously after GRASPING: GRASPING → UPLIFT → EVALUATE → SUCCESS
-- Slip detected during EVALUATE: DOWNLIFT → SETTLING → GRASPING (retry with F += f_step, using gripper width snapshot from right before last UPLIFT)
+- Slip detected during EVALUATE: SLIP → DOWNLIFT → SETTLING → GRASPING (retry with F += f_step, using gripper width snapshot from right before last UPLIFT)
 - Force ramp retry calls `stop()` before dispatching deferred grasp — prevents libfranka hang when gripper is already grasped
 - Force ramp terminates with FAILED if f_current exceeds f_max
 - UPLIFT and DOWNLIFT trajectories use cosine smoothing with duration computed from distance/speed
@@ -1007,18 +1028,18 @@ The Grasp logger is written in C++ using the `rosbag::Bag` API directly and `top
 - BASELINE during active force ramp clears trajectories and returns to passthrough
 - Per-command force ramp parameters override YAML defaults when non-zero
 - Parameters left at 0.0 fall back to YAML config values
-- Duplicate CLOSING commands are ignored
+- Duplicate CLOSING commands are ignored (rejected during CLOSING_COMMAND or CLOSING)
 - Controller holds position (passthrough) when not executing trajectory — no drift or jerk
 - Gripper connection failure at init returns false (controller not loaded)
 - Controller destructor shuts down action servers then joins gripper threads cleanly on unload
 - Gripper action servers (move, grasp, homing, stop) advertised under `/franka_gripper/` namespace
 - Action servers guarded by state machine — only allowed in START, SUCCESS, FAILED
-- Action server requests rejected with descriptive error during active grasp sequence (BASELINE through EVALUATE)
+- Action server requests rejected with descriptive error during active grasp sequence (BASELINE through SETTLING)
 - Stop action always allowed regardless of state (thread-safe `gripper_->stop()`)
 - Move, grasp, homing actions routed through command thread to prevent concurrent libfranka calls
 - Action server shutdown before gripper thread shutdown prevents hanging futures on controller unload
-- AUTO command runs full grasp sequence: BASELINE → *(delay)* → CLOSING → *(wait for CONTACT)* → *(delay)* → GRASPING
-- AUTO mode uses configurable `auto_delay` (default 5.0 seconds) between BASELINE→CLOSING and CONTACT→GRASPING transitions
+- AUTO command runs full grasp sequence: BASELINE → *(delay)* → CLOSING_COMMAND → CLOSING → *(wait for CONTACT_CONFIRMED → CONTACT)* → *(delay)* → GRASPING
+- AUTO mode uses configurable `auto_delay` (default 5.0 seconds) between BASELINE→CLOSING_COMMAND and CONTACT→GRASPING transitions
 - AUTO mode forwards all BASELINE, CLOSING, and GRASPING parameters from the single message to each stage
 - AUTO mode cancelled by any manual command (BASELINE, CLOSING, GRASPING) — allows user override at any point
 - AUTO mode ends automatically on FAILED during CLOSING (no contact detected) or after GRASPING starts (force ramp is autonomous)
