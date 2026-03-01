@@ -26,15 +26,12 @@ namespace franka_kitting_controller {
   // C++14 requires out-of-line definitions for static constexpr members
   // that are ODR-used (e.g. passed by reference to std::min/std::max).
   constexpr double KittingStateController::kMaxClosingSpeed;
-  constexpr double KittingStateController::kGripperHoldBase;
-  constexpr double KittingStateController::kGripperHoldSlope;
   constexpr double KittingStateController::kMaxUpliftDistance;
   constexpr double KittingStateController::kMinUpliftHold;
   constexpr int    KittingStateController::kWidthSamplesPerSec;
   constexpr double KittingStateController::kGraspSettleDelay;
   constexpr double KittingStateController::kGraspTimeout;
-  constexpr double KittingStateController::kForceDropDebounceTime;
-  constexpr int    KittingStateController::FD_FILTER_MAX;
+  constexpr int    KittingStateController::kForceDropBaselineSamples;
 
   // ============================================================================
   // Utilities (used by all translation units)
@@ -96,13 +93,8 @@ namespace franka_kitting_controller {
     if (!gripper_stop_sent_.load(std::memory_order_relaxed)) {
       stop_requested_.store(true, std::memory_order_relaxed);
       gripper_stop_sent_.store(true, std::memory_order_relaxed);
-      ROS_INFO("  [GRIPPER]  %s contact -> stop() requested", source);
+      ROS_INFO("  [GRIPPER]  %s -> stop() requested", source);
     }
-  }
-
-  double KittingStateController::computeGripperHoldTime(double closing_speed) {
-    double clamped = std::min(std::max(closing_speed, 0.0), kMaxClosingSpeed);
-    return kGripperHoldBase + kGripperHoldSlope * clamped;
   }
 
   // ============================================================================
@@ -180,51 +172,25 @@ namespace franka_kitting_controller {
     }
     rate_trigger_ = franka_hw::TriggerRate(publish_rate);
 
-    // --- Grasp: Load contact detection parameters (gripper stall detection, always enabled) ---
-    node_handle.param("stall_velocity_threshold", stall_velocity_threshold_, 0.008);
-    node_handle.param("width_gap_threshold", width_gap_threshold_, 0.002);
-
-    // --- Contact method selection ---
-    std::string contact_method_str;
-    node_handle.param<std::string>("contact_method", contact_method_str, "force_drop");
-    if (contact_method_str == "force_drop") {
-      contact_method_ = ContactMethod::FORCE_DROP;
-    } else if (contact_method_str == "stall") {
-      contact_method_ = ContactMethod::STALL;
-    } else {
-      ROS_WARN("KittingStateController: Unknown contact_method '%s', defaulting to 'force_drop'",
-               contact_method_str.c_str());
-      contact_method_ = ContactMethod::FORCE_DROP;
-    }
-
     // --- Force-drop contact detection parameters ---
     node_handle.param("force_drop_thresh", force_drop_thresh_, 0.3);
-    node_handle.param("force_drop_baseline_samples", force_drop_baseline_samples_, 50);
-    node_handle.param("force_drop_filter_samples", force_drop_filter_samples_, 10);
+    node_handle.param("force_drop_debounce_time", force_drop_debounce_time_, 0.05);
 
     if (force_drop_thresh_ <= 0.0) {
       ROS_WARN("KittingStateController: force_drop_thresh must be positive (got %.3f), using 0.3",
                force_drop_thresh_);
       force_drop_thresh_ = 0.3;
     }
-    if (force_drop_baseline_samples_ < 10) {
-      ROS_WARN("KittingStateController: force_drop_baseline_samples must be >= 10 (got %d), using 50",
-               force_drop_baseline_samples_);
-      force_drop_baseline_samples_ = 50;
-    }
-    if (force_drop_filter_samples_ < 1 || force_drop_filter_samples_ > FD_FILTER_MAX) {
-      ROS_WARN("KittingStateController: force_drop_filter_samples must be 1-%d (got %d), using 10",
-               FD_FILTER_MAX, force_drop_filter_samples_);
-      force_drop_filter_samples_ = 10;
+    if (force_drop_debounce_time_ < 0.0) {
+      ROS_WARN("KittingStateController: force_drop_debounce_time must be >= 0 (got %.3f), using 0.05",
+               force_drop_debounce_time_);
+      force_drop_debounce_time_ = 0.05;
     }
 
-    ROS_INFO_STREAM("KittingStateController: Contact detector"
-                    << " | method=" << contact_method_str
-                    << " | stall_vel=" << stall_velocity_threshold_
-                    << " gap=" << width_gap_threshold_ << " T_hold_grip=dynamic(speed)"
-                    << " | force_drop: thresh=" << force_drop_thresh_
-                    << " baseline=" << force_drop_baseline_samples_
-                    << " filter=" << force_drop_filter_samples_);
+    ROS_INFO_STREAM("KittingStateController: Contact detection (force-drop)"
+                    << " | thresh=" << force_drop_thresh_
+                    << " | debounce=" << force_drop_debounce_time_ << "s"
+                    << " | baseline=" << kForceDropBaselineSamples << " samples");
 
     // --- Grasp: Gripper default parameters (overridable per-command via KittingGripperCommand) ---
     node_handle.param("closing_width", closing_width_, 0.01);
@@ -249,7 +215,7 @@ namespace franka_kitting_controller {
     node_handle.param("epsilon", fr_epsilon_, 0.008);
     node_handle.param("slip_drop_thresh", fr_slip_drop_thresh_, 0.15);
     node_handle.param("slip_width_thresh", fr_slip_width_thresh_, 0.0005);
-    node_handle.param("load_transfer_min", fr_load_transfer_min_, 1.0);
+    node_handle.param("load_transfer_min", fr_load_transfer_min_, 2.0);
 
     // Validate force ramp parameters
     if (fr_f_min_ <= 0.0) {
@@ -496,8 +462,6 @@ namespace franka_kitting_controller {
       // Reset force-drop state
       fd_baseline_sum_ = 0.0;  fd_baseline_count_ = 0;
       fd_baseline_ = 0.0;      fd_baseline_ready_ = false;
-      fd_filter_idx_ = 0;  fd_filter_sum_ = 0.0;  fd_filter_count_ = 0;
-      std::fill(std::begin(fd_filter_buf_), std::end(fd_filter_buf_), 0.0);
 
       ROS_INFO("  [BASELINE]  State machine reset for new trial");
 
@@ -519,29 +483,24 @@ namespace franka_kitting_controller {
     if (new_state == GraspState::CLOSING_COMMAND) {
       rt_closing_w_cmd_ = closing_w_cmd_;
       rt_closing_v_cmd_ = closing_v_cmd_;
-      rt_T_hold_gripper_ = computeGripperHoldTime(rt_closing_v_cmd_);
       gripper_debounce_.reset();
       gripper_stop_sent_.store(false, std::memory_order_relaxed);
       gripper_stopped_.store(false, std::memory_order_relaxed);
       closing_cmd_seen_executing_ = false;
       closing_command_entered_ = true;
 
-      // Snapshot contact method parameters
-      rt_contact_method_ = closing_contact_method_;
+      // Snapshot force-drop parameters
       rt_force_drop_thresh_ = closing_force_drop_thresh_;
-      fd_filter_size_ = std::min(force_drop_filter_samples_, FD_FILTER_MAX);
+      rt_force_drop_debounce_time_ = closing_force_drop_debounce_time_;
 
-      // Reset force-drop state for new closing sequence
-      fd_baseline_sum_ = 0.0;  fd_baseline_count_ = 0;
-      fd_baseline_ = 0.0;      fd_baseline_ready_ = false;
-      fd_filter_idx_ = 0;  fd_filter_sum_ = 0.0;  fd_filter_count_ = 0;
-      std::fill(std::begin(fd_filter_buf_), std::end(fd_filter_buf_), 0.0);
+      // Fn baseline was collected during BASELINE state — preserve it.
+      // Only reset the debounce state (not the baseline) for the new closing sequence.
 
       publishStateLabel("CLOSING_COMMAND");
-      const char* method_str = (rt_contact_method_ == ContactMethod::FORCE_DROP) ?
-                               "force_drop" : "stall";
-      ROS_INFO("  [CLOSING_COMMAND]  contact_method=%s  T_hold_gripper=%.3fs (from speed=%.4f m/s)",
-              method_str, rt_T_hold_gripper_, rt_closing_v_cmd_);
+      ROS_INFO("  [CLOSING_COMMAND]  force_drop_thresh=%.3f  debounce=%.3fs  speed=%.4f m/s  "
+              "Fn_baseline=%.3f%s",
+              rt_force_drop_thresh_, rt_force_drop_debounce_time_, rt_closing_v_cmd_,
+              fd_baseline_, fd_baseline_ready_ ? "" : " (NOT READY)");
     }
 
     // Handle GRASPING start: snapshot force ramp parameters, initialize force ramp state
@@ -687,6 +646,24 @@ namespace franka_kitting_controller {
       // Single gripper snapshot per tick — all consumers see consistent data
       const GripperData gripper_snapshot = *gripper_data_buf_.readFromRT();
 
+      // Fn baseline collection — runs during BASELINE at 250Hz.
+      // Captures the at-rest support force before any gripper motion.
+      // Skips ticks while accumulated-uplift downlift is active (arm not settled).
+      {
+        GraspState bl_state = current_state_.load(std::memory_order_relaxed);
+        if (bl_state == GraspState::BASELINE && !fd_baseline_ready_ &&
+            !downlift_active_.load(std::memory_order_relaxed)) {
+          fd_baseline_sum_ += support_force;
+          fd_baseline_count_++;
+          if (fd_baseline_count_ >= kForceDropBaselineSamples) {
+            fd_baseline_ = fd_baseline_sum_ / fd_baseline_count_;
+            fd_baseline_ready_ = true;
+            ROS_INFO("  [BASELINE]  Fn baseline ready: %.3f N  (from %d samples, 0.2s)",
+                     fd_baseline_, fd_baseline_count_);
+          }
+        }
+      }
+
       runClosingTransitions(time, gripper_snapshot, support_force);
 
       // Run internal force ramp transitions (GRASPING→UPLIFT→EVALUATE→...)
@@ -702,24 +679,22 @@ namespace franka_kitting_controller {
       // Re-read state since runInternalTransitions may have changed it
       const GraspState state = current_state_.load(std::memory_order_relaxed);
       if (signal_log_trigger_()) {
-        if (isClosingPhase(state)) {
-          if (rt_contact_method_ == ContactMethod::FORCE_DROP) {
-            double fn_filtered = (fd_filter_count_ > 0) ? fd_filter_sum_ / fd_filter_count_ : support_force;
-            double drop = fd_baseline_ready_ ? (fd_baseline_ - fn_filtered) : 0.0;
-            ROS_INFO("  [SIGNAL]  %s  |  force_drop: Fn_raw=%.3f Fn_filt=%.3f baseline=%.3f "
-                    "drop=%.3f thresh=%.3f %s",
-                    stateToString(state), support_force, fn_filtered, fd_baseline_,
-                    drop, rt_force_drop_thresh_,
-                    fd_baseline_ready_ ? (drop > rt_force_drop_thresh_ ? "DROP" : "ok") : "collecting");
+        if (state == GraspState::BASELINE) {
+          if (fd_baseline_ready_) {
+            ROS_INFO("  [SIGNAL]  BASELINE  |  Fn_baseline=%.3f N  (ready)", fd_baseline_);
+          } else if (downlift_active_.load(std::memory_order_relaxed)) {
+            ROS_INFO("  [SIGNAL]  BASELINE  |  awaiting downlift correction");
           } else {
-            double grip_gap = gripper_snapshot.width - rt_closing_w_cmd_;
-            bool grip_stall = (std::abs(gripper_snapshot.width_dot) < stall_velocity_threshold_) &&
-                              (grip_gap > width_gap_threshold_);
-            ROS_INFO("  [SIGNAL]  %s  |  stall: w=%.4f w_cmd=%.4f gap=%.4f w_dot=%.6f %s",
-                    stateToString(state), gripper_snapshot.width, rt_closing_w_cmd_, grip_gap,
-                    gripper_snapshot.width_dot,
-                    grip_stall ? "STALL" : "moving");
+            ROS_INFO("  [SIGNAL]  BASELINE  |  collecting: %d/%d samples  Fn=%.3f",
+                    fd_baseline_count_, kForceDropBaselineSamples, support_force);
           }
+        } else if (isClosingPhase(state)) {
+          double drop = fd_baseline_ready_ ? (fd_baseline_ - support_force) : 0.0;
+          ROS_INFO("  [SIGNAL]  %s  |  force_drop: Fn=%.3f baseline=%.3f "
+                  "drop=%.3f thresh=%.3f %s",
+                  stateToString(state), support_force, fd_baseline_,
+                  drop, rt_force_drop_thresh_,
+                  fd_baseline_ready_ ? (drop > rt_force_drop_thresh_ ? "DROP" : "ok") : "collecting");
         } else if (isForceRampPhase(state)) {
           ROS_INFO("  [SIGNAL]  %s  |  F=%.1f  iter=%d  Fn=%.2f",
                   stateToString(state), fr_f_current_, fr_iteration_,
@@ -729,11 +704,10 @@ namespace franka_kitting_controller {
 
       // Gripper velocity — 10 Hz during closing phase (DEBUG level to minimize realtime allocation)
       if (isClosingPhase(state) && gripper_log_trigger_()) {
-        ROS_DEBUG("  [GRIP]  w=%.5f  w_dot=%.6f m/s  gap=%.5f  %s",
+        ROS_DEBUG("  [GRIP]  w=%.5f  w_dot=%.6f m/s  gap=%.5f",
                   gripper_snapshot.width,
                   gripper_snapshot.width_dot,
-                  gripper_snapshot.width - rt_closing_w_cmd_,
-                  (std::abs(gripper_snapshot.width_dot) < stall_velocity_threshold_) ? "SLOW" : "ok");
+                  gripper_snapshot.width - rt_closing_w_cmd_);
       }
 
       if (kitting_publisher_.trylock()) {

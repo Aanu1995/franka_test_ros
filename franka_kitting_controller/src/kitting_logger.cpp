@@ -83,11 +83,6 @@ namespace franka_kitting_controller {
           "/kitting_controller/state"};
     }
 
-    // Detector params for metadata (read from controller namespace)
-    std::string ctrl_ns = "/kitting_state_controller/";
-    nh_.param(ctrl_ns + "stall_velocity_threshold", stall_velocity_threshold_, 0.008);
-    nh_.param(ctrl_ns + "width_gap_threshold", width_gap_threshold_, 0.002);
-
     // --- Subscribe to record control (STOP, ABORT) ---
     record_control_sub_ = nh_.subscribe(
         "/kitting_controller/record_control", 10,
@@ -355,9 +350,7 @@ namespace franka_kitting_controller {
     f << "export_csv_on_stop: " << (export_csv_on_stop_ ? "true" : "false") << "\n";
 
     f << "detector_parameters:\n";
-    f << "  T_hold_gripper: \"computed: 0.35 + 0.5 * closing_speed\"\n";
-    f << "  stall_velocity_threshold: " << stall_velocity_threshold_ << "\n";
-    f << "  width_gap_threshold: " << width_gap_threshold_ << "\n";
+    f << "  method: force_drop\n";
 
     f.close();
     ROS_INFO("KittingLogger: Metadata written -> %s", meta_path.c_str());
@@ -402,6 +395,7 @@ namespace franka_kitting_controller {
       csv << ",ee_vx,ee_vy,ee_vz,ee_wx,ee_wy,ee_wz";
       for (int i = 1; i <= 7; ++i) csv << ",gravity_" << i;
       for (int i = 1; i <= 7; ++i) csv << ",coriolis_" << i;
+      csv << ",support_force,tangential_force";
       csv << ",gripper_width,gripper_width_dot,gripper_width_cmd,gripper_max_width,gripper_is_grasped";
       csv << ",grasp_force,grasp_iteration";
       csv << "\n";
@@ -456,6 +450,9 @@ namespace franka_kitting_controller {
           for (size_t i = 0; i < 7; ++i) csv << "," << ks->gravity[i];
           // coriolis[7]
           for (size_t i = 0; i < 7; ++i) csv << "," << ks->coriolis[i];
+          // Derived forces
+          csv << "," << ks->support_force
+              << "," << ks->tangential_force;
           // Gripper signals
           csv << "," << ks->gripper_width
               << "," << ks->gripper_width_dot

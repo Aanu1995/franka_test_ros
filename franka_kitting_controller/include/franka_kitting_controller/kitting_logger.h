@@ -54,9 +54,6 @@ namespace franka_kitting_controller {
     bool export_csv_on_stop_;
     std::vector<std::string> topics_to_record_;
 
-    // Detector params (read from parameter server for metadata)
-    double stall_velocity_threshold_, width_gap_threshold_;
-
     // CSV export thread (joinable, not detached)
     std::thread csv_export_thread_;
 

@@ -1,6 +1,6 @@
 # franka_kitting_controller
 
-Real-time state acquisition and automated force ramp controller for the Franka Panda with selectable contact detection (stall or force-drop) and rosbag data collection. Reads all robot state, model, and Cartesian signals, publishes them as a single `KittingState` message, autonomously detects contact using gripper stall detection or force-drop detection, immediately stops the gripper on contact via `franka::Gripper::stop()`, and runs an automated force ramp loop (GRASPING → UPLIFT → EVALUATE → SUCCESS, with slip-triggered retry at higher force) internally. Claims `FrankaPoseCartesianInterface` for Cartesian pose control. Gripper operations use the libfranka `franka::Gripper` API directly. Also exposes `franka_gripper`-compatible action servers (move, grasp, homing, stop) for external gripper control when the internal state machine is idle.
+Real-time state acquisition and automated force ramp controller for the Franka Panda with force-drop contact detection and rosbag data collection. Reads all robot state, model, and Cartesian signals, publishes them as a single `KittingState` message, autonomously detects contact using force-drop contact detection, immediately stops the gripper on contact via `franka::Gripper::stop()`, and runs an automated force ramp loop (GRASPING → UPLIFT → EVALUATE → SUCCESS, with slip-triggered retry at higher force) internally. Claims `FrankaPoseCartesianInterface` for Cartesian pose control. Gripper operations use the libfranka `franka::Gripper` API directly. Also exposes `franka_gripper`-compatible action servers (move, grasp, homing, stop) for external gripper control when the internal state machine is idle.
 
 ## Overview
 
@@ -9,15 +9,15 @@ This controller runs inside the `ros_control` real-time loop provided by `franka
 - **Joint-level signals**: positions, velocities, measured torques, estimated external torques (7 DOF each)
 - **Cartesian-level signals**: end-effector pose (4x4), external wrench (6D)
 - **Model-level signals**: Zero Jacobian (6x7), gravity vector, Coriolis vector
-- **Derived metrics**: external torque norm, wrench norm, end-effector velocity
+- **Derived metrics**: external torque norm, wrench norm, end-effector velocity, support force (Fn = |Fz|), tangential force (Ft = √(Fx²+Fy²))
 
 **Grasp** adds:
 
 - 14-state grasp machine with automated force ramp: `START` → `BASELINE` → `CLOSING_COMMAND` → `CLOSING` → `CONTACT_CONFIRMED` → `CONTACT` → `GRASPING` → `UPLIFT` → `EVALUATE` → `SUCCESS` (with slip retry loop via `SLIP` → `DOWNLIFT` → `SETTLING` → `GRASPING`)
-- Selectable contact detection during CLOSING: force-drop (default) or gripper stall
+- Force-drop contact detection during CLOSING
 - Immediate gripper stop on contact: calls `franka::Gripper::stop()` to physically halt the motor
 - Automated force ramp: increments grasp force from `f_min` to `f_max` in `f_step` increments until stable grasp or failure
-- Load-transfer drop metric slip detection: two-gate wrench_norm evaluation during EVALUATE hold
+- Three-gate AND slip detection: load transfer + support drop + jaw widening (directional force decomposition, Fn = |Fz|) during EVALUATE hold
 - One rosbag per trial with all state transitions (recording starts automatically on launch)
 - Automatic CSV export on stop for analysis-ready datasets
 - Per-trial metadata output for offline analysis reproducibility
@@ -111,7 +111,7 @@ Force ramp (both modes):  ┌─────────────────
                         FAILED
 ```
 
-CLOSING_COMMAND transitions to CLOSING when the gripper move is confirmed executing. CONTACT_CONFIRMED is published immediately on contact detection (stall or force-drop); CONTACT follows when the gripper has physically stopped. SUCCESS and FAILED are terminal states.
+CLOSING_COMMAND transitions to CLOSING when the gripper move is confirmed executing. CONTACT_CONFIRMED is published immediately on contact detection; CONTACT follows when the gripper has physically stopped. SUCCESS and FAILED are terminal states.
 
 ### START
 
@@ -148,16 +148,15 @@ Gripper close queued — awaiting execution confirmation. Published via `/kittin
 Observe approach dynamics before contact. Published **automatically** by the controller when gripper movement is confirmed.
 
 - Gripper is confirmed moving toward object at width `w` and speed `v` (max 0.10 m/s)
-- Contact detection runs using the selected method (`contact_method`): force-drop detection (default) or stall detection
+- Force-drop contact detection runs during this state (see [Force-Drop Contact Detection](#force-drop-contact-detection))
 - On contact detection, transitions immediately to **CONTACT_CONFIRMED**
 - If gripper reaches target width without detecting contact (no object present), transitions to **FAILED** — "no contact detected"
 
 ### CONTACT_CONFIRMED
 
-Contact detected — gripper decelerating. Published **automatically** by the controller on contact detection (stall or force-drop).
+Contact detected — gripper decelerating. Published **automatically** by the controller on contact detection.
 
-- **Stall method**: Width velocity drops below `stall_velocity_threshold` (0.008 m/s) while `(width - w_cmd) > width_gap_threshold` (0.002 m), sustained for `T_hold_gripper` seconds (computed dynamically from `closing_speed`; see [Dynamic Gripper Debounce Time](#dynamic-gripper-debounce-time-t_hold_gripper))
-- **Force-drop method**: Filtered Fn drops below baseline by more than `force_drop_thresh` (default 0.3 N), sustained for 0.05 s internal debounce (see [Force-Drop Contact Detection](#force-drop-contact-detection))
+- Fn drops below baseline by more than `force_drop_thresh` (default 0.3 N), sustained for `force_drop_debounce_time` (default 0.05 s) (see [Force-Drop Contact Detection](#force-drop-contact-detection))
 - `contact_width` is saved immediately at contact detection — used as the grasp width in GRASPING
 - `franka::Gripper::stop()` is requested via the read thread to halt the motor
 - Data recorded during this state captures the gripper deceleration dynamics
@@ -167,7 +166,7 @@ Contact detected — gripper decelerating. Published **automatically** by the co
 
 Gripper stopped — contact confirmed. Published **automatically** by the controller.
 
-- Gripper motor has fully stopped after stall detection and stop request
+- Gripper motor has fully stopped after contact detection and stop request
 - All data recorded during CONTACT reflects a stopped gripper
 - CONTACT is **latched** once detected — cannot return to CLOSING
 
@@ -242,7 +241,7 @@ Terminal state indicating stable grasp confirmed. **Auto-triggered** when EVALUA
 
 Terminal state indicating grasp failure. **Auto-triggered** on any of:
 
-- No contact detected during CLOSING (gripper reached target width without stalling)
+- No contact detected during CLOSING (gripper reached target width without detecting contact)
 - Maximum force exceeded (`f_current > f_max`) after all force ramp iterations
 - GRASPING timeout (gripper command did not complete within 10 seconds)
 - State label published for offline analysis with diagnostic information
@@ -323,10 +322,6 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
   "{command: 'CLOSING', closing_width: 0.01, closing_speed: 0.05}" --once
 
-# CLOSING — override to stall contact detection instead of default force-drop
-rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
-  "{command: 'CLOSING', contact_method: 'stall'}" --once
-
 # CLOSING — use force-drop with a custom threshold (default is 0.3 N)
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
   "{command: 'CLOSING', force_drop_thresh: 0.5}" --once
@@ -350,7 +345,7 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
     fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
     fr_uplift_distance: 0.010, fr_lift_speed: 0.01, fr_uplift_hold: 1.0, \
     fr_slip_drop_thresh: 0.15, fr_slip_width_thresh: 0.0005, \
-    fr_load_transfer_min: 1.0}" --once
+    fr_load_transfer_min: 2.0}" --once
 
 # Stop recording
 rostopic pub /kitting_controller/record_control std_msgs/String "data: 'STOP'" --once
@@ -378,7 +373,7 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
     fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
     fr_uplift_distance: 0.010, fr_lift_speed: 0.01, fr_uplift_hold: 1.0, \
     fr_slip_drop_thresh: 0.15, fr_slip_width_thresh: 0.0005, \
-    fr_load_transfer_min: 1.0}" --once
+    fr_load_transfer_min: 2.0}" --once
 ```
 
 ## Gripper Action Servers
@@ -424,60 +419,7 @@ The `/franka_gripper/` namespace matches the default namespace used by `franka_g
 
 ## Grasp: Contact Detection
 
-The controller detects contact during CLOSING using one of two selectable methods:
-
-- **Force-drop** (default): Detects a sudden drop in support force (Fn = |Fz|) when the gripper contacts an object. Uses a sliding-window filter to smooth noise and avoid false positives.
-- **Stall**: Detects when the gripper fingers stop moving before reaching the target width — an object is blocking them.
-
-The method is selected via the `contact_method` YAML parameter or per-command via the `contact_method` field in `KittingGripperCommand`. Both methods share the same downstream flow: `CONTACT_CONFIRMED` → `CONTACT`.
-
-### Gripper Stall Detection
-
-Monitors gripper finger width velocity via finite difference. When the gripper is commanded to close but the fingers stop moving before reaching the target width, an object is blocking them.
-
-#### Data Source
-
-The controller reads gripper state directly from `franka::Gripper::readOnce()` at firmware rate in a dedicated read thread. This provides:
-
-```
-  w         = GripperState.width       (direct finger width, no reconstruction needed)
-  max_width = GripperState.max_width   (maximum opening width)
-  is_grasped = GripperState.is_grasped (firmware-level grasp detection)
-```
-
-Width velocity is computed via finite difference in the read thread:
-
-```
-  w_dot = (w_current - w_previous) / dt
-```
-
-The `GripperData` struct `{width, max_width, width_dot, is_grasped, stamp}` is passed to the RT `update()` loop via a lock-free `realtime_tools::RealtimeBuffer`.
-
-#### Stall Detection Logic
-
-During CLOSING, the controller checks every RT tick:
-
-```
-  velocity_stalled = |w_dot| < stall_velocity_threshold    (default 0.008 m/s)
-  width_gap_exists = (w - w_cmd) > width_gap_threshold     (default 0.002 m)
-
-  stall_detected = velocity_stalled AND width_gap_exists
-```
-
-The **width gap check** is essential: without it, normal gripper completion (velocity drops to 0 at target width) would false-trigger as contact. The gap ensures we only detect stalls where the gripper stopped **before** reaching its commanded width.
-
-**Debounce**: The stall condition must persist for `T_hold_gripper` seconds (computed dynamically from `closing_speed`; see [Dynamic Gripper Debounce Time](#dynamic-gripper-debounce-time-t_hold_gripper)). If the stall condition breaks at any point, the debounce timer resets.
-
-#### Symbols
-
-| Symbol           | Name                     | Unit | Default  | Description                                                                                                                         |
-| ---------------- | ------------------------ | ---- | -------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `w`              | Gripper width            | m    | —        | Current finger width (from `franka::GripperState.width`)                                                                            |
-| `w_dot`          | Width velocity           | m/s  | —        | Finite difference of `w` between consecutive `readOnce()` calls                                                                     |
-| `w_cmd`          | Commanded width          | m    | 0.01     | Target width for the active MoveAction (from CLOSING command)                                                                       |
-| `v_stall`        | Stall velocity threshold | m/s  | 0.008   | Speed below this is considered stalled                                                                                              |
-| `Δw`             | Width gap threshold      | m    | 0.002    | Minimum `(w - w_cmd)` to distinguish stall from normal completion                                                                   |
-| `T_hold_gripper` | Debounce time            | s    | computed | Duration stall must persist to declare contact (see [Dynamic Gripper Debounce Time](#dynamic-gripper-debounce-time-t_hold_gripper)) |
+The controller detects contact during CLOSING by monitoring the support force (Fn = |Fz|) for a sudden drop when the gripper contacts an object. A configurable debounce duration suppresses noise and avoids false positives. On detection, the controller transitions to `CONTACT_CONFIRMED` → `CONTACT`.
 
 ### Force-Drop Contact Detection
 
@@ -485,25 +427,23 @@ Detects contact by monitoring the support force (Fn = |Fz|) during CLOSING. When
 
 #### Algorithm
 
-1. **Baseline collection**: When the gripper starts moving (CLOSING), collect the first N samples of Fn (default 50 = 0.2 s at 250 Hz) and compute the mean as `Fn_baseline`.
-2. **Sliding window filter**: Each subsequent tick, feed Fn into a circular buffer of size K (default 10 = 0.04 s at 250 Hz) and compute `Fn_filtered = mean(buffer)`. This smooths out single-sample noise spikes.
-3. **Drop detection**: Check if `Fn_baseline - Fn_filtered > force_drop_thresh` (default 0.3 N).
-4. **Debounce**: The drop condition must persist for 0.05 s (internal constant) before triggering contact.
-5. **On trigger**: Same flow as stall — `contact_latched_`, `contact_width_`, `CONTACT_CONFIRMED`, `requestGripperStop()`.
+1. **Baseline collection**: During BASELINE state (after any accumulated-uplift correction completes), collect the first 50 samples of Fn (0.2 s at 250 Hz) and compute the mean as `Fn_baseline`. This captures the at-rest support force before any gripper motion.
+2. **Drop detection**: Check if `Fn_baseline - Fn > force_drop_thresh` (default 0.3 N) using the current Fn reading each tick.
+3. **Debounce**: The drop condition must persist for `force_drop_debounce_time` (default 0.05 s) before triggering contact.
+4. **On trigger**: Sets `contact_latched_`, stores `contact_width_`, transitions to `CONTACT_CONFIRMED`, calls `requestGripperStop()`.
 
 #### Symbols
 
 | Symbol           | Name                     | Unit | Default  | Description                                                       |
 | ---------------- | ------------------------ | ---- | -------- | ----------------------------------------------------------------- |
-| `Fn_baseline`    | Baseline support force   | N    | —        | Mean Fn from first N samples of CLOSING                           |
-| `Fn_filtered`    | Filtered support force   | N    | —        | Sliding window mean of last K Fn samples                          |
-| `force_drop_thresh` | Drop threshold        | N    | 0.3      | Minimum `Fn_baseline - Fn_filtered` to trigger contact            |
-| `N`              | Baseline samples         | —    | 50       | Number of samples for baseline (0.2 s at 250 Hz)                  |
-| `K`              | Filter window size       | —    | 10       | Sliding window size for Fn smoothing (0.04 s at 250 Hz)           |
+| `Fn_baseline`    | Baseline support force   | N    | —        | Mean Fn from first 50 samples of BASELINE (at-rest, after downlift correction) |
+| `Fn`             | Current support force    | N    | —        | Current Fn = \|Fz\| reading                                      |
+| `force_drop_thresh` | Drop threshold        | N    | 0.3      | Minimum `Fn_baseline - Fn` to trigger contact                    |
+| `force_drop_debounce_time` | Debounce duration | s | 0.05     | Sustained drop duration before triggering contact                 |
 
 ### Gripper Stop on Contact
 
-When contact is detected (by either method), the controller stops the gripper and transitions through two contact states:
+When contact is detected, the controller stops the gripper and transitions through two contact states:
 
 1. **Contact detected (RT thread)**: Sets `contact_latched_`, stores `contact_width_`, sets `stop_requested_`, and transitions to **CONTACT_CONFIRMED** immediately.
 2. **Read thread executes stop**: Checks `stop_requested_` after each `readOnce()`, calls `franka::Gripper::stop()` to physically halt the motor, then sets `gripper_stopped_` to signal the RT thread.
@@ -511,61 +451,6 @@ When contact is detected (by either method), the controller stops the gripper an
 4. **One-shot guard**: `gripper_stop_sent_` flag prevents duplicate stop requests; `contact_latched_` prevents re-detection.
 
 The atomic stores in `update()` are single-word writes (nanoseconds), fully RT-safe. The actual `stop()` call executes in the non-RT read thread. The state transition is deferred by ~20–30 ms (one gripper firmware update period) to ensure the gripper has physically stopped before CONTACT data is recorded.
-
-### Dynamic Gripper Debounce Time (`T_hold_gripper`)
-
-The gripper stall debounce time is **computed dynamically** from `closing_speed` rather than configured statically. Higher closing speeds produce more velocity noise — `w_dot` briefly reads ~0 even when the gripper is still moving — so the debounce window must increase with speed to avoid false contact triggers.
-
-#### Formula
-
-```
-  T_hold_gripper  =  0.35  +  0.5 · clamp(v, 0, 0.10)
-```
-
-Where `v` is the resolved `closing_speed` (YAML default or per-command override, clamped to `[0, v_max]`).
-
-#### Constants
-
-| Symbol        | Value       | Description                                               |
-| ------------- | ----------- | --------------------------------------------------------- |
-| `T_base_hold` | 0.35 s      | Hold time intercept at zero speed                         |
-| `k_hold`      | 0.5 s/(m/s) | Linear slope: hold time increase per unit speed           |
-| `v_max`       | 0.10 m/s    | Hard cap on closing speed (speeds above this are clamped) |
-
-#### Resulting Hold Times
-
-| `closing_speed` (m/s) | `T_hold_gripper` (s) | Notes                     |
-| --------------------- | -------------------- | ------------------------- |
-| 0.01                  | 0.355                |                           |
-| 0.02                  | 0.360                | Verified                  |
-| 0.04                  | 0.370                | Verified experimentally   |
-| 0.05                  | 0.375                | Default speed             |
-| 0.06                  | 0.380                | Verified experimentally   |
-| 0.08                  | 0.390                |                           |
-| 0.10                  | 0.400                | Maximum speed, verified   |
-| > 0.10                | 0.400                | Speed clamped to 0.10 m/s |
-
-#### Experimental Validation
-
-The formula parameters were derived from physical experiments on the Franka Panda gripper:
-
-| `closing_speed` | Works  | Fails  | Formula gives |
-| --------------- | ------ | ------ | ------------- |
-| 0.02 m/s        | 0.25 s | 0.20 s | 0.36 s        |
-| 0.04 m/s        | 0.35 s | 0.31 s | 0.37 s        |
-| 0.10 m/s        | 0.40 s | 0.30 s | 0.40 s        |
-
-All computed values are above the experimentally determined minimum working thresholds and below the 0.50 s danger threshold (where detection may be too late for fragile objects).
-
-#### Implementation
-
-The hold time is computed once when the RT thread transitions to CLOSING_COMMAND (in `applyPendingStateTransition()`), using the RT-local copy of closing speed:
-
-```
-  rt_T_hold_gripper_ = computeGripperHoldTime(rt_closing_v_cmd_)
-```
-
-This value is then used for all stall debounce checks during that CLOSING state. No new synchronization is needed — the value is written and read by the same (RT) thread.
 
 ### Latching
 
@@ -610,7 +495,7 @@ The load transfer gate confirms the object is actually supported by the gripper 
   Load transfer confirmed if:  deltaF > max(3 * sigma_pre, load_transfer_min)
 ```
 
-The `3 * sigma_pre` threshold adapts to sensor noise. The `load_transfer_min` floor (default 1.0 N, configurable) prevents declaring load transfer from noise alone. Lower this for light objects (e.g., 0.5 N for a ~51 g object).
+The `3 * sigma_pre` threshold adapts to sensor noise. The `load_transfer_min` floor (default 2.0 N, configurable) prevents declaring load transfer from noise alone. Lower this for light objects (e.g., 0.5 N for a ~51 g object).
 
 ### Gate 2: Support Drop Check
 
@@ -652,20 +537,20 @@ This rigid AND-gating approach ensures that: (1) the object was actually picked 
 | ----------------------- | -------- | ------------------------------------------------------------------ |
 | `slip_drop_thresh`      | 0.15     | DF_TH: maximum allowed relative support force drop (15% = fail)    |
 | `slip_width_thresh`     | 0.0005 m | W_TH: maximum allowed jaw widening P95-P5 [m] (0.5 mm = fail)     |
-| `load_transfer_min`     | 1.0 N    | Floor for load transfer threshold (lower for light objects)        |
+| `load_transfer_min`     | 2.0 N    | Floor for load transfer threshold (lower for light objects)        |
 
 ### Example Log Output
 
 Secure grasp (all three gates pass):
 
 ```
-  [SLIP] Gate 1 — Load Transfer:  deltaF=2.624 N  threshold=1.000 N  (Fn_pre=3.210  sigma=0.142  Fn_early=5.834)  PASS
+  [SLIP] Gate 1 — Load Transfer:  deltaF=2.624 N  threshold=2.000 N  (Fn_pre=3.210  sigma=0.142  Fn_early=5.834)  PASS
   [SLIP] Gate 2 — Support Drop:    dF=2.1%  threshold=15%  PASS
   [SLIP] Gate 3 — Jaw Widening:   P95-P5=0.00020 m  threshold=0.0005 m  (P5=0.03410  P95=0.03430)  PASS
   [SLIP] Verdict: SECURE
 ```
 
-- Gate 1: `deltaF=2.624` > `max(3*0.142, 1.0)` = 1.0 → PASS
+- Gate 1: `deltaF=2.624` > `max(3*0.142, 2.0)` = 2.0 → PASS
 - Gate 2: `dF=2.1%` ≤ 15% → PASS
 - Gate 3: `P95-P5=0.20 mm` ≤ 0.50 mm → PASS
 - **Verdict: SECURE → SUCCESS**
@@ -673,7 +558,7 @@ Secure grasp (all three gates pass):
 Slip detected — load transferred but object slipped during hold:
 
 ```
-  [SLIP] Gate 1 — Load Transfer:  deltaF=2.740 N  threshold=1.000 N  (Fn_pre=3.180  sigma=0.138  Fn_early=5.920)  PASS
+  [SLIP] Gate 1 — Load Transfer:  deltaF=2.740 N  threshold=2.000 N  (Fn_pre=3.180  sigma=0.138  Fn_early=5.920)  PASS
   [SLIP] Gate 2 — Support Drop:    dF=23.8%  threshold=15%  FAIL
   [SLIP] Gate 3 — Jaw Widening:   P95-P5=0.00140 m  threshold=0.0005 m  (P5=0.03400  P95=0.03540)  FAIL
   [SLIP] Verdict: SLIPPING
@@ -687,13 +572,13 @@ Slip detected — load transferred but object slipped during hold:
 Failed load transfer (object not lifted):
 
 ```
-  [SLIP] Gate 1 — Load Transfer:  deltaF=0.142 N  threshold=1.000 N  (Fn_pre=3.210  sigma=0.142  Fn_early=3.352)  FAIL
+  [SLIP] Gate 1 — Load Transfer:  deltaF=0.142 N  threshold=2.000 N  (Fn_pre=3.210  sigma=0.142  Fn_early=3.352)  FAIL
   [SLIP] Gate 2 — Support Drop:    dF=1.6%  threshold=15%  PASS
   [SLIP] Gate 3 — Jaw Widening:   P95-P5=0.00010 m  threshold=0.0005 m  (P5=0.03415  P95=0.03425)  PASS
   [SLIP] Verdict: SLIPPING
 ```
 
-- Gate 1: FAIL (`deltaF=0.142` < 1.0 — object weight never appeared on gripper)
+- Gate 1: FAIL (`deltaF=0.142` < 2.0 — object weight never appeared on gripper)
 - Gates 2 & 3 pass, but Gate 1 failure alone triggers SLIPPING
 - **Verdict: SLIPPING → SLIP → DOWNLIFT → retry with more force**
 
@@ -795,14 +680,10 @@ The **velocity profile** (first derivative) is:
 | -------------------------- | ------ | ------- | ------------------------------------------------------------------- |
 | `arm_id`                   | string | `panda` | Robot arm identifier                                                |
 | `publish_rate`             | double | `250.0` | State data publish rate [Hz]                                        |
-| `contact_method`           | string | `force_drop` | Contact detection method: `"stall"` or `"force_drop"`          |
-| `stall_velocity_threshold` | double | `0.008` | Gripper speed below this = stalled [m/s]                            |
-| `width_gap_threshold`      | double | `0.002` | Min gap (w - w_cmd) for stall detection [m]                         |
 | `closing_width`            | double | `0.01`  | Default width for MoveAction in CLOSING [m]                         |
 | `closing_speed`            | double | `0.05`  | Default speed for MoveAction in CLOSING [m/s] (clamped to max 0.10) |
 | `force_drop_thresh`        | double | `0.3`   | Fn drop below baseline to trigger contact [N]                       |
-| `force_drop_baseline_samples` | int | `50`    | Samples for baseline mean (50 = 0.2 s at 250 Hz)                   |
-| `force_drop_filter_samples`   | int | `10`    | Sliding window size for Fn smoothing (10 = 0.04 s at 250 Hz)       |
+| `force_drop_debounce_time` | double | `0.05`  | Sustained drop duration before triggering contact [s]               |
 | `grasp_speed`              | double | `0.02`  | Gripper speed for GraspAction [m/s]                                 |
 | `epsilon`                  | double | `0.008` | Epsilon for GraspAction (inner and outer) [m]                       |
 | `f_min`                    | double | `3.0`   | Starting grasp force [N]                                            |
@@ -813,7 +694,7 @@ The **velocity profile** (first derivative) is:
 | `uplift_hold`              | double | `1.0`   | Hold time: early (first half) + late (second half) windows [s]. Also determines W_pre = uplift_hold/2 and settling time = uplift_hold/2 |
 | `slip_drop_thresh`         | double | `0.15`   | DF_TH: max allowed relative support force drop (15% = fail)         |
 | `slip_width_thresh`        | double | `0.0005` | W_TH: max allowed jaw widening P95-P5 [m] (0.5 mm = fail)          |
-| `load_transfer_min`        | double | `1.0`    | Floor for load transfer threshold [N] (lower for light objects)     |
+| `load_transfer_min`        | double | `2.0`    | Floor for load transfer threshold [N] (lower for light objects)     |
 | `require_logger`           | bool   | `false` | Gate commands behind logger readiness (set true when `record:=true`)|
 
 Gripper and GRASPING parameters are **defaults**. They can be overridden per-command by setting non-zero values in the `KittingGripperCommand` message published on `/kitting_controller/state_cmd`.
@@ -866,20 +747,14 @@ topics_recorded:
   - /kitting_controller/state
 export_csv_on_stop: true
 detector_parameters:
-  contact_method: force_drop
-  T_hold_gripper: "computed: 0.35 + 0.5 * closing_speed"
-  stall_velocity_threshold: 0.008
-  width_gap_threshold: 0.002
-  force_drop_thresh: 0.3
-  force_drop_baseline_samples: 50
-  force_drop_filter_samples: 10
+  method: force_drop
 ```
 
 ### CSV Export
 
 When `export_csv_on_stop` is `true` (default), the logger automatically reads back the rosbag after recording stops and writes a flattened CSV file using the C++ `rosbag::View` API. The export runs in a background thread so the stop operation returns immediately.
 
-The CSV contains one row per `KittingState` message (67 columns):
+The CSV contains one row per `KittingState` message (69 columns):
 
 | Group            | Columns                                                                                     |
 | ---------------- | ------------------------------------------------------------------------------------------- |
@@ -893,6 +768,7 @@ The CSV contains one row per `KittingState` message (67 columns):
 | EE velocity      | `ee_vx`, `ee_vy`, `ee_vz`, `ee_wx`, `ee_wy`, `ee_wz`                                        |
 | Gravity          | `gravity_1` ... `gravity_7`                                                                 |
 | Coriolis         | `coriolis_1` ... `coriolis_7`                                                               |
+| Derived forces   | `support_force` (Fn = \|Fz\|), `tangential_force` (Ft = √(Fx²+Fy²))                       |
 | Gripper          | `gripper_width`, `gripper_width_dot`, `gripper_width_cmd`, `gripper_max_width`, `gripper_is_grasped` |
 | Force ramp       | `grasp_force`, `grasp_iteration`                                                            |
 
@@ -911,8 +787,8 @@ Per-object command published on `/kitting_controller/state_cmd`. Any float64 par
 | `open_width`           | float64 | Width to open to [m] (0 = max_width from firmware). Only if `open_gripper` is true |
 | `closing_width`        | float64 | Target width for MoveAction [m] (0 = use default)                                  |
 | `closing_speed`        | float64 | Speed for MoveAction [m/s] (0 = use default, max 0.10)                             |
-| `contact_method`       | string  | `"stall"` or `"force_drop"` (`""` = use YAML default)                              |
 | `force_drop_thresh`    | float64 | Force drop threshold [N] (0 = use YAML default 0.3)                                |
+| `force_drop_debounce_time` | float64 | Sustained drop duration before triggering [s] (0 = use YAML default 0.05)      |
 | `f_min`                | float64 | Starting grasp force [N] (0 = use default 3.0)                                     |
 | `f_step`               | float64 | Force increment per iteration [N] (0 = use default 3.0)                            |
 | `f_max`                | float64 | Maximum force — FAILED if exceeded [N] (0 = use default 30.0)                      |
@@ -923,13 +799,13 @@ Per-object command published on `/kitting_controller/state_cmd`. Any float64 par
 | `fr_epsilon`           | float64 | Epsilon for ramp GraspAction, inner and outer [m] (0 = use default 0.008)          |
 | `fr_slip_drop_thresh`     | float64 | DF_TH: max allowed relative support force drop (0 = use default 0.15)           |
 | `fr_slip_width_thresh`    | float64 | W_TH: max allowed jaw widening P95-P5 [m] (0 = use default 0.0005)             |
-| `fr_load_transfer_min`    | float64 | Floor for load transfer threshold [N] (0 = use default 1.0)                     |
+| `fr_load_transfer_min`    | float64 | Floor for load transfer threshold [N] (0 = use default 2.0)                     |
 | `auto_delay`           | float64 | Delay between auto transitions [s] (0 = default 5.0). Only used by `AUTO` command  |
 
 Only the parameters relevant to the command are used:
 
 - `BASELINE` uses `open_gripper` and `open_width`
-- `CLOSING` uses `closing_width`, `closing_speed`, `contact_method`, and `force_drop_thresh`
+- `CLOSING` uses `closing_width`, `closing_speed`, `force_drop_thresh`, and `force_drop_debounce_time`
 - `GRASPING` uses all `f_*`/`fr_*` force ramp parameters (grasp width is always from `contact_width`)
 - `AUTO` uses all of the above, plus `auto_delay`
 
@@ -950,6 +826,8 @@ Only the parameters relevant to the command are used:
 | `ee_velocity`  | float64[6]  | End-effector velocity (J \* dq) [m/s, rad/s]      |
 | `tau_ext_norm` | float64     | Euclidean norm of `tau_ext`                       |
 | `wrench_norm`  | float64     | Euclidean norm of `wrench_ext`                    |
+| `support_force` | float64    | Support force Fn = \|Fz\| [N] — used by contact detection and slip evaluation |
+| `tangential_force` | float64 | Tangential force Ft = √(Fx²+Fy²) [N] — logged for monitoring |
 | `gripper_width` | float64    | Measured finger width [m]                         |
 | `gripper_width_dot` | float64 | Finger width velocity (finite difference) [m/s]  |
 | `gripper_width_cmd` | float64 | Commanded closing width [m] (0 if not CLOSING_COMMAND/CLOSING/CONTACT_CONFIRMED) |
@@ -1027,15 +905,15 @@ The Grasp logger is written in C++ using the `rosbag::Bag` API directly and `top
 - STOP saves bag + metadata + CSV, ABORT deletes trial (no CSV)
 - Logger shutdown (Ctrl+C) automatically stops recording (equivalent to STOP)
 - Bag contains 2 topics: kitting_state_data, state
-- CSV contains 67 flattened columns with state labels per row
+- CSV contains 69 flattened columns with state labels per row
 - CSV export does not block the ROS spin loop (runs in background thread)
 - metadata.yaml contains bag_filename, csv_filename, total_samples, start/stop times, and detector parameters
-- Contact detection: selectable stall (velocity < threshold AND width gap > threshold for T_hold_gripper) or force-drop (Fn baseline - Fn_filtered > force_drop_thresh, debounced)
+- Contact detection: force-drop (Fn baseline - Fn > force_drop_thresh, debounced for force_drop_debounce_time)
 - Free closing (no object): width reaches w_cmd, gap ~0 → no false CONTACT → transitions to FAILED ("no contact detected")
-- Object contact: width stalls before w_cmd, w_dot ~0, gap > threshold → CONTACT_CONFIRMED immediately, then CONTACT when gripper stopped
+- Object contact: force drop detected → CONTACT_CONFIRMED immediately, then CONTACT when gripper stopped
 - Gripper stop requested immediately on contact: `stop()` called via atomic flag and read thread
-- CONTACT_CONFIRMED published at stall detection; CONTACT deferred until gripper has physically stopped (`gripper_stopped_` flag)
-- Contact width saved at stall detection — used as the grasp width in GRASPING
+- CONTACT_CONFIRMED published at force-drop detection; CONTACT deferred until gripper has physically stopped (`gripper_stopped_` flag)
+- Contact width saved at detection — used as the grasp width in GRASPING
 - KittingState contains robot signals, gripper signals, and force ramp state — all published at 250 Hz
 - Publishing CLOSING on `state_cmd` triggers gripper `move()` + CLOSING_COMMAND state label (transitions to CLOSING when move confirmed executing)
 - Publishing BASELINE on `state_cmd` prepares for new trial (optionally opens gripper)

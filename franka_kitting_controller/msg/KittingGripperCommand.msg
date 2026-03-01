@@ -32,8 +32,8 @@ float64 open_width          # [m] Width to open to (0 = max_width from firmware)
 # --- CLOSING parameters (used when command == "CLOSING") ---
 float64 closing_width    # [m]   Target width for MoveAction  (0 = use default)
 float64 closing_speed    # [m/s] Speed for MoveAction         (0 = use default)
-string contact_method        # "stall" or "force_drop" ("" = use YAML default)
 float64 force_drop_thresh    # [N] Force drop threshold (0 = use YAML default)
+float64 force_drop_debounce_time  # [s] Sustained drop duration before triggering (0 = use YAML default 0.05)
 
 # --- Force ramp parameters (used when command == "GRASPING") ---
 # grasp_width is always the contact_width captured at CONTACT (not configurable).
@@ -49,9 +49,9 @@ float64 fr_lift_speed        # [m/s] Lift speed for UPLIFT and DOWNLIFT (0 = use
 float64 fr_uplift_hold       # [s]   Hold at top; early + late windows (0 = use default 1.0)
 float64 fr_grasp_speed       # [m/s] Gripper speed for ramp grasps (0 = use default 0.02)
 float64 fr_epsilon           # [m]   Epsilon for ramp grasps, same for inner/outer (0 = use default 0.008)
-float64 fr_slip_drop_thresh     # DF_TH: support drop normalizer for s_drop (0 = use default 0.15)
-float64 fr_slip_width_thresh    # [m] W_TH: jaw widening normalizer for s_motion (0 = use default 0.0005)
-float64 fr_load_transfer_min    # [N] Min load transfer threshold floor (0 = use default 1.0)
+float64 fr_slip_drop_thresh     # DF_TH: max allowed relative support force drop (0 = use default 0.15)
+float64 fr_slip_width_thresh    # [m] W_TH: max allowed jaw widening P95-P5 (0 = use default 0.0005)
+float64 fr_load_transfer_min    # [N] Min load transfer threshold floor (0 = use default 2.0)
 
 # --- AUTO parameters (used when command == "AUTO") ---
 # AUTO runs the full sequence: BASELINE → CLOSING → GRASPING automatically.

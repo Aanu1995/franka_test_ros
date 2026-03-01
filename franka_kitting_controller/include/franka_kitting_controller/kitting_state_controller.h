@@ -47,7 +47,7 @@ namespace franka_kitting_controller {
   ///
   /// User-commanded: START→BASELINE, →CLOSING_COMMAND, →GRASPING
   /// Automatic:      CLOSING_COMMAND→CLOSING (gripper move confirmed)
-  ///                 CLOSING→CONTACT_CONFIRMED (stall detected)
+  ///                 CLOSING→CONTACT_CONFIRMED (contact detected)
   ///                 CONTACT_CONFIRMED→CONTACT (gripper stopped)
   /// Internal (realtime):  GRASPING→UPLIFT→EVALUATE→SUCCESS
   ///                 On slip: EVALUATE→SLIP→DOWNLIFT→SETTLING→GRASPING (retry)
@@ -57,7 +57,7 @@ namespace franka_kitting_controller {
     BASELINE,        // Collecting reference signals
     CLOSING_COMMAND, // Gripper close queued — awaiting execution confirmation
     CLOSING,            // Gripper confirmed moving toward object
-    CONTACT_CONFIRMED,  // Contact detected (stall or force-drop) — gripper stopping
+    CONTACT_CONFIRMED,  // Contact detected (force-drop) — gripper stopping
     CONTACT,            // Gripper stopped — contact confirmed
     GRASPING,     // Applying grasp force, waiting for completion + stabilization
     UPLIFT,       // Cosine-smoothed micro-lift trajectory
@@ -71,9 +71,6 @@ namespace franka_kitting_controller {
 
   /// Command types for the gripper command thread.
   enum class GripperCommandType { NONE, MOVE, GRASP, HOMING };
-
-  /// Contact detection method selection.
-  enum class ContactMethod { STALL, FORCE_DROP };
 
   /// Command queued from subscriber thread to the gripper command thread.
   struct GripperCommand {
@@ -217,16 +214,10 @@ namespace franka_kitting_controller {
     std::atomic<bool> state_changed_{false};
     bool contact_latched_{false};
 
-    // --- Gripper contact detection parameters ---
-    double stall_velocity_threshold_{0.008};  // [m/s] Speed below this = stalled
-    double width_gap_threshold_{0.002};       // [m] Min gap: (w - w_cmd) > this
-
     // --- Force-drop contact detection: YAML defaults ---
-    ContactMethod contact_method_{ContactMethod::FORCE_DROP};
     double force_drop_thresh_{0.3};           // [N] Fn drop below baseline to trigger
-    int force_drop_baseline_samples_{50};     // Samples for baseline mean
-    int force_drop_filter_samples_{10};       // Sliding window size for Fn smoothing
-    static constexpr double kForceDropDebounceTime{0.05};  // [s] Internal debounce constant
+    double force_drop_debounce_time_{0.05};   // [s] Sustained drop duration before triggering
+    static constexpr int kForceDropBaselineSamples{50};  // Fixed: 50 samples = 0.2s at 250Hz
 
     // Debounce state (Realtime-thread owned)
     DebounceState gripper_debounce_;
@@ -240,31 +231,22 @@ namespace franka_kitting_controller {
     double closing_v_cmd_{0.05};     // Resolved speed for active MoveAction
     double rt_closing_w_cmd_{0.01};  // Realtime-local copy
     double rt_closing_v_cmd_{0.05};  // Realtime-local copy
-    double rt_T_hold_gripper_{0.35}; // Computed from rt_closing_v_cmd_ when CLOSING starts
     bool closing_cmd_seen_executing_{false};  ///< True once move() seen running during CLOSING
     bool closing_command_entered_{false};     ///< First-tick flag: ensures CLOSING_COMMAND label is published before transition
 
-    // Contact method staging (subscriber → RT via CLOSING_COMMAND snapshot)
-    ContactMethod closing_contact_method_{ContactMethod::FORCE_DROP};
+    // Force-drop staging (subscriber → RT via CLOSING_COMMAND snapshot)
     double closing_force_drop_thresh_{0.3};
+    double closing_force_drop_debounce_time_{0.05};
 
-    // Contact method RT-local copies
-    ContactMethod rt_contact_method_{ContactMethod::FORCE_DROP};
+    // Force-drop RT-local copies
     double rt_force_drop_thresh_{0.3};
+    double rt_force_drop_debounce_time_{0.05};
 
     // Force-drop runtime state (RT-thread owned)
     double fd_baseline_sum_{0.0};
     int    fd_baseline_count_{0};
     double fd_baseline_{0.0};
     bool   fd_baseline_ready_{false};
-
-    // Sliding window filter for current Fn (avoids false positives from single-sample spikes)
-    static constexpr int FD_FILTER_MAX = 50;
-    double fd_filter_buf_[FD_FILTER_MAX]{};
-    int    fd_filter_size_{10};       // actual window size (from force_drop_filter_samples_)
-    int    fd_filter_idx_{0};         // circular buffer write index
-    double fd_filter_sum_{0.0};       // running sum of values in buffer
-    int    fd_filter_count_{0};       // number of values filled so far (≤ fd_filter_size_)
 
     // Slow-rate logger for contact signal monitoring (2 Hz — readable in terminal)
     franka_hw::TriggerRate signal_log_trigger_{2.0};
@@ -298,9 +280,9 @@ namespace franka_kitting_controller {
     double fr_uplift_hold_{1.0};
     double fr_grasp_speed_{0.02};
     double fr_epsilon_{0.008};        // Single epsilon (inner == outer)
-    double fr_slip_drop_thresh_{0.15};       // DF_TH: support drop normalizer for s_drop
-    double fr_slip_width_thresh_{0.0005};    // [m] W_TH: jaw widening normalizer for s_motion
-    double fr_load_transfer_min_{1.0};       // [N] Min floor for load transfer threshold
+    double fr_slip_drop_thresh_{0.15};       // DF_TH: max allowed relative support force drop (15% = fail)
+    double fr_slip_width_thresh_{0.0005};    // [m] W_TH: max allowed jaw widening P95-P5 (0.5mm = fail)
+    double fr_load_transfer_min_{2.0};       // [N] Min floor for load transfer threshold
 
     // --- Force ramp: Realtime-local copies of resolved per-command parameters ---
     // Snapshotted in applyPendingStateTransition() when entering GRASPING.
@@ -315,7 +297,7 @@ namespace franka_kitting_controller {
     double rt_fr_epsilon_{0.008};
     double rt_fr_slip_drop_thresh_{0.15};
     double rt_fr_slip_width_thresh_{0.0005};
-    double rt_fr_load_transfer_min_{1.0};
+    double rt_fr_load_transfer_min_{2.0};
 
     // --- Force ramp: staging variables (subscriber → realtime via state_changed_) ---
     // Written by stateCmdCallback() with resolved per-command values, before release-store
@@ -330,7 +312,7 @@ namespace franka_kitting_controller {
     double staging_fr_epsilon_{0.008};
     double staging_fr_slip_drop_thresh_{0.15};
     double staging_fr_slip_width_thresh_{0.0005};
-    double staging_fr_load_transfer_min_{1.0};
+    double staging_fr_load_transfer_min_{2.0};
 
     // --- Force ramp: runtime state (Realtime-thread owned) ---
     double fr_f_current_{0.0};           // Current grasp force [N]
@@ -364,10 +346,8 @@ namespace franka_kitting_controller {
     double deferred_grasp_force_{0.0};
     double deferred_grasp_epsilon_{0.0};  // Same for inner/outer
 
-    // --- Closing speed safety limit + dynamic gripper hold time ---
+    // --- Closing speed safety limit ---
     static constexpr double kMaxClosingSpeed{0.10};    // [m/s] Hard cap on closing speed
-    static constexpr double kGripperHoldBase{0.35};     // [s] Hold time intercept at zero speed
-    static constexpr double kGripperHoldSlope{0.5};     // [s/(m/s)] Linear slope
     static constexpr double kMaxUpliftDistance{0.02};   // [m] Safety cap on uplift distance
     static constexpr double kMinUpliftHold{0.5};        // [s] Minimum uplift hold (ensures W_pre ≥ 0.25s)
     static constexpr int kWidthSamplesPerSec{250};        // Width sample rate [Hz] — for reserve sizing
@@ -375,10 +355,6 @@ namespace franka_kitting_controller {
     // --- Force ramp internal timing constants ---
     static constexpr double kGraspSettleDelay{0.1};     // [s] Wait for command thread pickup
     static constexpr double kGraspTimeout{10.0};        // [s] Fail if grasp doesn't complete
-
-    /// Compute gripper stall debounce time from closing speed.
-    /// Formula: T_hold = 0.35 + 0.5 * clamp(speed, 0, 0.10)
-    static double computeGripperHoldTime(double closing_speed);
 
     /// Compute cosine-smoothed uplift pose for the current elapsed time.
     std::array<double, 16> computeUpliftPose(double elapsed) const;
@@ -513,7 +489,6 @@ namespace franka_kitting_controller {
                                   const char* action_name);
 
     // --- runClosingTransitions decomposition ---
-    void detectGripperContact(const ros::Time& time, const GripperData& gripper_snapshot);
     void detectForceDropContact(const ros::Time& time,
                                 const GripperData& gripper_snapshot,
                                 double support_force);

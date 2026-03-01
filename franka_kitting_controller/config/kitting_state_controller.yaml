@@ -3,17 +3,13 @@ kitting_state_controller:
   arm_id: panda
   publish_rate: 250.0 # [Hz]
 
-  # Contact detection parameters
-  contact_method: "force_drop"      # "stall" or "force_drop" (default)
-  stall_velocity_threshold: 0.008 # [m/s] Speed below this = stalled
-  width_gap_threshold: 0.002 # [m] Min gap: (w - w_cmd) > this to distinguish stall from completion
+  # Closing parameters
   closing_width: 0.01 # [m] Default width for MoveAction in CLOSING
   closing_speed: 0.05 # [m/s] Default speed for MoveAction in CLOSING
 
-  # Force-drop contact detection parameters (used when contact_method == "force_drop")
+  # Force-drop contact detection parameters
   force_drop_thresh: 0.3            # [N] Fn drop below baseline to trigger contact
-  force_drop_baseline_samples: 50   # Samples for baseline (50 = 0.2s at 250Hz)
-  force_drop_filter_samples: 10     # Sliding window size for Fn smoothing (10 = 0.04s at 250Hz)
+  force_drop_debounce_time: 0.05    # [s] Sustained drop duration before triggering (0.05 = 50ms)
 
   # Grasping parameters (overridable per-command via KittingGripperCommand)
   # After GRASPING command, controller runs: GRASPING -> UPLIFT -> EVALUATE -> SUCCESS
@@ -27,9 +23,9 @@ kitting_state_controller:
   uplift_distance: 0.010 # [m] Micro-uplift distance per iteration
   lift_speed: 0.01 # [m/s] Lift speed for both UPLIFT and DOWNLIFT
   uplift_hold: 1.0  # [s] Hold at top; early (0–0.5s) + late (0.5–1.0s) windows
-  slip_drop_thresh: 0.15    # DF_TH: support force drop normalizer (15% = full s_drop score)
-  slip_width_thresh: 0.0005 # [m] W_TH: jaw widening normalizer (0.5mm = full s_motion score)
-  load_transfer_min: 1.0    # [N] Minimum load transfer threshold (lighter objects need lower value)
+  slip_drop_thresh: 0.15    # DF_TH: max allowed relative support force drop (15% = fail)
+  slip_width_thresh: 0.0005 # [m] W_TH: max allowed jaw widening P95-P5 (0.5mm = fail)
+  load_transfer_min: 2.0    # [N] Minimum load transfer threshold (lighter objects need lower value)
 
   # Recording / Logger parameters (used by launch file, see kitting_state_controller.launch)
   # Set require_logger: true to enable rosbag recording (launch arg: record:=true)
