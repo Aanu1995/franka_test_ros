@@ -78,7 +78,7 @@ namespace franka_kitting_controller {
     }
 
     // Cancel auto mode if a manual command is received
-    if (auto_mode_ && cmd != "AUTO") {
+    if (auto_mode_.load(std::memory_order_relaxed) && cmd != "AUTO") {
       cancelAutoMode();
     }
 
@@ -158,9 +158,10 @@ namespace franka_kitting_controller {
   void KittingStateController::handleGraspingCmd(
       const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg) {
     double width = contact_width_.load(std::memory_order_relaxed);
-    if (width <= 0.0) {
-      ROS_WARN("KittingStateController: GRASPING rejected — no contact width available "
-              "(CONTACT must be reached before GRASPING)");
+    double max_w = gripper_data_buf_.readFromNonRT()->max_width;
+    if (width <= 0.0 || width > max_w) {
+      ROS_WARN("KittingStateController: GRASPING rejected — contact_width %.4f out of range [0, %.4f]",
+              width, max_w);
       return;
     }
 
@@ -182,10 +183,20 @@ namespace franka_kitting_controller {
               staging_fr_uplift_distance_, kMaxUpliftDistance);
       staging_fr_uplift_distance_ = kMaxUpliftDistance;
     }
+    if (staging_fr_lift_speed_ < kMinLiftSpeed) {
+      ROS_WARN("KittingStateController: fr_lift_speed %.4f below min %.4f, clamping",
+              staging_fr_lift_speed_, kMinLiftSpeed);
+      staging_fr_lift_speed_ = kMinLiftSpeed;
+    }
     if (staging_fr_uplift_hold_ < kMinUpliftHold) {
       ROS_WARN("KittingStateController: fr_uplift_hold %.2f below min %.2f, clamping",
               staging_fr_uplift_hold_, kMinUpliftHold);
       staging_fr_uplift_hold_ = kMinUpliftHold;
+    }
+    if (staging_fr_uplift_hold_ > kMaxUpliftHold) {
+      ROS_WARN("KittingStateController: fr_uplift_hold %.2f exceeds max %.2f, clamping",
+              staging_fr_uplift_hold_, kMaxUpliftHold);
+      staging_fr_uplift_hold_ = kMaxUpliftHold;
     }
 
     // Queue first grasp command at f_min
@@ -224,7 +235,7 @@ namespace franka_kitting_controller {
       const KittingGripperCommand::ConstPtr& msg) {
     cancelAutoMode();
 
-    auto_mode_ = true;
+    auto_mode_.store(true, std::memory_order_relaxed);
     auto_cmd_ = *msg;
     auto_delay_ = (msg->auto_delay > 0.0) ? msg->auto_delay : 5.0;
 
@@ -240,7 +251,7 @@ namespace franka_kitting_controller {
   }
 
   void KittingStateController::autoClosingCallback(const ros::TimerEvent&) {
-    if (!auto_mode_) return;
+    if (!auto_mode_.load(std::memory_order_relaxed)) return;
 
     auto msg = boost::make_shared<KittingGripperCommand>(auto_cmd_);
     ROS_INFO("KittingStateController: AUTO -> forwarding to CLOSING"
@@ -257,7 +268,7 @@ namespace franka_kitting_controller {
   }
 
   void KittingStateController::autoContactPollCallback(const ros::TimerEvent&) {
-    if (!auto_mode_) {
+    if (!auto_mode_.load(std::memory_order_relaxed)) {
       auto_contact_poll_timer_.stop();
       return;
     }
@@ -272,13 +283,13 @@ namespace franka_kitting_controller {
                auto_delay_);
     } else if (state == GraspState::FAILED) {
       auto_contact_poll_timer_.stop();
-      auto_mode_ = false;
+      auto_mode_.store(false, std::memory_order_relaxed);
       ROS_INFO("KittingStateController: AUTO -> FAILED during CLOSING, auto mode ended");
     }
   }
 
   void KittingStateController::autoGraspingCallback(const ros::TimerEvent&) {
-    if (!auto_mode_) return;
+    if (!auto_mode_.load(std::memory_order_relaxed)) return;
 
     auto msg = boost::make_shared<KittingGripperCommand>(auto_cmd_);
     ROS_INFO("KittingStateController: AUTO -> forwarding to GRASPING"
@@ -292,16 +303,16 @@ namespace franka_kitting_controller {
             auto_cmd_.fr_slip_drop_thresh, auto_cmd_.fr_slip_width_thresh,
             auto_cmd_.fr_load_transfer_min);
     handleGraspingCmd(msg);
-    auto_mode_ = false;
+    auto_mode_.store(false, std::memory_order_relaxed);
 
     ROS_INFO("KittingStateController: AUTO -> GRASPING started, auto mode complete");
   }
 
   void KittingStateController::cancelAutoMode() {
-    if (!auto_mode_) return;
+    if (!auto_mode_.load(std::memory_order_relaxed)) return;
     auto_delay_timer_.stop();
     auto_contact_poll_timer_.stop();
-    auto_mode_ = false;
+    auto_mode_.store(false, std::memory_order_relaxed);
     ROS_INFO("KittingStateController: AUTO mode cancelled");
   }
 

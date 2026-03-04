@@ -7,6 +7,7 @@
 
 #include <franka_kitting_controller/kitting_state_controller.h>
 
+#include <chrono>
 #include <memory>
 #include <string>
 
@@ -57,11 +58,13 @@ namespace franka_kitting_controller {
           try {
             gripper_->stop();
             ROS_INFO("  [GRIPPER]  stop() executed by read thread");
+            gripper_stopped_.store(true, std::memory_order_relaxed);
+            stop_requested_.store(false, std::memory_order_relaxed);
           } catch (const franka::Exception& ex) {
-            ROS_WARN_STREAM("KittingStateController: stop() failed: " << ex.what());
+            // Leave stop_requested_ true so we retry on the next readOnce() iteration.
+            // Do NOT set gripper_stopped_ — state machine must not proceed to CONTACT.
+            ROS_WARN_STREAM("KittingStateController: stop() failed (will retry): " << ex.what());
           }
-          gripper_stopped_.store(true, std::memory_order_relaxed);
-          stop_requested_.store(false, std::memory_order_relaxed);
         }
 
         // Dispatch deferred grasp command from Realtime thread (force ramp iteration).
@@ -127,8 +130,10 @@ namespace franka_kitting_controller {
         } else if (cmd.type == GripperCommandType::GRASP) {
           success = gripper_->grasp(cmd.width, cmd.speed, cmd.force,
                                     cmd.epsilon_inner, cmd.epsilon_outer);
-          ROS_INFO("KittingStateController: grasp(%.4f, %.4f, %.1f) -> %s",
-                  cmd.width, cmd.speed, cmd.force, success ? "OK" : "FAIL");
+          ROS_INFO("KittingStateController: grasp(%.4f, %.4f, %.1f, eps=%.4f/%.4f) -> %s",
+                  cmd.width, cmd.speed, cmd.force,
+                  cmd.epsilon_inner, cmd.epsilon_outer,
+                  success ? "OK" : "FAIL");
         } else if (cmd.type == GripperCommandType::HOMING) {
           success = gripper_->homing();
           ROS_INFO("KittingStateController: homing() -> %s", success ? "OK" : "FAIL");
@@ -195,12 +200,22 @@ namespace franka_kitting_controller {
     auto promise = std::make_shared<std::promise<bool>>();
     cmd.result_promise = promise;
     queueGripperCommand(cmd);
-    result.success = promise->get_future().get();
-    if (result.success) {
-      server.setSucceeded(result);
+    auto future = promise->get_future();
+    if (future.wait_for(std::chrono::seconds(kActionTimeoutSec)) ==
+        std::future_status::ready) {
+      result.success = future.get();
+      if (result.success) {
+        server.setSucceeded(result);
+      } else {
+        result.error = std::string(action_name) + " failed";
+        server.setAborted(result, result.error);
+      }
     } else {
-      result.error = std::string(action_name) + " failed";
+      result.success = false;
+      result.error = std::string(action_name) + " timed out (" +
+                     std::to_string(kActionTimeoutSec) + "s)";
       server.setAborted(result, result.error);
+      ROS_ERROR("KittingStateController: %s", result.error.c_str());
     }
   }
 

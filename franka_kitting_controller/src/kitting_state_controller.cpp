@@ -173,13 +173,13 @@ namespace franka_kitting_controller {
     rate_trigger_ = franka_hw::TriggerRate(publish_rate);
 
     // --- Force-drop contact detection parameters ---
-    node_handle.param("force_drop_thresh", force_drop_thresh_, 0.3);
+    node_handle.param("force_drop_thresh", force_drop_thresh_, 0.1);
     node_handle.param("force_drop_debounce_time", force_drop_debounce_time_, 0.05);
 
     if (force_drop_thresh_ <= 0.0) {
-      ROS_WARN("KittingStateController: force_drop_thresh must be positive (got %.3f), using 0.3",
+      ROS_WARN("KittingStateController: force_drop_thresh must be positive (got %.3f), using 0.1",
                force_drop_thresh_);
-      force_drop_thresh_ = 0.3;
+      force_drop_thresh_ = 0.1;
     }
     if (force_drop_debounce_time_ < 0.0) {
       ROS_WARN("KittingStateController: force_drop_debounce_time must be >= 0 (got %.3f), using 0.05",
@@ -212,7 +212,7 @@ namespace franka_kitting_controller {
     node_handle.param("lift_speed", fr_lift_speed_, 0.01);
     node_handle.param("uplift_hold", fr_uplift_hold_, 1.0);
     node_handle.param("grasp_speed", fr_grasp_speed_, 0.02);
-    node_handle.param("epsilon", fr_epsilon_, 0.04);
+    node_handle.param("epsilon", fr_epsilon_, 0.008);
     node_handle.param("slip_drop_thresh", fr_slip_drop_thresh_, 0.15);
     node_handle.param("slip_width_thresh", fr_slip_width_thresh_, 0.0005);
     node_handle.param("load_transfer_min", fr_load_transfer_min_, 2.0);
@@ -407,6 +407,7 @@ namespace franka_kitting_controller {
 
     // Reset force ramp state
     resetForceRampState();
+    fr_width_samples_.reserve(kMaxWidthSamples);  // Pre-allocate to avoid RT allocation
     accumulated_uplift_ = 0.0;
 
     logStateTransition("START", "Controller running");
@@ -488,6 +489,7 @@ namespace franka_kitting_controller {
       gripper_stopped_.store(false, std::memory_order_relaxed);
       closing_cmd_seen_executing_ = false;
       closing_command_entered_ = true;
+      fr_phase_start_time_ = ros::Time::now();
 
       // Snapshot force-drop parameters
       rt_force_drop_thresh_ = closing_force_drop_thresh_;

@@ -156,7 +156,7 @@ Observe approach dynamics before contact. Published **automatically** by the con
 
 Contact detected — gripper decelerating. Published **automatically** by the controller on contact detection.
 
-- Fn drops below baseline by more than `force_drop_thresh` (default 0.3 N), sustained for `force_drop_debounce_time` (default 0.05 s) (see [Force-Drop Contact Detection](#force-drop-contact-detection))
+- Fn drops below baseline by more than `force_drop_thresh` (default 0.1 N), sustained for `force_drop_debounce_time` (default 0.05 s) (see [Force-Drop Contact Detection](#force-drop-contact-detection))
 - `contact_width` is saved when the gripper has physically stopped (CONTACT) — used as the grasp width in GRASPING
 - `franka::Gripper::stop()` is requested via the read thread to halt the motor
 - Data recorded during this state captures the gripper deceleration dynamics
@@ -242,6 +242,7 @@ Terminal state indicating stable grasp confirmed. **Auto-triggered** when EVALUA
 Terminal state indicating grasp failure. **Auto-triggered** on any of:
 
 - No contact detected during CLOSING (gripper reached target width without detecting contact)
+- CLOSING_COMMAND timeout (move command did not start executing within 10 seconds)
 - Maximum force exceeded (`f_current > f_max`) after all force ramp iterations
 - GRASPING timeout (gripper command did not complete within 10 seconds)
 - State label published for offline analysis with diagnostic information
@@ -329,7 +330,7 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
 # CLOSING — override all closing parameters for a specific object
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
   "{command: 'CLOSING', closing_width: 0.01, closing_speed: 0.05, \
-    force_drop_thresh: 0.3, force_drop_debounce_time: 0.05}" --once
+    force_drop_thresh: 0.1, force_drop_debounce_time: 0.05}" --once
 
 # ... CONTACT is published by the controller automatically ...
 
@@ -347,7 +348,7 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
   "{command: 'GRASPING', \
     f_min: 3.0, f_step: 3.0, f_max: 30.0, \
-    fr_grasp_speed: 0.02, fr_epsilon: 0.04, \
+    fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
     fr_uplift_distance: 0.010, fr_lift_speed: 0.01, fr_uplift_hold: 1.0, \
     fr_slip_drop_thresh: 0.15, fr_slip_width_thresh: 0.0005, \
     fr_load_transfer_min: 2.0}" --once
@@ -374,9 +375,9 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
   "{command: 'AUTO', open_gripper: true, auto_delay: 3.0, \
     closing_width: 0.01, closing_speed: 0.05, \
-    force_drop_thresh: 0.3, force_drop_debounce_time: 0.05, \
+    force_drop_thresh: 0.1, force_drop_debounce_time: 0.05, \
     f_min: 3.0, f_step: 3.0, f_max: 30.0, \
-    fr_grasp_speed: 0.02, fr_epsilon: 0.04, \
+    fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
     fr_uplift_distance: 0.010, fr_lift_speed: 0.01, fr_uplift_hold: 1.0, \
     fr_slip_drop_thresh: 0.15, fr_slip_width_thresh: 0.0005, \
     fr_load_transfer_min: 2.0}" --once
@@ -434,7 +435,7 @@ Detects contact by monitoring the support force (Fn = |Fz|) during CLOSING. When
 #### Algorithm
 
 1. **Baseline collection**: During BASELINE state (after any accumulated-uplift correction completes), collect the first 50 samples of Fn (0.2 s at 250 Hz) and compute the mean as `Fn_baseline`. This captures the at-rest support force before any gripper motion.
-2. **Drop detection**: Check if `Fn_baseline - Fn > force_drop_thresh` (default 0.3 N) using the current Fn reading each tick.
+2. **Drop detection**: Check if `Fn_baseline - Fn > force_drop_thresh` (default 0.1 N) using the current Fn reading each tick.
 3. **Debounce**: The drop condition must persist for `force_drop_debounce_time` (default 0.05 s) before triggering contact.
 4. **On trigger**: Sets `contact_latched_`, transitions to `CONTACT_CONFIRMED`, calls `requestGripperStop()`. `contact_width_` is captured later when the gripper has physically stopped (CONTACT).
 
@@ -444,7 +445,7 @@ Detects contact by monitoring the support force (Fn = |Fz|) during CLOSING. When
 | ---------------- | ------------------------ | ---- | -------- | ----------------------------------------------------------------- |
 | `Fn_baseline`    | Baseline support force   | N    | —        | Mean Fn from first 50 samples of BASELINE (at-rest, after downlift correction) |
 | `Fn`             | Current support force    | N    | —        | Current Fn = \|Fz\| reading                                      |
-| `force_drop_thresh` | Drop threshold        | N    | 0.3      | Minimum `Fn_baseline - Fn` to trigger contact                    |
+| `force_drop_thresh` | Drop threshold        | N    | 0.1      | Minimum `Fn_baseline - Fn` to trigger contact                    |
 | `force_drop_debounce_time` | Debounce duration | s | 0.05     | Sustained drop duration before triggering contact                 |
 
 ### Gripper Stop on Contact
@@ -452,7 +453,7 @@ Detects contact by monitoring the support force (Fn = |Fz|) during CLOSING. When
 When contact is detected, the controller stops the gripper and transitions through two contact states:
 
 1. **Contact detected (RT thread)**: Sets `contact_latched_`, sets `stop_requested_`, and transitions to **CONTACT_CONFIRMED** immediately.
-2. **Read thread executes stop**: Checks `stop_requested_` after each `readOnce()`, calls `franka::Gripper::stop()` to physically halt the motor, then sets `gripper_stopped_` to signal the RT thread.
+2. **Read thread executes stop**: Checks `stop_requested_` after each `readOnce()`, calls `franka::Gripper::stop()` to physically halt the motor, then sets `gripper_stopped_` to signal the RT thread. If `stop()` throws an exception, `stop_requested_` remains true for automatic retry on the next iteration — `gripper_stopped_` is only set on success.
 3. **Deferred transition (RT thread)**: On the next tick, sees `contact_latched_ && CONTACT_CONFIRMED && gripper_stopped_` and transitions to **CONTACT**. `contact_width_` is captured from the current gripper width at this point.
 4. **One-shot guard**: `gripper_stop_sent_` flag prevents duplicate stop requests; `contact_latched_` prevents re-detection.
 
@@ -611,7 +612,7 @@ The UPLIFT and DOWNLIFT states execute smooth Cartesian micro-lifts internally u
 | Symbol     | Name                      | Unit | Default  | Description                                                                |
 | ---------- | ------------------------- | ---- | -------- | -------------------------------------------------------------------------- |
 | `d`        | Lift distance             | m    | 0.010    | Total displacement along the z-axis (max 0.02)                             |
-| `v_lift`   | Lift speed                | m/s  | 0.01     | Speed for both UPLIFT and DOWNLIFT                                         |
+| `v_lift`   | Lift speed                | m/s  | 0.01     | Speed for both UPLIFT and DOWNLIFT (min 0.001)                             |
 | `T`        | Lift duration             | s    | computed | `T = d / v_lift` (computed from distance and speed)                        |
 | `t`        | Elapsed time              | s    | —        | Time since lift started, incremented by `Δt` (control period) each tick    |
 | `Δt`       | Control period            | s    | 0.001    | Time between consecutive `update()` calls (1 kHz)                          |
@@ -669,14 +670,19 @@ The **velocity profile** (first derivative) is:
 
 ### Safety Constraints
 
-| Constraint              | Symbol / Value | Description                                                                |
-| ----------------------- | -------------- | -------------------------------------------------------------------------- |
-| Maximum closing speed   | `v ≤ 0.10 m/s` | Hard clamp — speeds above 0.10 m/s are clamped with a warning              |
-| Maximum uplift distance | `d ≤ 0.02 m`   | Hard clamp — any `d > 20 mm` is clamped with a warning                     |
-| Precondition            | —              | GRASPING requires CONTACT state                                           |
-| BASELINE interruption   | —              | BASELINE clears active trajectories, returns to passthrough (with warning) |
-| GRASPING timeout        | 10 s           | Transitions to FAILED if gripper command does not complete                 |
-| Force ramp limit        | `F ≤ f_max`    | Transitions to FAILED if maximum force is exceeded                         |
+| Constraint              | Symbol / Value    | Description                                                                |
+| ----------------------- | ----------------- | -------------------------------------------------------------------------- |
+| Maximum closing speed   | `v ≤ 0.10 m/s`    | Hard clamp — speeds above 0.10 m/s are clamped with a warning              |
+| Maximum uplift distance | `d ≤ 0.02 m`      | Hard clamp — any `d > 20 mm` is clamped with a warning                     |
+| Minimum lift speed      | `v ≥ 0.001 m/s`   | Hard clamp — prevents divide-by-zero in UPLIFT/DOWNLIFT duration calc      |
+| Minimum uplift hold     | `t ≥ 0.5 s`       | Hard clamp — ensures W_pre ≥ 0.25 s for reliable pre-lift baseline         |
+| Maximum uplift hold     | `t ≤ 8.0 s`       | Hard clamp — prevents width sample vector from exceeding pre-allocated capacity |
+| Precondition            | —                 | GRASPING requires CONTACT state                                           |
+| BASELINE interruption   | —                 | BASELINE clears active trajectories, returns to passthrough (with warning) |
+| CLOSING_COMMAND timeout | 10 s              | Transitions to FAILED if move command never starts executing               |
+| GRASPING timeout        | 10 s              | Transitions to FAILED if gripper command does not complete; sends `stop_requested_` to cancel in-flight command |
+| Action server timeout   | 30 s              | Action server commands abort if gripper does not respond within timeout     |
+| Force ramp limit        | `F ≤ f_max`       | Transitions to FAILED if maximum force is exceeded                         |
 
 ## Configuration
 
@@ -688,16 +694,16 @@ The **velocity profile** (first derivative) is:
 | `publish_rate`             | double | `250.0` | State data publish rate [Hz]                                        |
 | `closing_width`            | double | `0.01`  | Default width for MoveAction in CLOSING [m]                         |
 | `closing_speed`            | double | `0.05`  | Default speed for MoveAction in CLOSING [m/s] (clamped to max 0.10) |
-| `force_drop_thresh`        | double | `0.3`   | Fn drop below baseline to trigger contact [N]                       |
+| `force_drop_thresh`        | double | `0.1`   | Fn drop below baseline to trigger contact [N]                       |
 | `force_drop_debounce_time` | double | `0.05`  | Sustained drop duration before triggering contact [s]               |
 | `grasp_speed`              | double | `0.02`  | Gripper speed for GraspAction [m/s]                                 |
-| `epsilon`                  | double | `0.04`  | Epsilon for GraspAction (inner and outer) [m]                       |
+| `epsilon`                  | double | `0.008` | Epsilon for GraspAction (inner and outer) [m]                       |
 | `f_min`                    | double | `3.0`   | Starting grasp force [N]                                            |
 | `f_step`                   | double | `3.0`   | Force increment per iteration [N]                                   |
 | `f_max`                    | double | `30.0`  | Maximum force — FAILED if exceeded [N]                              |
 | `uplift_distance`          | double | `0.010` | Micro-uplift distance per iteration [m] (max 0.02)                  |
-| `lift_speed`               | double | `0.01`  | Lift speed for UPLIFT and DOWNLIFT [m/s]                            |
-| `uplift_hold`              | double | `1.0`   | Hold time: early (first half) + late (second half) windows [s]. Also determines W_pre = uplift_hold/2 and settling time = uplift_hold/2 |
+| `lift_speed`               | double | `0.01`  | Lift speed for UPLIFT and DOWNLIFT [m/s] (min 0.001)                |
+| `uplift_hold`              | double | `1.0`   | Hold time: early (first half) + late (second half) windows [s] (min 0.5, max 8.0). Also determines W_pre = uplift_hold/2 and settling time = uplift_hold/2 |
 | `slip_drop_thresh`         | double | `0.15`   | DF_TH: max allowed relative support force drop (15% = fail)         |
 | `slip_width_thresh`        | double | `0.0005` | W_TH: max allowed jaw widening P95-P5 [m] (0.5 mm = fail)          |
 | `load_transfer_min`        | double | `2.0`    | Floor for load transfer threshold [N] (lower for light objects)     |
@@ -793,16 +799,16 @@ Per-object command published on `/kitting_controller/state_cmd`. Any float64 par
 | `open_width`           | float64 | Width to open to [m] (0 = max_width from firmware). Only if `open_gripper` is true |
 | `closing_width`        | float64 | Target width for MoveAction [m] (0 = use default)                                  |
 | `closing_speed`        | float64 | Speed for MoveAction [m/s] (0 = use default, max 0.10)                             |
-| `force_drop_thresh`    | float64 | Force drop threshold [N] (0 = use YAML default 0.3)                                |
+| `force_drop_thresh`    | float64 | Force drop threshold [N] (0 = use YAML default 0.1)                                |
 | `force_drop_debounce_time` | float64 | Sustained drop duration before triggering [s] (0 = use YAML default 0.05)      |
 | `f_min`                | float64 | Starting grasp force [N] (0 = use default 3.0)                                     |
 | `f_step`               | float64 | Force increment per iteration [N] (0 = use default 3.0)                            |
 | `f_max`                | float64 | Maximum force — FAILED if exceeded [N] (0 = use default 30.0)                      |
 | `fr_uplift_distance`   | float64 | Micro-uplift distance per iteration [m] (0 = use default 0.010, max 0.02)          |
-| `fr_lift_speed`        | float64 | Lift speed for UPLIFT and DOWNLIFT [m/s] (0 = use default 0.01)                    |
-| `fr_uplift_hold`       | float64 | Hold time at top for evaluation [s] (0 = use default 1.0)                          |
+| `fr_lift_speed`        | float64 | Lift speed for UPLIFT and DOWNLIFT [m/s] (0 = use default 0.01, min 0.001)         |
+| `fr_uplift_hold`       | float64 | Hold time at top for evaluation [s] (0 = use default 1.0, min 0.5, max 8.0)        |
 | `fr_grasp_speed`       | float64 | Gripper speed for ramp GraspAction [m/s] (0 = use default 0.02)                    |
-| `fr_epsilon`           | float64 | Epsilon for ramp GraspAction, inner and outer [m] (0 = use default 0.04)           |
+| `fr_epsilon`           | float64 | Epsilon for ramp GraspAction, inner and outer [m] (0 = use default 0.008)          |
 | `fr_slip_drop_thresh`     | float64 | DF_TH: max allowed relative support force drop (0 = use default 0.15)           |
 | `fr_slip_width_thresh`    | float64 | W_TH: max allowed jaw widening P95-P5 [m] (0 = use default 0.0005)             |
 | `fr_load_transfer_min`    | float64 | Floor for load transfer threshold [N] (0 = use default 2.0)                     |
@@ -812,7 +818,7 @@ Only the parameters relevant to the command are used:
 
 - `BASELINE` uses `open_gripper` and `open_width`
 - `CLOSING` uses `closing_width`, `closing_speed`, `force_drop_thresh`, and `force_drop_debounce_time`
-- `GRASPING` uses all `f_*`/`fr_*` force ramp parameters (grasp width is always from `contact_width`)
+- `GRASPING` uses all `f_*`/`fr_*` force ramp parameters (grasp width is always from `contact_width`; rejected if `contact_width` is out of range `[0, max_width]`)
 - `AUTO` uses all of the above, plus `auto_delay`
 
 ## KittingState Message
@@ -862,13 +868,13 @@ The `franka_gripper` package is used only for action type definitions — `frank
 ## Real-Time Safety
 
 - Uses `realtime_tools::RealtimePublisher` with non-blocking `trylock()`
-- No dynamic memory allocation in `update()`
+- No dynamic memory allocation in `update()` — width sample vector pre-allocated in `starting()` with capacity for 8 s at 250 Hz (`kMaxWidthSamples = 2000`)
 - No blocking operations in `update()`
 - Model queries are only called at the publish rate, not every control tick
 - Contact detection uses only scalar arithmetic (no Eigen, no allocation)
 - Gripper data passed to RT loop via lock-free `RealtimeBuffer` (no mutex in `update()`)
 - Gripper stop on contact uses single atomic store (`stop_requested_`), nanoseconds, RT-safe
-- Read thread checks `stop_requested_` flag after each `readOnce()`, calls `stop()` (non-RT), and sets `gripper_stopped_` to confirm
+- Read thread checks `stop_requested_` flag after each `readOnce()`, calls `stop()` (non-RT), and sets `gripper_stopped_` to confirm. If `stop()` fails (exception), `stop_requested_` remains true for automatic retry on the next iteration — `gripper_stopped_` is only set on success
 - CONTACT state transition deferred until `gripper_stopped_` is true — ensures stopped gripper before recording
 - Command thread executes blocking `move()`/`grasp()` (non-RT), interruptible by `stop()`
 - No blocking gripper calls in `update()` — all gripper I/O runs in dedicated threads
@@ -929,14 +935,18 @@ The Grasp logger is written in C++ using the `rosbag::Bag` API directly and `top
 - Slip detected during EVALUATE: SLIP → DOWNLIFT → SETTLING → GRASPING (retry with F += f_step, using gripper width snapshot from right before last UPLIFT)
 - Force ramp retry calls `stop()` before dispatching deferred grasp — prevents libfranka hang when gripper is already grasped
 - Force ramp terminates with FAILED if f_current exceeds f_max
+- GRASPING timeout sends `stop_requested_` to cancel the in-flight gripper command — prevents stale commands from blocking future operations
 - UPLIFT and DOWNLIFT trajectories use cosine smoothing with duration computed from distance/speed
 - UPLIFT/DOWNLIFT orientation remains unchanged throughout the motion
 - Uplift distance is clamped to 20 mm maximum (with warning)
+- Lift speed is clamped to minimum `kMinLiftSpeed` (0.001 m/s) — prevents divide-by-zero in UPLIFT/DOWNLIFT duration calculation
+- Uplift hold is clamped to maximum `kMaxUpliftHold` (8.0 s) — prevents width sample vector from exceeding pre-allocated capacity
 - SUCCESS keeps arm elevated for pick-and-place; accumulated uplift corrected automatically on next BASELINE
 - BASELINE during active force ramp clears trajectories and returns to passthrough
 - Per-command force ramp parameters override YAML defaults when non-zero
 - Parameters left at 0.0 fall back to YAML config values
 - Duplicate CLOSING commands are ignored (rejected during CLOSING_COMMAND or CLOSING)
+- CLOSING_COMMAND times out after `kClosingCmdTimeout` (10 s) if the move command never starts executing — prevents indefinite stall if the command thread is blocked
 - Controller holds position (passthrough) when not executing trajectory — no drift or jerk
 - Gripper connection failure at init returns false (controller not loaded)
 - Controller destructor shuts down action servers then joins gripper threads cleanly on unload
@@ -945,11 +955,13 @@ The Grasp logger is written in C++ using the `rosbag::Bag` API directly and `top
 - Action server requests rejected with descriptive error during active grasp sequence (BASELINE through SETTLING)
 - Stop action always allowed regardless of state (thread-safe `gripper_->stop()`)
 - Move, grasp, homing actions routed through command thread to prevent concurrent libfranka calls
+- Action server commands time out after `kActionTimeoutSec` (30 s) — prevents indefinite blocking if the gripper firmware hangs
 - Action server shutdown before gripper thread shutdown prevents hanging futures on controller unload
 - AUTO command runs full grasp sequence: BASELINE → *(delay)* → CLOSING_COMMAND → CLOSING → *(wait for CONTACT_CONFIRMED → CONTACT)* → *(delay)* → GRASPING
 - AUTO mode uses configurable `auto_delay` (default 5.0 seconds) between BASELINE→CLOSING_COMMAND and CONTACT→GRASPING transitions
 - AUTO mode forwards all BASELINE, CLOSING, and GRASPING parameters from the single message to each stage
 - AUTO mode cancelled by any manual command (BASELINE, CLOSING, GRASPING) — allows user override at any point
+- `auto_mode_` flag is `std::atomic<bool>` — safe with `ros::AsyncSpinner` concurrent timer/subscriber callbacks
 - AUTO mode ends automatically on FAILED during CLOSING (no contact detected) or after GRASPING starts (force ramp is autonomous)
 - Auto mode timers run on ROS spinner thread (non-RT); reuse existing handle functions — no duplicated logic
 

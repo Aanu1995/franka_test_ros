@@ -8,7 +8,7 @@ kitting_state_controller:
   closing_speed: 0.05 # [m/s] Default speed for MoveAction in CLOSING
 
   # Force-drop contact detection parameters
-  force_drop_thresh: 0.3            # [N] Fn drop below baseline to trigger contact
+  force_drop_thresh: 0.1            # [N] Fn drop below baseline to trigger contact
   force_drop_debounce_time: 0.05    # [s] Sustained drop duration before triggering (0.05 = 50ms)
 
   # Grasping parameters (overridable per-command via KittingGripperCommand)
@@ -16,13 +16,13 @@ kitting_state_controller:
   # On slip: SLIP -> DOWNLIFT -> SETTLING -> GRASPING (retry with F += f_step)
   # grasp_width is always the contact_width captured at CONTACT (not configurable)
   grasp_speed: 0.02 # [m/s] Gripper speed for GraspAction
-  epsilon: 0.04 # [m] Epsilon for GraspAction (same for inner/outer)
+  epsilon: 0.008 # [m] Epsilon for GraspAction (same for inner/outer)
   f_min: 3.0 # [N] Starting grasp force
   f_step: 3.0 # [N] Force increment per iteration
   f_max: 30.0 # [N] Maximum force (FAILED if exceeded)
   uplift_distance: 0.010 # [m] Micro-uplift distance per iteration
-  lift_speed: 0.01 # [m/s] Lift speed for both UPLIFT and DOWNLIFT
-  uplift_hold: 1.0  # [s] Hold at top; early (0–0.5s) + late (0.5–1.0s) windows
+  lift_speed: 0.01 # [m/s] Lift speed for both UPLIFT and DOWNLIFT (clamped to min 0.001)
+  uplift_hold: 1.0  # [s] Hold at top; early (0–0.5s) + late (0.5–1.0s) windows (clamped to 0.5–8.0)
   slip_drop_thresh: 0.15    # DF_TH: max allowed relative support force drop (15% = fail)
   slip_width_thresh: 0.0005 # [m] W_TH: max allowed jaw widening P95-P5 (0.5mm = fail)
   load_transfer_min: 2.0    # [N] Minimum load transfer threshold (lighter objects need lower value)

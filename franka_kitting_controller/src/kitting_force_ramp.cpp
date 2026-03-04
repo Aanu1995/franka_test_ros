@@ -63,6 +63,13 @@ namespace franka_kitting_controller {
             publishStateLabel("CLOSING");
             logStateTransition("CLOSING", "Gripper move confirmed — closing");
           }
+        } else if (state == GraspState::CLOSING_COMMAND &&
+                   (time - fr_phase_start_time_).toSec() > kClosingCmdTimeout) {
+          // Move command never started — command thread may be stuck
+          current_state_.store(GraspState::FAILED, std::memory_order_relaxed);
+          publishStateLabel("FAILED");
+          logStateTransition("FAILED", "CLOSING_COMMAND timeout — move never started");
+          return;
         }
       }
 
@@ -88,7 +95,6 @@ namespace franka_kitting_controller {
         current_state_.load(std::memory_order_relaxed) == GraspState::CONTACT_CONFIRMED &&
         gripper_stopped_.load(std::memory_order_relaxed)) {
       current_state_.store(GraspState::CONTACT, std::memory_order_relaxed);
-      contact_width_.store(gripper_snapshot.width, std::memory_order_relaxed);
       publishStateLabel("CONTACT");
       logStateTransition("CONTACT", "Gripper stopped — contact confirmed");
       ROS_INFO("    contact_width=%.4f m", contact_width_.load(std::memory_order_relaxed));
@@ -131,6 +137,7 @@ namespace franka_kitting_controller {
       current_state_.store(GraspState::CONTACT_CONFIRMED, std::memory_order_relaxed);
       publishStateLabel("CONTACT_CONFIRMED");
       logStateTransition("CONTACT_CONFIRMED", "Force drop detected — gripper stopping");
+      contact_width_.store(gripper_snapshot.width, std::memory_order_relaxed);
 
       requestGripperStop("Contact");
 
@@ -180,6 +187,10 @@ namespace franka_kitting_controller {
 
     // Timeout: if grasp command doesn't complete in time, fail
     if (elapsed > kGraspTimeout) {
+      // Stop the in-flight gripper command so it doesn't stall future commands
+      if (cmd_executing_.load(std::memory_order_relaxed)) {
+        stop_requested_.store(true, std::memory_order_relaxed);
+      }
       current_state_.store(GraspState::FAILED, std::memory_order_relaxed);
       publishStateLabel("FAILED");
       logStateTransition("FAILED", "GRASPING timeout");
@@ -256,8 +267,7 @@ namespace franka_kitting_controller {
     fr_early_count_ = 0;
     fr_late_sum_ = 0.0;
     fr_late_count_ = 0;
-    fr_width_samples_.clear();
-    fr_width_samples_.reserve(static_cast<size_t>(rt_fr_uplift_hold_ * kWidthSamplesPerSec) + 100);
+    fr_width_samples_.clear();  // Capacity preserved from starting() pre-allocation
 
     current_state_.store(GraspState::EVALUATE, std::memory_order_relaxed);
     publishStateLabel("EVALUATE");
@@ -319,6 +329,7 @@ namespace franka_kitting_controller {
     bool drop_ok = (dF <= rt_fr_slip_drop_thresh_);
 
     // --- Gate 3: Jaw widening (P95 - P5) ---
+    // Note: nth_element is O(n) average — ~2-5μs for 250 samples, within 4ms RT budget.
     double p5 = 0.0, p95 = 0.0, dw = 0.0;
     int n = static_cast<int>(fr_width_samples_.size());
     if (n >= 20) {

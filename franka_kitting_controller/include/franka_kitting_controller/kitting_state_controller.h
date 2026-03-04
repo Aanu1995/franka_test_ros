@@ -78,8 +78,8 @@ namespace franka_kitting_controller {
     double width{0.0};
     double speed{0.0};
     double force{0.0};
-    double epsilon_inner{0.04};
-    double epsilon_outer{0.04};
+    double epsilon_inner{0.008};
+    double epsilon_outer{0.008};
     std::shared_ptr<std::promise<bool>> result_promise;  // nullptr = fire-and-forget
   };
 
@@ -215,7 +215,7 @@ namespace franka_kitting_controller {
     bool contact_latched_{false};
 
     // --- Force-drop contact detection: YAML defaults ---
-    double force_drop_thresh_{0.3};           // [N] Fn drop below baseline to trigger
+    double force_drop_thresh_{0.1};           // [N] Fn drop below baseline to trigger
     double force_drop_debounce_time_{0.05};   // [s] Sustained drop duration before triggering
     static constexpr int kForceDropBaselineSamples{50};  // Fixed: 50 samples = 0.2s at 250Hz
 
@@ -235,11 +235,11 @@ namespace franka_kitting_controller {
     bool closing_command_entered_{false};     ///< First-tick flag: ensures CLOSING_COMMAND label is published before transition
 
     // Force-drop staging (subscriber → RT via CLOSING_COMMAND snapshot)
-    double closing_force_drop_thresh_{0.3};
+    double closing_force_drop_thresh_{0.1};
     double closing_force_drop_debounce_time_{0.05};
 
     // Force-drop RT-local copies
-    double rt_force_drop_thresh_{0.3};
+    double rt_force_drop_thresh_{0.1};
     double rt_force_drop_debounce_time_{0.05};
 
     // Force-drop runtime state (RT-thread owned)
@@ -279,7 +279,7 @@ namespace franka_kitting_controller {
     double fr_lift_speed_{0.01};
     double fr_uplift_hold_{1.0};
     double fr_grasp_speed_{0.02};
-    double fr_epsilon_{0.04};         // Single epsilon (inner == outer)
+    double fr_epsilon_{0.008};         // Single epsilon (inner == outer)
     double fr_slip_drop_thresh_{0.15};       // DF_TH: max allowed relative support force drop (15% = fail)
     double fr_slip_width_thresh_{0.0005};    // [m] W_TH: max allowed jaw widening P95-P5 (0.5mm = fail)
     double fr_load_transfer_min_{2.0};       // [N] Min floor for load transfer threshold
@@ -294,7 +294,7 @@ namespace franka_kitting_controller {
     double rt_fr_lift_speed_{0.01};
     double rt_fr_uplift_hold_{1.0};
     double rt_fr_grasp_speed_{0.02};
-    double rt_fr_epsilon_{0.04};
+    double rt_fr_epsilon_{0.008};
     double rt_fr_slip_drop_thresh_{0.15};
     double rt_fr_slip_width_thresh_{0.0005};
     double rt_fr_load_transfer_min_{2.0};
@@ -309,7 +309,7 @@ namespace franka_kitting_controller {
     double staging_fr_lift_speed_{0.01};
     double staging_fr_uplift_hold_{1.0};
     double staging_fr_grasp_speed_{0.02};
-    double staging_fr_epsilon_{0.04};
+    double staging_fr_epsilon_{0.008};
     double staging_fr_slip_drop_thresh_{0.15};
     double staging_fr_slip_width_thresh_{0.0005};
     double staging_fr_load_transfer_min_{2.0};
@@ -332,7 +332,7 @@ namespace franka_kitting_controller {
     double fr_late_sum_{0.0};             // W_hold_late: Σ Fn
     int    fr_late_count_{0};             // W_hold_late: sample count
     double fr_grasp_width_snapshot_{0.0}; // Gripper width snapshot taken right before UPLIFT — used for retry grasp
-    std::vector<double> fr_width_samples_;  // Width samples during EVALUATE for P5/P95 (reserved in tickUplift)
+    std::vector<double> fr_width_samples_;  // Width samples during EVALUATE for P5/P95 (pre-allocated in starting())
     double accumulated_uplift_{0.0};       // Uncorrected uplift from SUCCESS [m]
 
     // --- Deferred grasp command (realtime → read thread → command thread) ---
@@ -350,9 +350,14 @@ namespace franka_kitting_controller {
     static constexpr double kMaxClosingSpeed{0.10};    // [m/s] Hard cap on closing speed
     static constexpr double kMaxUpliftDistance{0.02};   // [m] Safety cap on uplift distance
     static constexpr double kMinUpliftHold{0.5};        // [s] Minimum uplift hold (ensures W_pre ≥ 0.25s)
+    static constexpr double kMaxUpliftHold{8.0};         // [s] Maximum uplift hold (kMaxWidthSamples / 250Hz)
+    static constexpr double kMinLiftSpeed{0.001};        // [m/s] Minimum lift speed (prevents div-by-zero in duration calc)
     static constexpr int kWidthSamplesPerSec{250};        // Width sample rate [Hz] — for reserve sizing
+    static constexpr int kMaxWidthSamples{2000};           // Pre-allocated capacity (8s at 250Hz)
+    static constexpr int kActionTimeoutSec{30};              // Action server command timeout [s]
 
     // --- Force ramp internal timing constants ---
+    static constexpr double kClosingCmdTimeout{10.0};   // [s] Fail if move command doesn't start executing
     static constexpr double kGraspSettleDelay{0.1};     // [s] Wait for command thread pickup
     static constexpr double kGraspTimeout{10.0};        // [s] Fail if grasp doesn't complete
 
@@ -449,7 +454,7 @@ namespace franka_kitting_controller {
     void handleGraspingCmd(const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg);
 
     // --- Auto mode (single-command full grasp sequence) ---
-    bool auto_mode_{false};
+    std::atomic<bool> auto_mode_{false};  // Accessed from subscriber + timer threads
     ros::NodeHandle auto_nh_;
     ros::Timer auto_delay_timer_;
     ros::Timer auto_contact_poll_timer_;
