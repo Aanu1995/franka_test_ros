@@ -1,6 +1,6 @@
 # franka_kitting_controller
 
-Real-time state acquisition and automated force ramp controller for the Franka Panda with force-drop contact detection and rosbag data collection. Reads all robot state, model, and Cartesian signals, publishes them as a single `KittingState` message, autonomously detects contact using force-drop contact detection, immediately stops the gripper on contact via `franka::Gripper::stop()`, and runs an automated force ramp loop (GRASPING → UPLIFT → EVALUATE → SUCCESS, with slip-triggered retry at higher force) internally. Claims `FrankaPoseCartesianInterface` for Cartesian pose control. Gripper operations use the libfranka `franka::Gripper` API directly. Also exposes `franka_gripper`-compatible action servers (move, grasp, homing, stop) for external gripper control when the internal state machine is idle.
+Real-time state acquisition and automated force ramp controller for the Franka Panda with torque-drop contact detection and rosbag data collection. Reads all robot state, model, and Cartesian signals, publishes them as a single `KittingState` message, autonomously detects contact using torque-drop contact detection (tau_ext_norm), immediately stops the gripper on contact via `franka::Gripper::stop()`, and runs an automated force ramp loop (GRASPING → UPLIFT → EVALUATE → SUCCESS, with slip-triggered retry at higher force) internally. Claims `FrankaPoseCartesianInterface` for Cartesian pose control. Gripper operations use the libfranka `franka::Gripper` API directly. Also exposes `franka_gripper`-compatible action servers (move, grasp, homing, stop) for external gripper control when the internal state machine is idle.
 
 ## Overview
 
@@ -14,7 +14,7 @@ This controller runs inside the `ros_control` real-time loop provided by `franka
 **Grasp** adds:
 
 - 14-state grasp machine with automated force ramp: `START` → `BASELINE` → `CLOSING_COMMAND` → `CLOSING` → `CONTACT_CONFIRMED` → `CONTACT` → `GRASPING` → `UPLIFT` → `EVALUATE` → `SUCCESS` (with slip retry loop via `SLIP` → `DOWNLIFT` → `SETTLING` → `GRASPING`)
-- Force-drop contact detection during CLOSING
+- Torque-drop contact detection during CLOSING (monitors tau_ext_norm for a sudden drop on contact)
 - Immediate gripper stop on contact: calls `franka::Gripper::stop()` to physically halt the motor
 - Automated force ramp: increments grasp force from `f_min` to `f_max` in `f_step` increments until stable grasp or failure
 - Three-gate AND slip detection: load transfer + support drop + jaw widening (directional force decomposition, Fn = |Fz|) during EVALUATE hold
@@ -148,7 +148,7 @@ Gripper close queued — awaiting execution confirmation. Published via `/kittin
 Observe approach dynamics before contact. Published **automatically** by the controller when gripper movement is confirmed.
 
 - Gripper is confirmed moving toward object at width `w` and speed `v` (max 0.10 m/s)
-- Force-drop contact detection runs during this state (see [Force-Drop Contact Detection](#force-drop-contact-detection))
+- Torque-drop contact detection runs during this state (see [Torque-Drop Contact Detection](#torque-drop-contact-detection))
 - On contact detection, transitions immediately to **CONTACT_CONFIRMED**
 - If gripper reaches target width without detecting contact (no object present), transitions to **FAILED** — "no contact detected"
 
@@ -156,7 +156,7 @@ Observe approach dynamics before contact. Published **automatically** by the con
 
 Contact detected — gripper decelerating. Published **automatically** by the controller on contact detection.
 
-- Fn drops below baseline by more than `force_drop_thresh` (default 0.1 N), sustained for `force_drop_debounce_time` (default 0.05 s) (see [Force-Drop Contact Detection](#force-drop-contact-detection))
+- tau_ext_norm drops below baseline by more than `contact_torque_thresh` (default 0.1 Nm), sustained for `contact_debounce_time` (default 0.05 s) (see [Torque-Drop Contact Detection](#torque-drop-contact-detection))
 - `contact_width` is saved when the gripper has physically stopped (CONTACT) — used as the grasp width in GRASPING
 - `franka::Gripper::stop()` is requested via the read thread to halt the motor
 - Data recorded during this state captures the gripper deceleration dynamics
@@ -323,14 +323,14 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
   "{command: 'CLOSING', closing_width: 0.01, closing_speed: 0.05}" --once
 
-# CLOSING — override force-drop detection parameters
+# CLOSING — override torque-drop detection parameters
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
-  "{command: 'CLOSING', force_drop_thresh: 0.5, force_drop_debounce_time: 0.08}" --once
+  "{command: 'CLOSING', contact_torque_thresh: 0.5, contact_debounce_time: 0.08}" --once
 
 # CLOSING — override all closing parameters for a specific object
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
   "{command: 'CLOSING', closing_width: 0.01, closing_speed: 0.05, \
-    force_drop_thresh: 0.1, force_drop_debounce_time: 0.05}" --once
+    contact_torque_thresh: 0.1, contact_debounce_time: 0.05}" --once
 
 # ... CONTACT is published by the controller automatically ...
 
@@ -375,7 +375,7 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
   "{command: 'AUTO', open_gripper: true, auto_delay: 3.0, \
     closing_width: 0.01, closing_speed: 0.05, \
-    force_drop_thresh: 0.1, force_drop_debounce_time: 0.05, \
+    contact_torque_thresh: 0.1, contact_debounce_time: 0.05, \
     f_min: 3.0, f_step: 3.0, f_max: 30.0, \
     fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
     fr_uplift_distance: 0.010, fr_lift_speed: 0.01, fr_uplift_hold: 1.0, \
@@ -426,27 +426,27 @@ The `/franka_gripper/` namespace matches the default namespace used by `franka_g
 
 ## Grasp: Contact Detection
 
-The controller detects contact during CLOSING by monitoring the support force (Fn = |Fz|) for a sudden drop when the gripper contacts an object. A configurable debounce duration suppresses noise and avoids false positives. On detection, the controller transitions to `CONTACT_CONFIRMED` → `CONTACT`.
+The controller detects contact during CLOSING by monitoring tau_ext_norm (the Euclidean norm of estimated external joint torques) for a sudden drop when the gripper contacts an object. Empirically, tau_ext_norm drops on contact (e.g., from ~1.6 Nm baseline to ~1.3 Nm). A configurable debounce duration suppresses noise and avoids false positives. On detection, the controller transitions to `CONTACT_CONFIRMED` → `CONTACT`.
 
-### Force-Drop Contact Detection
+### Torque-Drop Contact Detection
 
-Detects contact by monitoring the support force (Fn = |Fz|) during CLOSING. When the gripper contacts an object, the force reading drops suddenly as the gripper mechanics absorb the impact.
+Detects contact by monitoring tau_ext_norm during CLOSING. When the gripper contacts an object, the external torque norm drops suddenly as the gripper mechanics absorb the impact. The detection function is `detectContact()`.
 
 #### Algorithm
 
-1. **Baseline collection**: During BASELINE state (after any accumulated-uplift correction completes), collect the first 50 samples of Fn (0.2 s at 250 Hz) and compute the mean as `Fn_baseline`. This captures the at-rest support force before any gripper motion.
-2. **Drop detection**: Check if `Fn_baseline - Fn > force_drop_thresh` (default 0.1 N) using the current Fn reading each tick.
-3. **Debounce**: The drop condition must persist for `force_drop_debounce_time` (default 0.05 s) before triggering contact.
+1. **Baseline collection**: During BASELINE state (after any accumulated-uplift correction completes), collect the first `kContactBaselineSamples` (50) samples of tau_ext_norm (0.2 s at 250 Hz) and compute the mean as `cd_baseline_`. The baseline is ready when `cd_baseline_ready_` is set. This captures the at-rest external torque norm before any gripper motion.
+2. **Drop detection**: Check if `cd_baseline_ - tau_ext_norm > contact_torque_thresh` (default 0.1 Nm) using the current tau_ext_norm reading each tick.
+3. **Debounce**: The drop condition must persist for `contact_debounce_time` (default 0.05 s) before triggering contact.
 4. **On trigger**: Sets `contact_latched_`, transitions to `CONTACT_CONFIRMED`, calls `requestGripperStop()`. `contact_width_` is captured later when the gripper has physically stopped (CONTACT).
 
 #### Symbols
 
-| Symbol           | Name                     | Unit | Default  | Description                                                       |
-| ---------------- | ------------------------ | ---- | -------- | ----------------------------------------------------------------- |
-| `Fn_baseline`    | Baseline support force   | N    | —        | Mean Fn from first 50 samples of BASELINE (at-rest, after downlift correction) |
-| `Fn`             | Current support force    | N    | —        | Current Fn = \|Fz\| reading                                      |
-| `force_drop_thresh` | Drop threshold        | N    | 0.1      | Minimum `Fn_baseline - Fn` to trigger contact                    |
-| `force_drop_debounce_time` | Debounce duration | s | 0.05     | Sustained drop duration before triggering contact                 |
+| Symbol                 | Name                        | Unit | Default  | Description                                                                    |
+| ---------------------- | --------------------------- | ---- | -------- | ------------------------------------------------------------------------------ |
+| `cd_baseline_` (τ_baseline) | Baseline torque norm   | Nm   | —        | Mean tau_ext_norm from first 50 samples of BASELINE (at-rest, after downlift correction) |
+| `tau_ext_norm`         | Current external torque norm | Nm   | —        | Euclidean norm of estimated external joint torques                              |
+| `contact_torque_thresh` | Drop threshold             | Nm   | 0.1      | Minimum `cd_baseline_ - tau_ext_norm` to trigger contact                       |
+| `contact_debounce_time` | Debounce duration          | s    | 0.05     | Sustained drop duration before triggering contact                              |
 
 ### Gripper Stop on Contact
 
@@ -694,8 +694,8 @@ The **velocity profile** (first derivative) is:
 | `publish_rate`             | double | `250.0` | State data publish rate [Hz]                                        |
 | `closing_width`            | double | `0.01`  | Default width for MoveAction in CLOSING [m]                         |
 | `closing_speed`            | double | `0.05`  | Default speed for MoveAction in CLOSING [m/s] (clamped to max 0.10) |
-| `force_drop_thresh`        | double | `0.1`   | Fn drop below baseline to trigger contact [N]                       |
-| `force_drop_debounce_time` | double | `0.05`  | Sustained drop duration before triggering contact [s]               |
+| `contact_torque_thresh`    | double | `0.1`   | tau_ext_norm drop below baseline to trigger contact [Nm]            |
+| `contact_debounce_time`    | double | `0.05`  | Sustained drop duration before triggering contact [s]               |
 | `grasp_speed`              | double | `0.02`  | Gripper speed for GraspAction [m/s]                                 |
 | `epsilon`                  | double | `0.008` | Epsilon for GraspAction (inner and outer) [m]                       |
 | `f_min`                    | double | `3.0`   | Starting grasp force [N]                                            |
@@ -759,7 +759,7 @@ topics_recorded:
   - /kitting_controller/state
 export_csv_on_stop: true
 detector_parameters:
-  method: force_drop
+  method: torque_drop
 ```
 
 ### CSV Export
@@ -799,8 +799,8 @@ Per-object command published on `/kitting_controller/state_cmd`. Any float64 par
 | `open_width`           | float64 | Width to open to [m] (0 = max_width from firmware). Only if `open_gripper` is true |
 | `closing_width`        | float64 | Target width for MoveAction [m] (0 = use default)                                  |
 | `closing_speed`        | float64 | Speed for MoveAction [m/s] (0 = use default, max 0.10)                             |
-| `force_drop_thresh`    | float64 | Force drop threshold [N] (0 = use YAML default 0.1)                                |
-| `force_drop_debounce_time` | float64 | Sustained drop duration before triggering [s] (0 = use YAML default 0.05)      |
+| `contact_torque_thresh` | float64 | Torque drop threshold [Nm] (0 = use YAML default 0.1)                              |
+| `contact_debounce_time` | float64 | Sustained drop duration before triggering [s] (0 = use YAML default 0.05)          |
 | `f_min`                | float64 | Starting grasp force [N] (0 = use default 3.0)                                     |
 | `f_step`               | float64 | Force increment per iteration [N] (0 = use default 3.0)                            |
 | `f_max`                | float64 | Maximum force — FAILED if exceeded [N] (0 = use default 30.0)                      |
@@ -817,7 +817,7 @@ Per-object command published on `/kitting_controller/state_cmd`. Any float64 par
 Only the parameters relevant to the command are used:
 
 - `BASELINE` uses `open_gripper` and `open_width`
-- `CLOSING` uses `closing_width`, `closing_speed`, `force_drop_thresh`, and `force_drop_debounce_time`
+- `CLOSING` uses `closing_width`, `closing_speed`, `contact_torque_thresh`, and `contact_debounce_time`
 - `GRASPING` uses all `f_*`/`fr_*` force ramp parameters (grasp width is always from `contact_width`; rejected if `contact_width` is out of range `[0, max_width]`)
 - `AUTO` uses all of the above, plus `auto_delay`
 
@@ -838,7 +838,7 @@ Only the parameters relevant to the command are used:
 | `ee_velocity`  | float64[6]  | End-effector velocity (J \* dq) [m/s, rad/s]      |
 | `tau_ext_norm` | float64     | Euclidean norm of `tau_ext`                       |
 | `wrench_norm`  | float64     | Euclidean norm of `wrench_ext`                    |
-| `support_force` | float64    | Support force Fn = \|Fz\| [N] — used by contact detection and slip evaluation |
+| `support_force` | float64    | Support force Fn = \|Fz\| [N] — used by slip evaluation (Gates 1-2 in EVALUATE) |
 | `tangential_force` | float64 | Tangential force Ft = √(Fx²+Fy²) [N] — logged for monitoring |
 | `gripper_width` | float64    | Measured finger width [m]                         |
 | `gripper_width_dot` | float64 | Finger width velocity (finite difference) [m/s]  |
@@ -920,11 +920,11 @@ The Grasp logger is written in C++ using the `rosbag::Bag` API directly and `top
 - CSV contains 69 flattened columns with state labels per row
 - CSV export does not block the ROS spin loop (runs in background thread)
 - metadata.yaml contains bag_filename, csv_filename, total_samples, start/stop times, and detector parameters
-- Contact detection: force-drop (Fn baseline - Fn > force_drop_thresh, debounced for force_drop_debounce_time)
+- Contact detection: torque-drop (cd_baseline_ - tau_ext_norm > contact_torque_thresh, debounced for contact_debounce_time)
 - Free closing (no object): width reaches w_cmd, gap ~0 → no false CONTACT → transitions to FAILED ("no contact detected")
-- Object contact: force drop detected → CONTACT_CONFIRMED immediately, then CONTACT when gripper stopped
+- Object contact: torque drop detected → CONTACT_CONFIRMED immediately, then CONTACT when gripper stopped
 - Gripper stop requested immediately on contact: `stop()` called via atomic flag and read thread
-- CONTACT_CONFIRMED published at force-drop detection; CONTACT deferred until gripper has physically stopped (`gripper_stopped_` flag)
+- CONTACT_CONFIRMED published at torque-drop detection; CONTACT deferred until gripper has physically stopped (`gripper_stopped_` flag)
 - Contact width saved at detection — used as the grasp width in GRASPING
 - KittingState contains robot signals, gripper signals, and force ramp state — all published at 250 Hz
 - Publishing CLOSING on `state_cmd` triggers gripper `move()` + CLOSING_COMMAND state label (transitions to CLOSING when move confirmed executing)

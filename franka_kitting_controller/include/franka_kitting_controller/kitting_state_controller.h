@@ -57,7 +57,7 @@ namespace franka_kitting_controller {
     BASELINE,        // Collecting reference signals
     CLOSING_COMMAND, // Gripper close queued — awaiting execution confirmation
     CLOSING,            // Gripper confirmed moving toward object
-    CONTACT_CONFIRMED,  // Contact detected (force-drop) — gripper stopping
+    CONTACT_CONFIRMED,  // Contact detected (torque-drop) — gripper stopping
     CONTACT,            // Gripper stopped — contact confirmed
     GRASPING,     // Applying grasp force, waiting for completion + stabilization
     UPLIFT,       // Cosine-smoothed micro-lift trajectory
@@ -214,10 +214,10 @@ namespace franka_kitting_controller {
     std::atomic<bool> state_changed_{false};
     bool contact_latched_{false};
 
-    // --- Force-drop contact detection: YAML defaults ---
-    double force_drop_thresh_{0.1};           // [N] Fn drop below baseline to trigger
-    double force_drop_debounce_time_{0.05};   // [s] Sustained drop duration before triggering
-    static constexpr int kForceDropBaselineSamples{50};  // Fixed: 50 samples = 0.2s at 250Hz
+    // --- Torque-drop contact detection: YAML defaults ---
+    double contact_torque_thresh_{0.1};       // [Nm] tau_ext_norm drop below baseline to trigger
+    double contact_debounce_time_{0.05};      // [s] Sustained drop duration before triggering
+    static constexpr int kContactBaselineSamples{50};  // Fixed: 50 samples = 0.2s at 250Hz
 
     // Debounce state (Realtime-thread owned)
     DebounceState gripper_debounce_;
@@ -234,19 +234,19 @@ namespace franka_kitting_controller {
     bool closing_cmd_seen_executing_{false};  ///< True once move() seen running during CLOSING
     bool closing_command_entered_{false};     ///< First-tick flag: ensures CLOSING_COMMAND label is published before transition
 
-    // Force-drop staging (subscriber → RT via CLOSING_COMMAND snapshot)
-    double closing_force_drop_thresh_{0.1};
-    double closing_force_drop_debounce_time_{0.05};
+    // Contact detection staging (subscriber → RT via CLOSING_COMMAND snapshot)
+    double closing_contact_torque_thresh_{0.1};
+    double closing_contact_debounce_time_{0.05};
 
-    // Force-drop RT-local copies
-    double rt_force_drop_thresh_{0.1};
-    double rt_force_drop_debounce_time_{0.05};
+    // Contact detection RT-local copies
+    double rt_contact_torque_thresh_{0.1};
+    double rt_contact_debounce_time_{0.05};
 
-    // Force-drop runtime state (RT-thread owned)
-    double fd_baseline_sum_{0.0};
-    int    fd_baseline_count_{0};
-    double fd_baseline_{0.0};
-    bool   fd_baseline_ready_{false};
+    // Contact detection runtime state (RT-thread owned)
+    double cd_baseline_sum_{0.0};
+    int    cd_baseline_count_{0};
+    double cd_baseline_{0.0};
+    bool   cd_baseline_ready_{false};
 
     // Slow-rate logger for contact signal monitoring (2 Hz — readable in terminal)
     franka_hw::TriggerRate signal_log_trigger_{2.0};
@@ -384,7 +384,7 @@ namespace franka_kitting_controller {
     /// Run closing-phase transitions (CLOSING_COMMAND→CLOSING→CONTACT_CONFIRMED→CONTACT or →FAILED).
     void runClosingTransitions(const ros::Time& time,
                                const GripperData& gripper_snapshot,
-                               double support_force);
+                               double tau_ext_norm);
 
     /// Run internal force ramp transitions (GRASPING→UPLIFT→EVALUATE→...).
     /// Called at 250Hz from update(). Drives all internal state transitions.
@@ -494,9 +494,9 @@ namespace franka_kitting_controller {
                                   const char* action_name);
 
     // --- runClosingTransitions decomposition ---
-    void detectForceDropContact(const ros::Time& time,
-                                const GripperData& gripper_snapshot,
-                                double support_force);
+    void detectContact(const ros::Time& time,
+                       const GripperData& gripper_snapshot,
+                       double tau_ext_norm);
 
     // --- runInternalTransitions decomposition ---
     void tickGrasping(const ros::Time& time, double tau_ext_norm,

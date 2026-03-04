@@ -350,7 +350,7 @@ namespace franka_kitting_controller {
     f << "export_csv_on_stop: " << (export_csv_on_stop_ ? "true" : "false") << "\n";
 
     f << "detector_parameters:\n";
-    f << "  method: force_drop\n";
+    f << "  method: torque_drop\n";
 
     f.close();
     ROS_INFO("KittingLogger: Metadata written -> %s", meta_path.c_str());

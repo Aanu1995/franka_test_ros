@@ -31,7 +31,7 @@ namespace franka_kitting_controller {
   constexpr int    KittingStateController::kWidthSamplesPerSec;
   constexpr double KittingStateController::kGraspSettleDelay;
   constexpr double KittingStateController::kGraspTimeout;
-  constexpr int    KittingStateController::kForceDropBaselineSamples;
+  constexpr int    KittingStateController::kContactBaselineSamples;
 
   // ============================================================================
   // Utilities (used by all translation units)
@@ -172,25 +172,25 @@ namespace franka_kitting_controller {
     }
     rate_trigger_ = franka_hw::TriggerRate(publish_rate);
 
-    // --- Force-drop contact detection parameters ---
-    node_handle.param("force_drop_thresh", force_drop_thresh_, 0.1);
-    node_handle.param("force_drop_debounce_time", force_drop_debounce_time_, 0.05);
+    // --- Torque-drop contact detection parameters ---
+    node_handle.param("contact_torque_thresh", contact_torque_thresh_, 0.1);
+    node_handle.param("contact_debounce_time", contact_debounce_time_, 0.05);
 
-    if (force_drop_thresh_ <= 0.0) {
-      ROS_WARN("KittingStateController: force_drop_thresh must be positive (got %.3f), using 0.1",
-               force_drop_thresh_);
-      force_drop_thresh_ = 0.1;
+    if (contact_torque_thresh_ <= 0.0) {
+      ROS_WARN("KittingStateController: contact_torque_thresh must be positive (got %.3f), using 0.1",
+               contact_torque_thresh_);
+      contact_torque_thresh_ = 0.1;
     }
-    if (force_drop_debounce_time_ < 0.0) {
-      ROS_WARN("KittingStateController: force_drop_debounce_time must be >= 0 (got %.3f), using 0.05",
-               force_drop_debounce_time_);
-      force_drop_debounce_time_ = 0.05;
+    if (contact_debounce_time_ < 0.0) {
+      ROS_WARN("KittingStateController: contact_debounce_time must be >= 0 (got %.3f), using 0.05",
+               contact_debounce_time_);
+      contact_debounce_time_ = 0.05;
     }
 
-    ROS_INFO_STREAM("KittingStateController: Contact detection (force-drop)"
-                    << " | thresh=" << force_drop_thresh_
-                    << " | debounce=" << force_drop_debounce_time_ << "s"
-                    << " | baseline=" << kForceDropBaselineSamples << " samples");
+    ROS_INFO_STREAM("KittingStateController: Contact detection (torque-drop)"
+                    << " | thresh=" << contact_torque_thresh_
+                    << " | debounce=" << contact_debounce_time_ << "s"
+                    << " | baseline=" << kContactBaselineSamples << " samples");
 
     // --- Grasp: Gripper default parameters (overridable per-command via KittingGripperCommand) ---
     node_handle.param("closing_width", closing_width_, 0.01);
@@ -460,9 +460,9 @@ namespace franka_kitting_controller {
       // Reset force ramp state
       resetForceRampState();
 
-      // Reset force-drop state
-      fd_baseline_sum_ = 0.0;  fd_baseline_count_ = 0;
-      fd_baseline_ = 0.0;      fd_baseline_ready_ = false;
+      // Reset contact detection state
+      cd_baseline_sum_ = 0.0;  cd_baseline_count_ = 0;
+      cd_baseline_ = 0.0;      cd_baseline_ready_ = false;
 
       ROS_INFO("  [BASELINE]  State machine reset for new trial");
 
@@ -491,18 +491,18 @@ namespace franka_kitting_controller {
       closing_command_entered_ = true;
       fr_phase_start_time_ = ros::Time::now();
 
-      // Snapshot force-drop parameters
-      rt_force_drop_thresh_ = closing_force_drop_thresh_;
-      rt_force_drop_debounce_time_ = closing_force_drop_debounce_time_;
+      // Snapshot contact detection parameters
+      rt_contact_torque_thresh_ = closing_contact_torque_thresh_;
+      rt_contact_debounce_time_ = closing_contact_debounce_time_;
 
-      // Fn baseline was collected during BASELINE state — preserve it.
+      // tau_ext_norm baseline was collected during BASELINE state — preserve it.
       // Only reset the debounce state (not the baseline) for the new closing sequence.
 
       publishStateLabel("CLOSING_COMMAND");
-      ROS_INFO("  [CLOSING_COMMAND]  force_drop_thresh=%.3f  debounce=%.3fs  speed=%.4f m/s  "
-              "Fn_baseline=%.3f%s",
-              rt_force_drop_thresh_, rt_force_drop_debounce_time_, rt_closing_v_cmd_,
-              fd_baseline_, fd_baseline_ready_ ? "" : " (NOT READY)");
+      ROS_INFO("  [CLOSING_COMMAND]  contact_torque_thresh=%.3f  debounce=%.3fs  speed=%.4f m/s  "
+              "tau_baseline=%.3f%s",
+              rt_contact_torque_thresh_, rt_contact_debounce_time_, rt_closing_v_cmd_,
+              cd_baseline_, cd_baseline_ready_ ? "" : " (NOT READY)");
     }
 
     // Handle GRASPING start: snapshot force ramp parameters, initialize force ramp state
@@ -648,25 +648,25 @@ namespace franka_kitting_controller {
       // Single gripper snapshot per tick — all consumers see consistent data
       const GripperData gripper_snapshot = *gripper_data_buf_.readFromRT();
 
-      // Fn baseline collection — runs during BASELINE at 250Hz.
-      // Captures the at-rest support force before any gripper motion.
+      // tau_ext_norm baseline collection — runs during BASELINE at 250Hz.
+      // Captures the at-rest external torque norm before any gripper motion.
       // Skips ticks while accumulated-uplift downlift is active (arm not settled).
       {
         GraspState bl_state = current_state_.load(std::memory_order_relaxed);
-        if (bl_state == GraspState::BASELINE && !fd_baseline_ready_ &&
+        if (bl_state == GraspState::BASELINE && !cd_baseline_ready_ &&
             !downlift_active_.load(std::memory_order_relaxed)) {
-          fd_baseline_sum_ += support_force;
-          fd_baseline_count_++;
-          if (fd_baseline_count_ >= kForceDropBaselineSamples) {
-            fd_baseline_ = fd_baseline_sum_ / fd_baseline_count_;
-            fd_baseline_ready_ = true;
-            ROS_INFO("  [BASELINE]  Fn baseline ready: %.3f N  (from %d samples, 0.2s)",
-                     fd_baseline_, fd_baseline_count_);
+          cd_baseline_sum_ += tau_ext_norm;
+          cd_baseline_count_++;
+          if (cd_baseline_count_ >= kContactBaselineSamples) {
+            cd_baseline_ = cd_baseline_sum_ / cd_baseline_count_;
+            cd_baseline_ready_ = true;
+            ROS_INFO("  [BASELINE]  tau_ext_norm baseline ready: %.3f Nm  (from %d samples, 0.2s)",
+                     cd_baseline_, cd_baseline_count_);
           }
         }
       }
 
-      runClosingTransitions(time, gripper_snapshot, support_force);
+      runClosingTransitions(time, gripper_snapshot, tau_ext_norm);
 
       // Run internal force ramp transitions (GRASPING→UPLIFT→EVALUATE→...)
       {
@@ -682,21 +682,21 @@ namespace franka_kitting_controller {
       const GraspState state = current_state_.load(std::memory_order_relaxed);
       if (signal_log_trigger_()) {
         if (state == GraspState::BASELINE) {
-          if (fd_baseline_ready_) {
-            ROS_INFO("  [SIGNAL]  BASELINE  |  Fn_baseline=%.3f N  (ready)", fd_baseline_);
+          if (cd_baseline_ready_) {
+            ROS_INFO("  [SIGNAL]  BASELINE  |  tau_baseline=%.3f Nm  (ready)", cd_baseline_);
           } else if (downlift_active_.load(std::memory_order_relaxed)) {
             ROS_INFO("  [SIGNAL]  BASELINE  |  awaiting downlift correction");
           } else {
-            ROS_INFO("  [SIGNAL]  BASELINE  |  collecting: %d/%d samples  Fn=%.3f",
-                    fd_baseline_count_, kForceDropBaselineSamples, support_force);
+            ROS_INFO("  [SIGNAL]  BASELINE  |  collecting: %d/%d samples  tau_ext_norm=%.3f",
+                    cd_baseline_count_, kContactBaselineSamples, tau_ext_norm);
           }
         } else if (isClosingPhase(state)) {
-          double drop = fd_baseline_ready_ ? (fd_baseline_ - support_force) : 0.0;
-          ROS_INFO("  [SIGNAL]  %s  |  force_drop: Fn=%.3f baseline=%.3f "
+          double drop = cd_baseline_ready_ ? (cd_baseline_ - tau_ext_norm) : 0.0;
+          ROS_INFO("  [SIGNAL]  %s  |  torque_drop: tau=%.3f baseline=%.3f "
                   "drop=%.3f thresh=%.3f %s",
-                  stateToString(state), support_force, fd_baseline_,
-                  drop, rt_force_drop_thresh_,
-                  fd_baseline_ready_ ? (drop > rt_force_drop_thresh_ ? "DROP" : "ok") : "collecting");
+                  stateToString(state), tau_ext_norm, cd_baseline_,
+                  drop, rt_contact_torque_thresh_,
+                  cd_baseline_ready_ ? (drop > rt_contact_torque_thresh_ ? "DROP" : "ok") : "collecting");
         } else if (isForceRampPhase(state)) {
           ROS_INFO("  [SIGNAL]  %s  |  F=%.1f  iter=%d  Fn=%.2f",
                   stateToString(state), fr_f_current_, fr_iteration_,

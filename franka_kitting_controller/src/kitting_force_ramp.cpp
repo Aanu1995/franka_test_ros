@@ -37,7 +37,7 @@ namespace franka_kitting_controller {
 
   void KittingStateController::runClosingTransitions(const ros::Time& time,
                                                       const GripperData& gripper_snapshot,
-                                                      double support_force) {
+                                                      double tau_ext_norm) {
     auto state = current_state_.load(std::memory_order_relaxed);
 
     if ((state == GraspState::CLOSING_COMMAND || state == GraspState::CLOSING) &&
@@ -76,7 +76,7 @@ namespace franka_kitting_controller {
       if (closing_cmd_seen_executing_) {
         // Contact detection (only after move is confirmed executing).
         // On detection: transitions to CONTACT_CONFIRMED internally.
-        detectForceDropContact(time, gripper_snapshot, support_force);
+        detectContact(time, gripper_snapshot, tau_ext_norm);
 
         // No-contact: move completed without triggering contact → FAILED
         if (!contact_latched_ && !cmd_executing_.load(std::memory_order_relaxed)) {
@@ -101,9 +101,9 @@ namespace franka_kitting_controller {
     }
   }
 
-  void KittingStateController::detectForceDropContact(const ros::Time& time,
-                                                        const GripperData& gripper_snapshot,
-                                                        double support_force) {
+  void KittingStateController::detectContact(const ros::Time& time,
+                                              const GripperData& gripper_snapshot,
+                                              double tau_ext_norm) {
     // Validate gripper data freshness
     bool gripper_data_valid = (gripper_snapshot.stamp != ros::Time(0)) &&
                               ((time - gripper_snapshot.stamp).toSec() < 0.5);
@@ -113,38 +113,38 @@ namespace franka_kitting_controller {
 
     // Baseline should already be collected during BASELINE state.
     // Fallback: if not ready (e.g., CLOSING sent without prior BASELINE), collect now.
-    if (!fd_baseline_ready_) {
-      ROS_WARN_THROTTLE(2.0, "  [FORCE_DROP]  Baseline not ready — collecting during CLOSING (fallback)");
-      fd_baseline_sum_ += support_force;
-      fd_baseline_count_++;
-      if (fd_baseline_count_ >= kForceDropBaselineSamples) {
-        fd_baseline_ = fd_baseline_sum_ / fd_baseline_count_;
-        fd_baseline_ready_ = true;
-        ROS_INFO("  [FORCE_DROP]  Baseline ready (fallback): Fn_baseline=%.3f N  (from %d samples)",
-                fd_baseline_, fd_baseline_count_);
+    if (!cd_baseline_ready_) {
+      ROS_WARN_THROTTLE(2.0, "  [CONTACT]  Baseline not ready — collecting during CLOSING (fallback)");
+      cd_baseline_sum_ += tau_ext_norm;
+      cd_baseline_count_++;
+      if (cd_baseline_count_ >= kContactBaselineSamples) {
+        cd_baseline_ = cd_baseline_sum_ / cd_baseline_count_;
+        cd_baseline_ready_ = true;
+        ROS_INFO("  [CONTACT]  Baseline ready (fallback): tau_baseline=%.3f Nm  (from %d samples)",
+                cd_baseline_, cd_baseline_count_);
       }
       return;
     }
 
-    // Phase 2 — Drop detection with debounce
-    double drop = fd_baseline_ - support_force;
-    bool drop_detected = (drop > rt_force_drop_thresh_);
+    // Phase 2 — Drop detection with debounce (tau_ext_norm drops on contact)
+    double drop = cd_baseline_ - tau_ext_norm;
+    bool drop_detected = (drop > rt_contact_torque_thresh_);
 
-    if (gripper_debounce_.check(drop_detected, time, rt_force_drop_debounce_time_)) {
+    if (gripper_debounce_.check(drop_detected, time, rt_contact_debounce_time_)) {
       contact_latched_ = true;
 
       // Publish CONTACT_CONFIRMED immediately at the point of detection
       current_state_.store(GraspState::CONTACT_CONFIRMED, std::memory_order_relaxed);
       publishStateLabel("CONTACT_CONFIRMED");
-      logStateTransition("CONTACT_CONFIRMED", "Force drop detected — gripper stopping");
+      logStateTransition("CONTACT_CONFIRMED", "Torque drop detected — gripper stopping");
       contact_width_.store(gripper_snapshot.width, std::memory_order_relaxed);
 
       requestGripperStop("Contact");
 
-      ROS_INFO("  [CONTACT_CONFIRMED]  Force drop detected: "
-              "Fn_baseline=%.3f  Fn=%.3f  drop=%.3f  thresh=%.3f  debounce=%.3fs  w=%.4f",
-              fd_baseline_, support_force, drop, rt_force_drop_thresh_,
-              rt_force_drop_debounce_time_, gripper_snapshot.width);
+      ROS_INFO("  [CONTACT_CONFIRMED]  Torque drop detected: "
+              "tau_baseline=%.3f  tau=%.3f  drop=%.3f  thresh=%.3f  debounce=%.3fs  w=%.4f",
+              cd_baseline_, tau_ext_norm, drop, rt_contact_torque_thresh_,
+              rt_contact_debounce_time_, gripper_snapshot.width);
     }
   }
 

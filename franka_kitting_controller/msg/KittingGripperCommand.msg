@@ -32,8 +32,8 @@ float64 open_width          # [m] Width to open to (0 = max_width from firmware)
 # --- CLOSING parameters (used when command == "CLOSING") ---
 float64 closing_width    # [m]   Target width for MoveAction  (0 = use default)
 float64 closing_speed    # [m/s] Speed for MoveAction         (0 = use default)
-float64 force_drop_thresh    # [N] Force drop threshold (0 = use YAML default)
-float64 force_drop_debounce_time  # [s] Sustained drop duration before triggering (0 = use YAML default 0.05)
+float64 contact_torque_thresh    # [Nm] tau_ext_norm drop threshold for contact detection (0 = use YAML default)
+float64 contact_debounce_time    # [s] Sustained drop duration before triggering (0 = use YAML default 0.05)
 
 # --- Force ramp parameters (used when command == "GRASPING") ---
 # grasp_width is always the contact_width captured at CONTACT (not configurable).

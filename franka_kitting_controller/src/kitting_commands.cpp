@@ -143,16 +143,16 @@ namespace franka_kitting_controller {
     closing_w_cmd_ = width;
     closing_v_cmd_ = speed;
 
-    closing_force_drop_thresh_ = resolveParam(msg->force_drop_thresh, force_drop_thresh_);
-    closing_force_drop_debounce_time_ = resolveParam(msg->force_drop_debounce_time, force_drop_debounce_time_);
+    closing_contact_torque_thresh_ = resolveParam(msg->contact_torque_thresh, contact_torque_thresh_);
+    closing_contact_debounce_time_ = resolveParam(msg->contact_debounce_time, contact_debounce_time_);
 
     pending_state_.store(GraspState::CLOSING_COMMAND, std::memory_order_relaxed);
     state_changed_.store(true, std::memory_order_release);
     // Label published from RT thread in applyPendingStateTransition() to prevent
     // RealtimePublisher race — timer thread publish can be overwritten before delivery.
     logStateTransition("CLOSING_COMMAND", "Gripper close queued — awaiting execution");
-    ROS_INFO("    width=%.4f m  speed=%.4f m/s  force_drop_thresh=%.3f  debounce=%.3fs",
-            width, speed, closing_force_drop_thresh_, closing_force_drop_debounce_time_);
+    ROS_INFO("    width=%.4f m  speed=%.4f m/s  contact_torque_thresh=%.3f  debounce=%.3fs",
+            width, speed, closing_contact_torque_thresh_, closing_contact_debounce_time_);
   }
 
   void KittingStateController::handleGraspingCmd(
