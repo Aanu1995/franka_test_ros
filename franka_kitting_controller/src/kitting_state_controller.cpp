@@ -32,6 +32,11 @@ namespace franka_kitting_controller {
   constexpr double KittingStateController::kGraspSettleDelay;
   constexpr double KittingStateController::kGraspTimeout;
   constexpr int    KittingStateController::kContactBaselineSamples;
+  constexpr double KittingStateController::kMaxUpliftHold;
+  constexpr double KittingStateController::kMinLiftSpeed;
+  constexpr int    KittingStateController::kMaxWidthSamples;
+  constexpr int    KittingStateController::kActionTimeoutSec;
+  constexpr double KittingStateController::kClosingCmdTimeout;
 
   // ============================================================================
   // Utilities (used by all translation units)
