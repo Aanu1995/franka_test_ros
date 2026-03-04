@@ -90,10 +90,14 @@ namespace franka_kitting_controller {
       }
     }
 
-    // Deferred CONTACT transition: wait for gripper to physically stop
+    // Deferred CONTACT transition: wait for gripper to physically stop.
+    // contact_width_ is captured HERE (not at CONTACT_CONFIRMED) because the gripper
+    // is still decelerating at detection time. Only after stop() completes does
+    // gripper_snapshot.width reflect the true stopped position.
     if (contact_latched_ &&
         current_state_.load(std::memory_order_relaxed) == GraspState::CONTACT_CONFIRMED &&
         gripper_stopped_.load(std::memory_order_relaxed)) {
+      contact_width_.store(gripper_snapshot.width, std::memory_order_relaxed);
       current_state_.store(GraspState::CONTACT, std::memory_order_relaxed);
       publishStateLabel("CONTACT");
       logStateTransition("CONTACT", "Gripper stopped — contact confirmed");
@@ -133,11 +137,12 @@ namespace franka_kitting_controller {
     if (gripper_debounce_.check(drop_detected, time, rt_contact_debounce_time_)) {
       contact_latched_ = true;
 
-      // Publish CONTACT_CONFIRMED immediately at the point of detection
+      // Publish CONTACT_CONFIRMED immediately at the point of detection.
+      // Note: contact_width_ is NOT stored here — the gripper is still decelerating.
+      // It will be captured at the deferred CONTACT transition once the gripper has stopped.
       current_state_.store(GraspState::CONTACT_CONFIRMED, std::memory_order_relaxed);
       publishStateLabel("CONTACT_CONFIRMED");
       logStateTransition("CONTACT_CONFIRMED", "Torque drop detected — gripper stopping");
-      contact_width_.store(gripper_snapshot.width, std::memory_order_relaxed);
 
       requestGripperStop("Contact");
 
