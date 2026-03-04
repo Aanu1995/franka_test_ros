@@ -222,8 +222,9 @@ namespace franka_kitting_controller {
     // Debounce state (Realtime-thread owned)
     DebounceState gripper_debounce_;
     std::atomic<bool> gripper_stop_sent_{false};  // Written by realtime, read by command thread
-    std::atomic<bool> gripper_stopped_{false};    // Read thread → realtime: stop() completed
-    std::atomic<double> contact_width_{0.0};  // Gripper width at CONTACT — used as grasp width in GRASPING
+    std::atomic<bool> gripper_stopped_{false};    // Read thread → realtime: stop() completed AND post-stop width captured
+    std::atomic<bool> width_capture_pending_{false};  // Read thread internal: capture contact_width_ on next readOnce()
+    std::atomic<double> contact_width_{0.0};  // [m] Width at contact — written by read thread after stop()
 
     // Realtime-local copies of CLOSING command parameters — snapshotted when CLOSING begins.
     // Written by subscriber (stateCmdCallback), synchronized via release/acquire on state_changed_.

@@ -91,13 +91,13 @@ namespace franka_kitting_controller {
     }
 
     // Deferred CONTACT transition: wait for gripper to physically stop.
-    // contact_width_ is captured HERE (not at CONTACT_CONFIRMED) because the gripper
-    // is still decelerating at detection time. Only after stop() completes does
-    // gripper_snapshot.width reflect the true stopped position.
+    // contact_width_ is captured by the read thread (gripperReadLoop) on the
+    // first readOnce() after stop(). gripper_stopped_ is only set AFTER the
+    // width is stored, so it is guaranteed fresh by the time we see it here.
     if (contact_latched_ &&
         current_state_.load(std::memory_order_relaxed) == GraspState::CONTACT_CONFIRMED &&
         gripper_stopped_.load(std::memory_order_relaxed)) {
-      contact_width_.store(gripper_snapshot.width, std::memory_order_relaxed);
+      // contact_width_ already set by read thread — do NOT capture from RT buffer
       current_state_.store(GraspState::CONTACT, std::memory_order_relaxed);
       publishStateLabel("CONTACT");
       logStateTransition("CONTACT", "Gripper stopped — contact confirmed");

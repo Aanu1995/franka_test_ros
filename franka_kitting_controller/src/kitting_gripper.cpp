@@ -53,12 +53,24 @@ namespace franka_kitting_controller {
         data.stamp = now;
         gripper_data_buf_.writeFromNonRT(data);
 
+        // Post-stop width capture: the first readOnce() after stop() returns the
+        // true stopped width. Store it to contact_width_ BEFORE setting
+        // gripper_stopped_, so the RT thread always sees a fresh width.
+        if (width_capture_pending_.load(std::memory_order_relaxed)) {
+          contact_width_.store(gs.width, std::memory_order_relaxed);
+          gripper_stopped_.store(true, std::memory_order_relaxed);
+          width_capture_pending_.store(false, std::memory_order_relaxed);
+          ROS_INFO("  [GRIPPER]  Post-stop width captured: %.4f m", gs.width);
+        }
+
         // Check if Realtime thread requested a stop (contact detected)
         if (stop_requested_.load(std::memory_order_relaxed)) {
           try {
             gripper_->stop();
             ROS_INFO("  [GRIPPER]  stop() executed by read thread");
-            gripper_stopped_.store(true, std::memory_order_relaxed);
+            // Don't set gripper_stopped_ yet — buffer has pre-stop width.
+            // Capture true stopped width on the next readOnce() iteration.
+            width_capture_pending_.store(true, std::memory_order_relaxed);
             stop_requested_.store(false, std::memory_order_relaxed);
           } catch (const franka::Exception& ex) {
             // Leave stop_requested_ true so we retry on the next readOnce() iteration.

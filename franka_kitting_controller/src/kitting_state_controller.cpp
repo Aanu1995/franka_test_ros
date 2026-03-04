@@ -460,6 +460,7 @@ namespace franka_kitting_controller {
       gripper_debounce_.reset();
       gripper_stop_sent_.store(false, std::memory_order_relaxed);
       gripper_stopped_.store(false, std::memory_order_relaxed);
+      width_capture_pending_.store(false, std::memory_order_relaxed);
       contact_width_.store(0.0, std::memory_order_relaxed);
 
       // Reset force ramp state
@@ -492,6 +493,7 @@ namespace franka_kitting_controller {
       gripper_debounce_.reset();
       gripper_stop_sent_.store(false, std::memory_order_relaxed);
       gripper_stopped_.store(false, std::memory_order_relaxed);
+      width_capture_pending_.store(false, std::memory_order_relaxed);
       closing_cmd_seen_executing_ = false;
       closing_command_entered_ = true;
       fr_phase_start_time_ = ros::Time::now();

@@ -453,11 +453,12 @@ Detects contact by monitoring tau_ext_norm during CLOSING. When the gripper cont
 When contact is detected, the controller stops the gripper and transitions through two contact states:
 
 1. **Contact detected (RT thread)**: Sets `contact_latched_`, sets `stop_requested_`, and transitions to **CONTACT_CONFIRMED** immediately.
-2. **Read thread executes stop**: Checks `stop_requested_` after each `readOnce()`, calls `franka::Gripper::stop()` to physically halt the motor, then sets `gripper_stopped_` to signal the RT thread. If `stop()` throws an exception, `stop_requested_` remains true for automatic retry on the next iteration — `gripper_stopped_` is only set on success.
-3. **Deferred transition (RT thread)**: On the next tick, sees `contact_latched_ && CONTACT_CONFIRMED && gripper_stopped_` and transitions to **CONTACT**. `contact_width_` is captured from the current gripper width at this point.
-4. **One-shot guard**: `gripper_stop_sent_` flag prevents duplicate stop requests; `contact_latched_` prevents re-detection.
+2. **Read thread executes stop**: Checks `stop_requested_` after each `readOnce()`, calls `franka::Gripper::stop()` to physically halt the motor, then sets `width_capture_pending_` to defer width capture. If `stop()` throws an exception, `stop_requested_` remains true for automatic retry on the next iteration.
+3. **Read thread captures width**: On the next `readOnce()` after `stop()`, reads the true stopped width from firmware and stores it to `contact_width_`. Only then sets `gripper_stopped_` to signal the RT thread. This guarantees `contact_width_` reflects the actual stopped position, not a stale pre-stop reading.
+4. **Deferred transition (RT thread)**: Sees `contact_latched_ && CONTACT_CONFIRMED && gripper_stopped_` and transitions to **CONTACT**. `contact_width_` is already set by the read thread.
+5. **One-shot guard**: `gripper_stop_sent_` flag prevents duplicate stop requests; `contact_latched_` prevents re-detection.
 
-The atomic stores in `update()` are single-word writes (nanoseconds), fully RT-safe. The actual `stop()` call executes in the non-RT read thread. The state transition is deferred by ~20–30 ms (one gripper firmware update period) to ensure the gripper has physically stopped before CONTACT data is recorded.
+The atomic stores in `update()` are single-word writes (nanoseconds), fully RT-safe. The actual `stop()` call and width capture execute in the non-RT read thread. The state transition is deferred by ~20–30 ms (one gripper firmware update period plus one read cycle) to ensure the gripper has physically stopped and the width is captured before CONTACT data is recorded.
 
 ### Latching
 
@@ -924,8 +925,8 @@ The Grasp logger is written in C++ using the `rosbag::Bag` API directly and `top
 - Free closing (no object): width reaches w_cmd, gap ~0 → no false CONTACT → transitions to FAILED ("no contact detected")
 - Object contact: torque drop detected → CONTACT_CONFIRMED immediately, then CONTACT when gripper stopped
 - Gripper stop requested immediately on contact: `stop()` called via atomic flag and read thread
-- CONTACT_CONFIRMED published at torque-drop detection; CONTACT deferred until gripper has physically stopped (`gripper_stopped_` flag)
-- Contact width saved at detection — used as the grasp width in GRASPING
+- CONTACT_CONFIRMED published at torque-drop detection; CONTACT deferred until gripper has physically stopped
+- Contact width captured by read thread on first `readOnce()` after `stop()`, then `gripper_stopped_` set — ensures RT thread always sees fresh width
 - KittingState contains robot signals, gripper signals, and force ramp state — all published at 250 Hz
 - Publishing CLOSING on `state_cmd` triggers gripper `move()` + CLOSING_COMMAND state label (transitions to CLOSING when move confirmed executing)
 - Publishing BASELINE on `state_cmd` prepares for new trial (optionally opens gripper)
