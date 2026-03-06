@@ -172,7 +172,7 @@ Gripper stopped — contact confirmed. Published **automatically** by the contro
 
 ### GRASPING
 
-Initiate automated force ramp. Published via `/kitting_controller/state_cmd` with `command: "GRASPING"`. This is the **last user command** — all subsequent states are driven internally by the force ramp.
+Initiate automated force ramp. Published via `/kitting_controller/state_cmd` with `command: "GRASPING"`. This is the **last user command** — all subsequent states are driven internally by the force ramp. **Requires CONTACT state** — rejected otherwise to prevent use of stale width from a previous trial.
 
 - Gripper applies force `F` via GraspAction to width `w` with tolerance `ε`
 - Grasp width is always the `contact_width` captured at CONTACT (not configurable)
@@ -819,7 +819,7 @@ Only the parameters relevant to the command are used:
 
 - `BASELINE` uses `open_gripper` and `open_width`
 - `CLOSING` uses `closing_width`, `closing_speed`, `contact_torque_thresh`, and `contact_debounce_time`
-- `GRASPING` uses all `f_*`/`fr_*` force ramp parameters (grasp width is always from `contact_width`; rejected if `contact_width` is out of range `[0, max_width]`)
+- `GRASPING` requires CONTACT state and uses all `f_*`/`fr_*` force ramp parameters (grasp width is always from `contact_width`; rejected if not in CONTACT or if `contact_width` is out of range `[0, max_width]`)
 - `AUTO` uses all of the above, plus `auto_delay`
 
 ## KittingState Message

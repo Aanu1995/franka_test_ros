@@ -157,6 +157,15 @@ namespace franka_kitting_controller {
 
   void KittingStateController::handleGraspingCmd(
       const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg) {
+    // Guard: GRASPING requires CONTACT — ensures contact_width_ is fresh, not stale
+    // from a previous trial. Retries (SETTLING → GRASPING) bypass this handler entirely.
+    auto cur = current_state_.load(std::memory_order_relaxed);
+    if (cur != GraspState::CONTACT) {
+      ROS_WARN("KittingStateController: GRASPING rejected — not in CONTACT state (current: %s)",
+              stateToString(cur));
+      return;
+    }
+
     double width = contact_width_.load(std::memory_order_relaxed);
     double max_w = gripper_data_buf_.readFromNonRT()->max_width;
     if (width <= 0.0 || width > max_w) {
