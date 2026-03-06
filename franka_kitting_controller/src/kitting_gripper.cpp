@@ -22,9 +22,6 @@ namespace franka_kitting_controller {
   // ============================================================================
 
   void KittingStateController::gripperReadLoop() {
-    // Runs at firmware rate (blocking readOnce()). No artificial rate limit.
-    // Computes width velocity via finite difference and writes to RealtimeBuffer.
-    // Also checks stop_requested_ flag after each read and calls stop() if set.
     double prev_width = 0.0;
     ros::Time prev_stamp;
     bool prev_valid = false;
@@ -63,7 +60,7 @@ namespace franka_kitting_controller {
           ROS_INFO("  [GRIPPER]  Post-stop width captured: %.4f m", gs.width);
         }
 
-        // Check if Realtime thread requested a stop (contact detected)
+        // Handle stop request from RT thread
         if (stop_requested_.load(std::memory_order_relaxed)) {
           try {
             gripper_->stop();
@@ -79,9 +76,7 @@ namespace franka_kitting_controller {
           }
         }
 
-        // Dispatch deferred grasp command from Realtime thread (force ramp iteration).
-        // Acquire-load ensures we see the parameter stores made by the Realtime thread
-        // before its release-store of the flag.
+        // Dispatch deferred grasp (RT → read thread handoff via acquire/release)
         if (deferred_grasp_pending_.load(std::memory_order_acquire)) {
           // Release any current grasp before retrying — libfranka grasp() hangs
           // if the gripper is already in a grasped state at the target width.
@@ -113,7 +108,6 @@ namespace franka_kitting_controller {
   }
 
   void KittingStateController::gripperCommandLoop() {
-    // Waits on condition variable for commands, then executes blocking move()/grasp().
     while (!gripper_shutdown_.load(std::memory_order_relaxed)) {
       GripperCommand cmd;
       {

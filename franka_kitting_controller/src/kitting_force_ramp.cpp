@@ -21,8 +21,6 @@ namespace franka_kitting_controller {
 
   void KittingStateController::requestDeferredGrasp(double width, double speed,
                                                     double force, double epsilon) {
-    // Realtime-safe: only atomic stores, no mutex or allocation.
-    // Gripper read thread acquire-loads the flag and dispatches to command thread.
     deferred_grasp_width_ = width;
     deferred_grasp_speed_ = speed;
     deferred_grasp_force_ = force;
@@ -42,17 +40,13 @@ namespace franka_kitting_controller {
 
     if ((state == GraspState::CLOSING_COMMAND || state == GraspState::CLOSING) &&
         !contact_latched_) {
-      // First-tick hold: ensure CLOSING_COMMAND label is published and at least one
-      // kitting_state_data sample captures it before transitioning to CLOSING.
-      // Without this, the label can be overwritten by CLOSING on the same 250Hz tick.
+      // Hold one tick so CLOSING_COMMAND label is published before transitioning
       if (closing_command_entered_) {
         closing_command_entered_ = false;
         return;
       }
 
-      // Track when the gripper move command starts executing.
-      // Contact detection is deferred until the move is confirmed running to prevent
-      // false triggers during the pre-movement window.
+      // Defer contact detection until move is confirmed running
       if (!closing_cmd_seen_executing_) {
         if (cmd_executing_.load(std::memory_order_relaxed)) {
           closing_cmd_seen_executing_ = true;
@@ -74,8 +68,6 @@ namespace franka_kitting_controller {
       }
 
       if (closing_cmd_seen_executing_) {
-        // Contact detection (only after move is confirmed executing).
-        // On detection: transitions to CONTACT_CONFIRMED internally.
         detectContact(time, gripper_snapshot, tau_ext_norm);
 
         // No-contact: move completed without triggering contact → FAILED
@@ -108,7 +100,6 @@ namespace franka_kitting_controller {
   void KittingStateController::detectContact(const ros::Time& time,
                                               const GripperData& gripper_snapshot,
                                               double tau_ext_norm) {
-    // Validate gripper data freshness
     bool gripper_data_valid = (gripper_snapshot.stamp != ros::Time(0)) &&
                               ((time - gripper_snapshot.stamp).toSec() < 0.5);
     if (!gripper_data_valid) {
@@ -130,7 +121,7 @@ namespace franka_kitting_controller {
       return;
     }
 
-    // Phase 2 — Drop detection with debounce (tau_ext_norm drops on contact)
+    // Drop detection with debounce
     double drop = cd_baseline_ - tau_ext_norm;
     bool drop_detected = (drop > rt_contact_torque_thresh_);
 
@@ -177,7 +168,6 @@ namespace franka_kitting_controller {
                                             double /* tau_ext_norm */,
                                             double support_force,
                                             const GripperData& gripper_snapshot) {
-    // First tick after entering GRASPING: initialize phase timer
     if (!fr_grasping_phase_initialized_) {
       fr_phase_start_time_ = time;
       fr_grasping_phase_initialized_ = true;
@@ -227,7 +217,7 @@ namespace franka_kitting_controller {
       return;
     }
 
-    // Step 3: Post-grasp W_pre accumulation (Fn = support force, duration = uplift_hold/2)
+    // Step 3: W_pre accumulation (Fn, uplift_hold/2)
     double stab_elapsed = (time - fr_grasp_stabilize_start_).toSec();
     fr_pre_sum_ += support_force;
     fr_pre_sum_sq_ += support_force * support_force;
@@ -293,17 +283,14 @@ namespace franka_kitting_controller {
     double elapsed = (time - fr_phase_start_time_).toSec();
     double gw = gripper_snapshot.width;
 
-    // Collect width samples for P5/P95 percentile computation
     fr_width_samples_.push_back(gw);
 
-    // Accumulate early window [0, half) — support force (Fn)
     if (elapsed < kEarlyEnd) {
       fr_early_sum_ += support_force;
       fr_early_count_++;
       return;
     }
 
-    // Accumulate late window [half, hold) — support force (Fn)
     if (elapsed < kLateEnd) {
       fr_late_sum_ += support_force;
       fr_late_count_++;
@@ -314,7 +301,6 @@ namespace franka_kitting_controller {
     // Hold complete — rigid AND-gating (3 gates)
     // ================================================================
 
-    // --- Window statistics (all based on Fn = support force) ---
     double Fn_pre   = (fr_pre_count_ > 0) ? fr_pre_sum_ / fr_pre_count_ : 0.0;
     double sigma_pre = 0.0;
     if (fr_pre_count_ > 1) {
@@ -353,7 +339,6 @@ namespace franka_kitting_controller {
     // --- Verdict: secure = Gate1 AND Gate2 AND Gate3 ---
     bool is_slipping = !(load_transferred && drop_ok && width_ok);
 
-    // --- Terminal logging: each gate on its own line ---
     ROS_INFO("  [SLIP] Gate 1 — Load Transfer:  deltaF=%.3f N  threshold=%.3f N  "
              "(Fn_pre=%.3f  sigma=%.3f  Fn_early=%.3f)  %s",
              deltaF, load_thresh, Fn_pre, sigma_pre, Fn_early,
@@ -385,7 +370,6 @@ namespace franka_kitting_controller {
                                         double /* tau_ext_norm */,
                                         double /* support_force */,
                                         const GripperData& /* gripper_snapshot */) {
-    // Initialize DOWNLIFT trajectory
     downlift_start_pose_ = cartesian_pose_handle_->getRobotState().O_T_EE_d;
     downlift_z_start_ = downlift_start_pose_[14];
     downlift_elapsed_ = 0.0;
@@ -424,7 +408,6 @@ namespace franka_kitting_controller {
       return;  // Still settling
     }
 
-    // Increment force for next iteration
     fr_f_current_ += rt_fr_f_step_;
     fr_iteration_++;
 
@@ -437,7 +420,6 @@ namespace franka_kitting_controller {
       return;
     }
 
-    // Re-enter GRASPING with incremented force
     fr_phase_start_time_ = time;
     fr_grasping_phase_initialized_ = true;
     fr_grasp_cmd_seen_executing_ = false;

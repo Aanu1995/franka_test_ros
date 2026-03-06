@@ -160,12 +160,7 @@ namespace franka_kitting_controller {
     // --- Grasp: State label publisher ---
     realtime_tools::RealtimePublisher<std_msgs::String> state_publisher_;
 
-    // --- Grasp: Logger readiness gate ---
-    // The controller rejects all Grasp commands until the logger node is running.
-    // Detection uses a latched topic (/kitting_controller/logger_ready) plus a live
-    // publisher check (getNumPublishers > 0) at the point of use. This dual check
-    // prevents stale latched messages from a previous logger run and also detects
-    // logger shutdown mid-session.
+    // Logger readiness gate (dual check: latched topic + live publisher count)
     bool require_logger_{false};
     ros::Subscriber logger_ready_sub_;
     std::atomic<bool> logger_ready_{false};
@@ -226,8 +221,7 @@ namespace franka_kitting_controller {
     std::atomic<bool> width_capture_pending_{false};  // Read thread internal: capture contact_width_ on next readOnce()
     std::atomic<double> contact_width_{0.0};  // [m] Width at contact — written by read thread after stop()
 
-    // Realtime-local copies of CLOSING command parameters — snapshotted when CLOSING begins.
-    // Written by subscriber (stateCmdCallback), synchronized via release/acquire on state_changed_.
+    // RT-local copies of CLOSING params (snapshotted at CLOSING_COMMAND entry)
     double closing_w_cmd_{0.01};     // Resolved target width for active MoveAction
     double closing_v_cmd_{0.05};     // Resolved speed for active MoveAction
     double rt_closing_w_cmd_{0.01};  // Realtime-local copy
@@ -285,9 +279,7 @@ namespace franka_kitting_controller {
     double fr_slip_width_thresh_{0.0005};    // [m] W_TH: max allowed jaw widening P95-P5 (0.5mm = fail)
     double fr_load_transfer_min_{2.0};       // [N] Min floor for load transfer threshold
 
-    // --- Force ramp: Realtime-local copies of resolved per-command parameters ---
-    // Snapshotted in applyPendingStateTransition() when entering GRASPING.
-    // Prevents concurrent subscriber writes from corrupting mid-ramp parameters.
+    // RT-local copies of force ramp params (snapshotted at GRASPING entry)
     double rt_fr_f_min_{3.0};
     double rt_fr_f_step_{3.0};
     double rt_fr_f_max_{30.0};
@@ -300,9 +292,7 @@ namespace franka_kitting_controller {
     double rt_fr_slip_width_thresh_{0.0005};
     double rt_fr_load_transfer_min_{2.0};
 
-    // --- Force ramp: staging variables (subscriber → realtime via state_changed_) ---
-    // Written by stateCmdCallback() with resolved per-command values, before release-store
-    // on state_changed_. Realtime thread snapshots these to rt_fr_* in applyPendingStateTransition().
+    // Staging variables (subscriber → RT via state_changed_ release/acquire)
     double staging_fr_f_min_{3.0};
     double staging_fr_f_step_{3.0};
     double staging_fr_f_max_{30.0};
@@ -336,11 +326,7 @@ namespace franka_kitting_controller {
     std::vector<double> fr_width_samples_;  // Width samples during EVALUATE for P5/P95 (pre-allocated in starting())
     double accumulated_uplift_{0.0};       // Uncorrected uplift from SUCCESS [m]
 
-    // --- Deferred grasp command (realtime → read thread → command thread) ---
-    // Realtime thread requests a grasp command via this mechanism (can't call queueGripperCommand
-    // from realtime because it uses a mutex):
-    //   Realtime thread: write parameters, then release-store deferred_grasp_pending_ = true
-    //   Read thread: acquire-load flag, read params, call queueGripperCommand(), clear flag
+    // Deferred grasp (RT → read thread → command thread, via acquire/release on flag)
     std::atomic<bool> deferred_grasp_pending_{false};
     double deferred_grasp_width_{0.0};
     double deferred_grasp_speed_{0.0};

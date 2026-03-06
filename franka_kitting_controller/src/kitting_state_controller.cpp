@@ -23,8 +23,6 @@
 
 namespace franka_kitting_controller {
 
-  // C++14 requires out-of-line definitions for static constexpr members
-  // that are ODR-used (e.g. passed by reference to std::min/std::max).
   constexpr double KittingStateController::kMaxClosingSpeed;
   constexpr double KittingStateController::kMaxUpliftDistance;
   constexpr double KittingStateController::kMinUpliftHold;
@@ -108,12 +106,8 @@ namespace franka_kitting_controller {
 
   std::array<double, 16> KittingStateController::computeUpliftPose(double elapsed) const {
     std::array<double, 16> pose = uplift_start_pose_;
-    // Uses Realtime-local copies (rt_uplift_duration_, rt_uplift_distance_) to prevent
-    // mid-trajectory corruption from concurrent subscriber writes.
     double s_raw = std::min(elapsed / rt_uplift_duration_, 1.0);
-    // Cosine smoothing: zero velocity at start and end
     double s = 0.5 * (1.0 - std::cos(M_PI * s_raw));
-    // Index 14 is the z-translation in a column-major 4x4 homogeneous transform
     pose[14] = uplift_z_start_ + s * rt_uplift_distance_;
     return pose;
   }
@@ -162,14 +156,12 @@ namespace franka_kitting_controller {
 
   bool KittingStateController::init(hardware_interface::RobotHW* robot_hw,
                                     ros::NodeHandle& node_handle) {
-    // Load arm_id parameter
     std::string arm_id;
     if (!node_handle.getParam("arm_id", arm_id)) {
       ROS_ERROR("KittingStateController: Could not read parameter arm_id");
       return false;
     }
 
-    // Load publish_rate parameter (default 250 Hz)
     double publish_rate(250.0);
     if (!node_handle.getParam("publish_rate", publish_rate)) {
       ROS_INFO_STREAM("KittingStateController: publish_rate not found. Using default "
@@ -285,28 +277,24 @@ namespace franka_kitting_controller {
     gripper_read_thread_ = std::thread(&KittingStateController::gripperReadLoop, this);
     gripper_cmd_thread_ = std::thread(&KittingStateController::gripperCommandLoop, this);
 
-    // Acquire FrankaStateInterface
     franka_state_interface_ = robot_hw->get<franka_hw::FrankaStateInterface>();
     if (franka_state_interface_ == nullptr) {
       ROS_ERROR("KittingStateController: Could not get Franka state interface from hardware");
       return false;
     }
 
-    // Acquire FrankaModelInterface
     model_interface_ = robot_hw->get<franka_hw::FrankaModelInterface>();
     if (model_interface_ == nullptr) {
       ROS_ERROR("KittingStateController: Could not get Franka model interface from hardware");
       return false;
     }
 
-    // Acquire FrankaPoseCartesianInterface (for UPLIFT micro-lift)
     cartesian_pose_interface_ = robot_hw->get<franka_hw::FrankaPoseCartesianInterface>();
     if (cartesian_pose_interface_ == nullptr) {
       ROS_ERROR("KittingStateController: Could not get Cartesian pose interface from hardware");
       return false;
     }
 
-    // Get state handle
     try {
       franka_state_handle_ = std::make_unique<franka_hw::FrankaStateHandle>(
           franka_state_interface_->getHandle(arm_id + "_robot"));
@@ -316,7 +304,6 @@ namespace franka_kitting_controller {
       return false;
     }
 
-    // Get model handle
     try {
       model_handle_ = std::make_unique<franka_hw::FrankaModelHandle>(
           model_interface_->getHandle(arm_id + "_model"));
@@ -326,7 +313,6 @@ namespace franka_kitting_controller {
       return false;
     }
 
-    // Get Cartesian pose handle
     try {
       cartesian_pose_handle_ = std::make_unique<franka_hw::FrankaCartesianPoseHandle>(
           cartesian_pose_interface_->getHandle(arm_id + "_robot"));
@@ -336,7 +322,6 @@ namespace franka_kitting_controller {
       return false;
     }
 
-    // Initialize realtime publishers
     kitting_publisher_.init(node_handle, "kitting_state_data", 1);
 
     // Grasp: State label publisher
@@ -448,14 +433,12 @@ namespace franka_kitting_controller {
     // Handle BASELINE start: reset all state-machine variables for a fresh grasp cycle.
     // This enables multi-trial operation without restarting the controller.
     if (new_state == GraspState::BASELINE) {
-      // Stop any active trajectories
       uplift_active_.store(false, std::memory_order_relaxed);
       uplift_elapsed_ = 0.0;
       downlift_active_.store(false, std::memory_order_relaxed);
       downlift_elapsed_ = 0.0;
       deferred_grasp_pending_.store(false, std::memory_order_relaxed);
 
-      // Reset contact detection state
       contact_latched_ = false;
       gripper_debounce_.reset();
       gripper_stop_sent_.store(false, std::memory_order_relaxed);
@@ -463,10 +446,8 @@ namespace franka_kitting_controller {
       width_capture_pending_.store(false, std::memory_order_relaxed);
       contact_width_.store(0.0, std::memory_order_relaxed);
 
-      // Reset force ramp state
       resetForceRampState();
 
-      // Reset contact detection state
       cd_baseline_sum_ = 0.0;  cd_baseline_count_ = 0;
       cd_baseline_ = 0.0;      cd_baseline_ready_ = false;
 
@@ -514,7 +495,6 @@ namespace franka_kitting_controller {
 
     // Handle GRASPING start: snapshot force ramp parameters, initialize force ramp state
     if (new_state == GraspState::GRASPING) {
-      // Snapshot staging → Realtime-local copies (synchronized via state_changed_ acquire)
       rt_fr_f_min_ = staging_fr_f_min_;
       rt_fr_f_step_ = staging_fr_f_step_;
       rt_fr_f_max_ = staging_fr_f_max_;
@@ -527,14 +507,12 @@ namespace franka_kitting_controller {
       rt_fr_slip_width_thresh_ = staging_fr_slip_width_thresh_;
       rt_fr_load_transfer_min_ = staging_fr_load_transfer_min_;
 
-      // Initialize force ramp state
       fr_f_current_ = rt_fr_f_min_;
       fr_iteration_ = 0;
       fr_grasping_phase_initialized_ = false;  // Set on first runInternalTransitions tick
       fr_grasp_cmd_seen_executing_ = false;
       fr_grasp_stabilizing_ = false;
 
-      // Clear trajectory and deferred state
       uplift_active_.store(false, std::memory_order_relaxed);
       downlift_active_.store(false, std::memory_order_relaxed);
       deferred_grasp_pending_.store(false, std::memory_order_relaxed);
@@ -639,11 +617,10 @@ namespace franka_kitting_controller {
       double tau_ext_norm = arrayNorm(robot_state.tau_ext_hat_filtered);
       double wrench_norm = arrayNorm(robot_state.O_F_ext_hat_K);
 
-      // Directional force decomposition: O_F_ext_hat_K = [Fx, Fy, Fz, Tx, Ty, Tz]
-      double support_force = std::abs(robot_state.O_F_ext_hat_K[2]);       // Fn = |Fz|
+      double support_force = std::abs(robot_state.O_F_ext_hat_K[2]);       // Fn
       double tangential_force = std::sqrt(
           robot_state.O_F_ext_hat_K[0] * robot_state.O_F_ext_hat_K[0] +
-          robot_state.O_F_ext_hat_K[1] * robot_state.O_F_ext_hat_K[1]);   // Ft = sqrt(Fx²+Fy²)
+          robot_state.O_F_ext_hat_K[1] * robot_state.O_F_ext_hat_K[1]);   // Ft
 
       std::array<double, 6> ee_velocity{};
       for (size_t row = 0; row < 6; ++row) {
@@ -652,12 +629,9 @@ namespace franka_kitting_controller {
         }
       }
 
-      // Single gripper snapshot per tick — all consumers see consistent data
       const GripperData gripper_snapshot = *gripper_data_buf_.readFromRT();
 
-      // tau_ext_norm baseline collection — runs during BASELINE at 250Hz.
-      // Captures the at-rest external torque norm before any gripper motion.
-      // Skips ticks while accumulated-uplift downlift is active (arm not settled).
+      // tau_ext_norm baseline collection (BASELINE state, skips during downlift correction)
       {
         GraspState bl_state = current_state_.load(std::memory_order_relaxed);
         if (bl_state == GraspState::BASELINE && !cd_baseline_ready_ &&
@@ -675,7 +649,6 @@ namespace franka_kitting_controller {
 
       runClosingTransitions(time, gripper_snapshot, tau_ext_norm);
 
-      // Run internal force ramp transitions (GRASPING→UPLIFT→EVALUATE→...)
       {
         GraspState fr_state = current_state_.load(std::memory_order_relaxed);
         if (isForceRampPhase(fr_state)) {
@@ -684,8 +657,7 @@ namespace franka_kitting_controller {
         }
       }
 
-      // Signal monitor — 2 Hz slow-rate logger for terminal readability
-      // Re-read state since runInternalTransitions may have changed it
+      // Re-read: runInternalTransitions may have changed state
       const GraspState state = current_state_.load(std::memory_order_relaxed);
       if (signal_log_trigger_()) {
         if (state == GraspState::BASELINE) {
