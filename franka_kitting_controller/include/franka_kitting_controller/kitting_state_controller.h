@@ -38,6 +38,8 @@
 #include <franka_hw/franka_state_interface.h>
 #include <franka_hw/trigger_rate.h>
 
+#include <sms_cusum/sms_cusum.hpp>
+
 namespace franka_kitting_controller {
 
   /// Grasp states for data collection and automated force ramp.
@@ -57,7 +59,7 @@ namespace franka_kitting_controller {
     BASELINE,        // Collecting reference signals
     CLOSING_COMMAND, // Gripper close queued — awaiting execution confirmation
     CLOSING,            // Gripper confirmed moving toward object
-    CONTACT_CONFIRMED,  // Contact detected (torque-drop) — gripper stopping
+    CONTACT_CONFIRMED,  // Contact detected (SMS-CUSUM) — gripper stopping
     CONTACT,            // Gripper stopped — contact confirmed
     GRASPING,     // Applying grasp force, waiting for completion + stabilization
     UPLIFT,       // Cosine-smoothed micro-lift trajectory
@@ -90,29 +92,6 @@ namespace franka_kitting_controller {
     double width_dot{0.0};   // Finite difference velocity [m/s]
     bool is_grasped{false};  // from franka::GripperState.is_grasped
     ros::Time stamp;         // Timestamp of the measurement
-  };
-
-  /// Lightweight debounce helper for sustained-threshold detection. Realtime-safe.
-  struct DebounceState {
-    bool active{false};
-    ros::Time start_time;
-
-    /// Check if a condition has been sustained for at least hold_duration.
-    /// Returns true exactly once when the debounce threshold is reached.
-    bool check(bool condition, const ros::Time& now, double hold_duration) {
-      if (condition) {
-        if (!active) {
-          active = true;
-          start_time = now;
-          return false;
-        }
-        return (now - start_time).toSec() >= hold_duration;
-      }
-      active = false;
-      return false;
-    }
-
-    void reset() { active = false; }
   };
 
   /**
@@ -209,13 +188,8 @@ namespace franka_kitting_controller {
     std::atomic<bool> state_changed_{false};
     bool contact_latched_{false};
 
-    // --- Torque-drop contact detection: YAML defaults ---
-    double contact_torque_thresh_{0.1};       // [Nm] tau_ext_norm drop below baseline to trigger
-    double contact_debounce_time_{0.05};      // [s] Sustained drop duration before triggering
-    static constexpr int kContactBaselineSamples{50};  // Fixed: 50 samples = 0.2s at 250Hz
-
-    // Debounce state (Realtime-thread owned)
-    DebounceState gripper_debounce_;
+    // --- SMS-CUSUM contact detection (noise-adaptive, replaces fixed threshold) ---
+    sms_cusum::SMSCusum sms_detector_{sms_cusum::SMSCusumConfig{}};
     std::atomic<bool> gripper_stop_sent_{false};  // Written by realtime, read by command thread
     std::atomic<bool> gripper_stopped_{false};    // Read thread → realtime: stop() completed AND post-stop width captured
     std::atomic<bool> width_capture_pending_{false};  // Read thread internal: capture contact_width_ on next readOnce()
@@ -229,16 +203,7 @@ namespace franka_kitting_controller {
     bool closing_cmd_seen_executing_{false};  ///< True once move() seen running during CLOSING
     bool closing_command_entered_{false};     ///< First-tick flag: ensures CLOSING_COMMAND label is published before transition
 
-    // Contact detection staging (subscriber → RT via CLOSING_COMMAND snapshot)
-    double closing_contact_torque_thresh_{0.1};
-    double closing_contact_debounce_time_{0.05};
-
-    // Contact detection RT-local copies
-    double rt_contact_torque_thresh_{0.1};
-    double rt_contact_debounce_time_{0.05};
-
-    // Contact detection runtime state (RT-thread owned)
-    double cd_baseline_sum_{0.0};
+    // Contact detection runtime state (RT-thread owned, kept for signal logging compatibility)
     int    cd_baseline_count_{0};
     double cd_baseline_{0.0};
     bool   cd_baseline_ready_{false};

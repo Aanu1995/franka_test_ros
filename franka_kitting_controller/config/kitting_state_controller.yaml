@@ -7,9 +7,9 @@ kitting_state_controller:
   closing_width: 0.01 # [m] Default width for MoveAction in CLOSING
   closing_speed: 0.05 # [m/s] Default speed for MoveAction in CLOSING
 
-  # Torque-drop contact detection parameters
-  contact_torque_thresh: 0.1        # [Nm] tau_ext_norm drop below baseline to trigger contact (tune empirically)
-  contact_debounce_time: 0.05       # [s] Sustained drop duration before triggering (0.05 = 50ms)
+  # Contact detection: SMS-CUSUM (noise-adaptive, no manual threshold tuning)
+  # Uses built-in optimized parameters: k_min=0.02, h=0.3, debounce=5 samples, noise_mult=2.0
+  # Baseline: 50 samples (0.2s at 250Hz), EMA alpha=0.01
 
   # Grasping parameters (overridable per-command via KittingGripperCommand)
   # After GRASPING command, controller runs: GRASPING -> UPLIFT -> EVALUATE -> SUCCESS

@@ -29,7 +29,6 @@ namespace franka_kitting_controller {
   constexpr int    KittingStateController::kWidthSamplesPerSec;
   constexpr double KittingStateController::kGraspSettleDelay;
   constexpr double KittingStateController::kGraspTimeout;
-  constexpr int    KittingStateController::kContactBaselineSamples;
   constexpr double KittingStateController::kMaxUpliftHold;
   constexpr double KittingStateController::kMinLiftSpeed;
   constexpr int    KittingStateController::kMaxWidthSamples;
@@ -169,25 +168,12 @@ namespace franka_kitting_controller {
     }
     rate_trigger_ = franka_hw::TriggerRate(publish_rate);
 
-    // --- Torque-drop contact detection parameters ---
-    node_handle.param("contact_torque_thresh", contact_torque_thresh_, 0.1);
-    node_handle.param("contact_debounce_time", contact_debounce_time_, 0.05);
-
-    if (contact_torque_thresh_ <= 0.0) {
-      ROS_WARN("KittingStateController: contact_torque_thresh must be positive (got %.3f), using 0.1",
-               contact_torque_thresh_);
-      contact_torque_thresh_ = 0.1;
-    }
-    if (contact_debounce_time_ < 0.0) {
-      ROS_WARN("KittingStateController: contact_debounce_time must be >= 0 (got %.3f), using 0.05",
-               contact_debounce_time_);
-      contact_debounce_time_ = 0.05;
-    }
-
-    ROS_INFO_STREAM("KittingStateController: Contact detection (torque-drop)"
-                    << " | thresh=" << contact_torque_thresh_
-                    << " | debounce=" << contact_debounce_time_ << "s"
-                    << " | baseline=" << kContactBaselineSamples << " samples");
+    // --- SMS-CUSUM contact detection (noise-adaptive, no manual threshold tuning) ---
+    ROS_INFO_STREAM("KittingStateController: Contact detection (SMS-CUSUM)"
+                    << " | k_min=" << sms_detector_.config().contact_stage.k_min
+                    << " | h=" << sms_detector_.config().contact_stage.h
+                    << " | debounce=" << sms_detector_.config().contact_stage.debounce_count << " samples"
+                    << " | noise_mult=" << sms_detector_.config().contact_stage.noise_multiplier);
 
     // --- Grasp: Gripper default parameters (overridable per-command via KittingGripperCommand) ---
     node_handle.param("closing_width", closing_width_, 0.01);
@@ -440,7 +426,7 @@ namespace franka_kitting_controller {
       deferred_grasp_pending_.store(false, std::memory_order_relaxed);
 
       contact_latched_ = false;
-      gripper_debounce_.reset();
+      sms_detector_.reset();
       gripper_stop_sent_.store(false, std::memory_order_relaxed);
       gripper_stopped_.store(false, std::memory_order_relaxed);
       width_capture_pending_.store(false, std::memory_order_relaxed);
@@ -448,7 +434,7 @@ namespace franka_kitting_controller {
 
       resetForceRampState();
 
-      cd_baseline_sum_ = 0.0;  cd_baseline_count_ = 0;
+      cd_baseline_count_ = 0;
       cd_baseline_ = 0.0;      cd_baseline_ready_ = false;
 
       ROS_INFO("  [BASELINE]  State machine reset for new trial");
@@ -471,7 +457,6 @@ namespace franka_kitting_controller {
     if (new_state == GraspState::CLOSING_COMMAND) {
       rt_closing_w_cmd_ = closing_w_cmd_;
       rt_closing_v_cmd_ = closing_v_cmd_;
-      gripper_debounce_.reset();
       gripper_stop_sent_.store(false, std::memory_order_relaxed);
       gripper_stopped_.store(false, std::memory_order_relaxed);
       width_capture_pending_.store(false, std::memory_order_relaxed);
@@ -479,18 +464,13 @@ namespace franka_kitting_controller {
       closing_command_entered_ = true;
       fr_phase_start_time_ = ros::Time::now();
 
-      // Snapshot contact detection parameters
-      rt_contact_torque_thresh_ = closing_contact_torque_thresh_;
-      rt_contact_debounce_time_ = closing_contact_debounce_time_;
-
-      // tau_ext_norm baseline was collected during BASELINE state — preserve it.
-      // Only reset the debounce state (not the baseline) for the new closing sequence.
-
       publishStateLabel("CLOSING_COMMAND");
-      ROS_INFO("  [CLOSING_COMMAND]  contact_torque_thresh=%.3f  debounce=%.3fs  speed=%.4f m/s  "
-              "tau_baseline=%.3f%s",
-              rt_contact_torque_thresh_, rt_contact_debounce_time_, rt_closing_v_cmd_,
-              cd_baseline_, cd_baseline_ready_ ? "" : " (NOT READY)");
+      ROS_INFO("  [CLOSING_COMMAND]  SMS-CUSUM  speed=%.4f m/s  "
+              "tau_baseline=%.3f  sigma=%.4f%s",
+              rt_closing_v_cmd_,
+              cd_baseline_,
+              sms_detector_.baseline_ready() ? sms_detector_.baseline().sigma() : 0.0,
+              cd_baseline_ready_ ? "" : " (NOT READY)");
     }
 
     // Handle GRASPING start: snapshot force ramp parameters, initialize force ramp state
@@ -631,18 +611,22 @@ namespace franka_kitting_controller {
 
       const GripperData gripper_snapshot = *gripper_data_buf_.readFromRT();
 
-      // tau_ext_norm baseline collection (BASELINE state, skips during downlift correction)
+      // SMS-CUSUM baseline collection (BASELINE state, skips during downlift correction)
       {
         GraspState bl_state = current_state_.load(std::memory_order_relaxed);
-        if (bl_state == GraspState::BASELINE && !cd_baseline_ready_ &&
+        if (bl_state == GraspState::BASELINE &&
             !downlift_active_.load(std::memory_order_relaxed)) {
-          cd_baseline_sum_ += tau_ext_norm;
-          cd_baseline_count_++;
-          if (cd_baseline_count_ >= kContactBaselineSamples) {
-            cd_baseline_ = cd_baseline_sum_ / cd_baseline_count_;
+          sms_detector_.update(tau_ext_norm);
+
+          if (!cd_baseline_ready_ && sms_detector_.baseline_ready()) {
             cd_baseline_ready_ = true;
-            ROS_INFO("  [BASELINE]  tau_ext_norm baseline ready: %.3f Nm  (from %d samples, 0.2s)",
-                     cd_baseline_, cd_baseline_count_);
+            cd_baseline_ = sms_detector_.baseline().mean();
+            cd_baseline_count_ = sms_detector_.config().baseline_init_samples;
+            ROS_INFO("  [BASELINE]  SMS-CUSUM baseline ready: mu=%.3f Nm, sigma=%.4f Nm  "
+                     "(from %d samples, 0.2s)",
+                     sms_detector_.baseline().mean(),
+                     sms_detector_.baseline().sigma(),
+                     sms_detector_.config().baseline_init_samples);
           }
         }
       }
@@ -667,15 +651,15 @@ namespace franka_kitting_controller {
             ROS_INFO("  [SIGNAL]  BASELINE  |  awaiting downlift correction");
           } else {
             ROS_INFO("  [SIGNAL]  BASELINE  |  collecting: %d/%d samples  tau_ext_norm=%.3f",
-                    cd_baseline_count_, kContactBaselineSamples, tau_ext_norm);
+                    sms_detector_.baseline().count(), sms_detector_.config().baseline_init_samples, tau_ext_norm);
           }
         } else if (isClosingPhase(state)) {
-          double drop = cd_baseline_ready_ ? (cd_baseline_ - tau_ext_norm) : 0.0;
-          ROS_INFO("  [SIGNAL]  %s  |  torque_drop: tau=%.3f baseline=%.3f "
-                  "drop=%.3f thresh=%.3f %s",
+          ROS_INFO("  [SIGNAL]  %s  |  cusum: tau=%.3f baseline=%.3f "
+                  "S=%.3f k_eff=%.4f %s",
                   stateToString(state), tau_ext_norm, cd_baseline_,
-                  drop, rt_contact_torque_thresh_,
-                  cd_baseline_ready_ ? (drop > rt_contact_torque_thresh_ ? "DROP" : "ok") : "collecting");
+                  sms_detector_.contact_cusum().statistic(),
+                  sms_detector_.contact_cusum().k_effective(),
+                  cd_baseline_ready_ ? "active" : "collecting");
         } else if (isForceRampPhase(state)) {
           ROS_INFO("  [SIGNAL]  %s  |  F=%.1f  iter=%d  Fn=%.2f",
                   stateToString(state), fr_f_current_, fr_iteration_,

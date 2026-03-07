@@ -1,6 +1,6 @@
 # franka_kitting_controller
 
-Real-time state acquisition and automated force ramp controller for the Franka Panda with torque-drop contact detection and rosbag data collection. Reads all robot state, model, and Cartesian signals, publishes them as a single `KittingState` message, autonomously detects contact using torque-drop contact detection (tau_ext_norm), immediately stops the gripper on contact via `franka::Gripper::stop()`, and runs an automated force ramp loop (GRASPING → UPLIFT → EVALUATE → SUCCESS, with slip-triggered retry at higher force) internally. Claims `FrankaPoseCartesianInterface` for Cartesian pose control. Gripper operations use the libfranka `franka::Gripper` API directly. Also exposes `franka_gripper`-compatible action servers (move, grasp, homing, stop) for external gripper control when the internal state machine is idle.
+Real-time state acquisition and automated force ramp controller for the Franka Panda with SMS-CUSUM contact detection and rosbag data collection. Reads all robot state, model, and Cartesian signals, publishes them as a single `KittingState` message, autonomously detects contact using SMS-CUSUM (noise-adaptive CUSUM change-point detection on tau_ext_norm), immediately stops the gripper on contact via `franka::Gripper::stop()`, and runs an automated force ramp loop (GRASPING → UPLIFT → EVALUATE → SUCCESS, with slip-triggered retry at higher force) internally. Claims `FrankaPoseCartesianInterface` for Cartesian pose control. Gripper operations use the libfranka `franka::Gripper` API directly. Also exposes `franka_gripper`-compatible action servers (move, grasp, homing, stop) for external gripper control when the internal state machine is idle.
 
 ## Overview
 
@@ -14,7 +14,7 @@ This controller runs inside the `ros_control` real-time loop provided by `franka
 **Grasp** adds:
 
 - 14-state grasp machine with automated force ramp: `START` → `BASELINE` → `CLOSING_COMMAND` → `CLOSING` → `CONTACT_CONFIRMED` → `CONTACT` → `GRASPING` → `UPLIFT` → `EVALUATE` → `SUCCESS` (with slip retry loop via `SLIP` → `DOWNLIFT` → `SETTLING` → `GRASPING`)
-- Torque-drop contact detection during CLOSING (monitors tau_ext_norm for a sudden drop on contact)
+- SMS-CUSUM contact detection during CLOSING (noise-adaptive CUSUM change-point detection on tau_ext_norm — automatically scales sensitivity to measured noise level, no per-object threshold tuning)
 - Immediate gripper stop on contact: calls `franka::Gripper::stop()` to physically halt the motor
 - Automated force ramp: increments grasp force from `f_min` to `f_max` in `f_step` increments until stable grasp or failure
 - Three-gate AND slip detection: load transfer + support drop + jaw widening (directional force decomposition, Fn = |Fz|) during EVALUATE hold
@@ -148,7 +148,7 @@ Gripper close queued — awaiting execution confirmation. Published via `/kittin
 Observe approach dynamics before contact. Published **automatically** by the controller when gripper movement is confirmed.
 
 - Gripper is confirmed moving toward object at width `w` and speed `v` (max 0.10 m/s)
-- Torque-drop contact detection runs during this state (see [Torque-Drop Contact Detection](#torque-drop-contact-detection))
+- SMS-CUSUM contact detection runs during this state (see [SMS-CUSUM Contact Detection](#sms-cusum-contact-detection))
 - On contact detection, transitions immediately to **CONTACT_CONFIRMED**
 - If gripper reaches target width without detecting contact (no object present), transitions to **FAILED** — "no contact detected"
 
@@ -156,7 +156,7 @@ Observe approach dynamics before contact. Published **automatically** by the con
 
 Contact detected — gripper decelerating. Published **automatically** by the controller on contact detection.
 
-- tau_ext_norm drops below baseline by more than `contact_torque_thresh` (default 0.1 Nm), sustained for `contact_debounce_time` (default 0.05 s) (see [Torque-Drop Contact Detection](#torque-drop-contact-detection))
+- SMS-CUSUM detects a sustained torque drop (CUSUM statistic S exceeds threshold h for debounce_count consecutive samples) (see [SMS-CUSUM Contact Detection](#sms-cusum-contact-detection))
 - `contact_width` is saved when the gripper has physically stopped (CONTACT) — used as the grasp width in GRASPING
 - `franka::Gripper::stop()` is requested via the read thread to halt the motor
 - Data recorded during this state captures the gripper deceleration dynamics
@@ -323,15 +323,6 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
   "{command: 'CLOSING', closing_width: 0.01, closing_speed: 0.05}" --once
 
-# CLOSING — override torque-drop detection parameters
-rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
-  "{command: 'CLOSING', contact_torque_thresh: 0.5, contact_debounce_time: 0.08}" --once
-
-# CLOSING — override all closing parameters for a specific object
-rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
-  "{command: 'CLOSING', closing_width: 0.01, closing_speed: 0.05, \
-    contact_torque_thresh: 0.1, contact_debounce_time: 0.05}" --once
-
 # ... CONTACT is published by the controller automatically ...
 
 # GRASPING — use YAML defaults (f_min=3N, f_max=30N, f_step=3N)
@@ -375,7 +366,6 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
   "{command: 'AUTO', open_gripper: true, auto_delay: 3.0, \
     closing_width: 0.01, closing_speed: 0.05, \
-    contact_torque_thresh: 0.1, contact_debounce_time: 0.05, \
     f_min: 3.0, f_step: 3.0, f_max: 30.0, \
     fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
     fr_uplift_distance: 0.010, fr_lift_speed: 0.01, fr_uplift_hold: 1.0, \
@@ -426,27 +416,41 @@ The `/franka_gripper/` namespace matches the default namespace used by `franka_g
 
 ## Grasp: Contact Detection
 
-The controller detects contact during CLOSING by monitoring tau_ext_norm (the Euclidean norm of estimated external joint torques) for a sudden drop when the gripper contacts an object. Empirically, tau_ext_norm drops on contact (e.g., from ~1.6 Nm baseline to ~1.3 Nm). A configurable debounce duration suppresses noise and avoids false positives. On detection, the controller transitions to `CONTACT_CONFIRMED` → `CONTACT`.
+The controller detects contact during CLOSING using SMS-CUSUM (Sequential Multi-State CUSUM), a noise-adaptive change-point detector that monitors tau_ext_norm (the Euclidean norm of estimated external joint torques) for a sustained drop when the gripper contacts an object. Unlike fixed-threshold detection, SMS-CUSUM automatically scales its sensitivity to the measured noise level, eliminating per-object threshold tuning across objects with different contact drop magnitudes (0.13–0.75 Nm).
 
-### Torque-Drop Contact Detection
+### SMS-CUSUM Contact Detection
 
-Detects contact by monitoring tau_ext_norm during CLOSING. When the gripper contacts an object, the external torque norm drops suddenly as the gripper mechanics absorb the impact. The detection function is `detectContact()`.
+Detects contact by monitoring tau_ext_norm during CLOSING using a one-sided downward CUSUM detector with noise-adaptive allowance. When the gripper contacts an object, the external torque norm drops suddenly as the gripper mechanics absorb the impact. The detection function is `detectContact()`.
 
 #### Algorithm
 
-1. **Baseline collection**: During BASELINE state (after any accumulated-uplift correction completes), collect the first `kContactBaselineSamples` (50) samples of tau_ext_norm (0.2 s at 250 Hz) and compute the mean as `cd_baseline_`. The baseline is ready when `cd_baseline_ready_` is set. This captures the at-rest external torque norm before any gripper motion.
-2. **Drop detection**: Check if `cd_baseline_ - tau_ext_norm > contact_torque_thresh` (default 0.1 Nm) using the current tau_ext_norm reading each tick.
-3. **Debounce**: The drop condition must persist for `contact_debounce_time` (default 0.05 s) before triggering contact.
-4. **On trigger**: Sets `contact_latched_`, transitions to `CONTACT_CONFIRMED`, calls `requestGripperStop()`. `contact_width_` is captured later when the gripper has physically stopped (CONTACT).
+1. **Baseline collection**: During BASELINE state (after any accumulated-uplift correction completes), feed tau_ext_norm samples to `sms_detector_.update()`. The `AdaptiveBaseline` collects 50 samples (0.2 s at 250 Hz) to compute both the **mean** (μ) and **noise sigma** (σ). After 50 samples, the baseline transitions to EMA tracking. This captures the at-rest external torque norm and its variability before any gripper motion.
+2. **Baseline freeze**: At the CLOSING_COMMAND → CLOSING transition, `sms_detector_.enter_closing()` freezes the baseline (preventing corruption during detection) and adapts the CUSUM allowance: `k_eff = max(k_min, noise_multiplier × σ)`.
+3. **CUSUM detection**: Each tick during CLOSING, the CUSUM statistic accumulates evidence of a torque drop: `S = max(0, S + (μ − tau_ext_norm) − k_eff)`. The allowance `k_eff` absorbs noise-level fluctuations; only genuine drops accumulate S.
+4. **Debounce**: The alarm condition `S ≥ h` must persist for `debounce_count` (5) consecutive samples before triggering contact. This replaces time-based debounce with sample-based debounce.
+5. **On trigger**: Sets `contact_latched_`, transitions to `CONTACT_CONFIRMED`, calls `requestGripperStop()`. `contact_width_` is captured later when the gripper has physically stopped (CONTACT).
+
+#### Parameters
+
+| Parameter              | Name                          | Default | Description                                                                      |
+| ---------------------- | ----------------------------- | ------- | -------------------------------------------------------------------------------- |
+| `k_min`                | Minimum CUSUM allowance       | 0.02    | Floor for k_eff — ensures detection of very small drops even with low noise      |
+| `h`                    | CUSUM threshold               | 0.3     | CUSUM statistic S must reach this value to trigger alarm                         |
+| `debounce_count`       | Debounce samples              | 5       | Alarm must persist for this many consecutive samples (20 ms at 250 Hz)           |
+| `noise_multiplier`     | Noise scaling factor          | 2.0     | k_eff = max(k_min, noise_multiplier × σ) — scales allowance to noise level      |
+| `baseline_init_samples`| Baseline collection count     | 50      | Samples for initial mean and sigma estimation (0.2 s at 250 Hz)                  |
+| `baseline_alpha`       | EMA smoothing factor          | 0.01    | Exponential moving average coefficient for baseline tracking after initialization|
 
 #### Symbols
 
-| Symbol                 | Name                        | Unit | Default  | Description                                                                    |
-| ---------------------- | --------------------------- | ---- | -------- | ------------------------------------------------------------------------------ |
-| `cd_baseline_` (τ_baseline) | Baseline torque norm   | Nm   | —        | Mean tau_ext_norm from first 50 samples of BASELINE (at-rest, after downlift correction) |
-| `tau_ext_norm`         | Current external torque norm | Nm   | —        | Euclidean norm of estimated external joint torques                              |
-| `contact_torque_thresh` | Drop threshold             | Nm   | 0.1      | Minimum `cd_baseline_ - tau_ext_norm` to trigger contact                       |
-| `contact_debounce_time` | Debounce duration          | s    | 0.05     | Sustained drop duration before triggering contact                              |
+| Symbol                 | Name                        | Unit | Description                                                                    |
+| ---------------------- | --------------------------- | ---- | ------------------------------------------------------------------------------ |
+| `μ` (baseline mean)    | Baseline torque norm         | Nm   | Mean tau_ext_norm from 50 BASELINE samples (frozen during CLOSING)              |
+| `σ` (baseline sigma)   | Baseline noise               | Nm   | Standard deviation of tau_ext_norm during BASELINE (measures noise level)       |
+| `tau_ext_norm`         | Current external torque norm | Nm   | Euclidean norm of estimated external joint torques                              |
+| `k_eff`                | Effective CUSUM allowance    | Nm   | `max(k_min, noise_multiplier × σ)` — absorbs noise, passes genuine drops       |
+| `S`                    | CUSUM statistic              | Nm   | `max(0, S + (μ − tau_ext_norm) − k_eff)` — accumulated evidence of drop        |
+| `h`                    | CUSUM threshold              | Nm   | Alarm fires when S ≥ h for debounce_count consecutive samples                  |
 
 ### Gripper Stop on Contact
 
@@ -695,8 +699,6 @@ The **velocity profile** (first derivative) is:
 | `publish_rate`             | double | `250.0` | State data publish rate [Hz]                                        |
 | `closing_width`            | double | `0.01`  | Default width for MoveAction in CLOSING [m]                         |
 | `closing_speed`            | double | `0.05`  | Default speed for MoveAction in CLOSING [m/s] (clamped to max 0.10) |
-| `contact_torque_thresh`    | double | `0.1`   | tau_ext_norm drop below baseline to trigger contact [Nm]            |
-| `contact_debounce_time`    | double | `0.05`  | Sustained drop duration before triggering contact [s]               |
 | `grasp_speed`              | double | `0.02`  | Gripper speed for GraspAction [m/s]                                 |
 | `epsilon`                  | double | `0.008` | Epsilon for GraspAction (inner and outer) [m]                       |
 | `f_min`                    | double | `3.0`   | Starting grasp force [N]                                            |
@@ -760,7 +762,7 @@ topics_recorded:
   - /kitting_controller/state
 export_csv_on_stop: true
 detector_parameters:
-  method: torque_drop
+  method: sms_cusum
 ```
 
 ### CSV Export
@@ -800,8 +802,8 @@ Per-object command published on `/kitting_controller/state_cmd`. Any float64 par
 | `open_width`           | float64 | Width to open to [m] (0 = max_width from firmware). Only if `open_gripper` is true |
 | `closing_width`        | float64 | Target width for MoveAction [m] (0 = use default)                                  |
 | `closing_speed`        | float64 | Speed for MoveAction [m/s] (0 = use default, max 0.10)                             |
-| `contact_torque_thresh` | float64 | Torque drop threshold [Nm] (0 = use YAML default 0.1)                              |
-| `contact_debounce_time` | float64 | Sustained drop duration before triggering [s] (0 = use YAML default 0.05)          |
+| `contact_torque_thresh` | float64 | *Ignored* — kept for message compatibility. SMS-CUSUM auto-tunes detection          |
+| `contact_debounce_time` | float64 | *Ignored* — kept for message compatibility. SMS-CUSUM uses sample-based debounce    |
 | `f_min`                | float64 | Starting grasp force [N] (0 = use default 3.0)                                     |
 | `f_step`               | float64 | Force increment per iteration [N] (0 = use default 3.0)                            |
 | `f_max`                | float64 | Maximum force — FAILED if exceeded [N] (0 = use default 30.0)                      |
@@ -818,7 +820,7 @@ Per-object command published on `/kitting_controller/state_cmd`. Any float64 par
 Only the parameters relevant to the command are used:
 
 - `BASELINE` uses `open_gripper` and `open_width`
-- `CLOSING` uses `closing_width`, `closing_speed`, `contact_torque_thresh`, and `contact_debounce_time`
+- `CLOSING` uses `closing_width` and `closing_speed` (`contact_torque_thresh` and `contact_debounce_time` are ignored — SMS-CUSUM auto-tunes detection)
 - `GRASPING` requires CONTACT state and uses all `f_*`/`fr_*` force ramp parameters (grasp width is always from `contact_width`; rejected if not in CONTACT or if `contact_width` is out of range `[0, max_width]`)
 - `AUTO` uses all of the above, plus `auto_delay`
 
@@ -872,7 +874,7 @@ The `franka_gripper` package is used only for action type definitions — `frank
 - No dynamic memory allocation in `update()` — width sample vector pre-allocated in `starting()` with capacity for 8 s at 250 Hz (`kMaxWidthSamples = 2000`)
 - No blocking operations in `update()`
 - Model queries are only called at the publish rate, not every control tick
-- Contact detection uses only scalar arithmetic (no Eigen, no allocation)
+- Contact detection (SMS-CUSUM) uses O(1) per sample, zero dynamic allocation, only scalar arithmetic
 - Gripper data passed to RT loop via lock-free `RealtimeBuffer` (no mutex in `update()`)
 - Gripper stop on contact uses single atomic store (`stop_requested_`), nanoseconds, RT-safe
 - Read thread checks `stop_requested_` flag after each `readOnce()`, calls `stop()` (non-RT), and sets `gripper_stopped_` to confirm. If `stop()` fails (exception), `stop_requested_` remains true for automatic retry on the next iteration — `gripper_stopped_` is only set on success
@@ -921,11 +923,11 @@ The Grasp logger is written in C++ using the `rosbag::Bag` API directly and `top
 - CSV contains 69 flattened columns with state labels per row
 - CSV export does not block the ROS spin loop (runs in background thread)
 - metadata.yaml contains bag_filename, csv_filename, total_samples, start/stop times, and detector parameters
-- Contact detection: torque-drop (cd_baseline_ - tau_ext_norm > contact_torque_thresh, debounced for contact_debounce_time)
+- Contact detection: SMS-CUSUM (noise-adaptive CUSUM: S = max(0, S + (μ − tau) − k_eff), alarm when S ≥ h for 5 consecutive samples)
 - Free closing (no object): width reaches w_cmd, gap ~0 → no false CONTACT → transitions to FAILED ("no contact detected")
-- Object contact: torque drop detected → CONTACT_CONFIRMED immediately, then CONTACT when gripper stopped
+- Object contact: SMS-CUSUM detects torque drop → CONTACT_CONFIRMED immediately, then CONTACT when gripper stopped
 - Gripper stop requested immediately on contact: `stop()` called via atomic flag and read thread
-- CONTACT_CONFIRMED published at torque-drop detection; CONTACT deferred until gripper has physically stopped
+- CONTACT_CONFIRMED published at SMS-CUSUM detection; CONTACT deferred until gripper has physically stopped
 - Contact width captured by read thread on first `readOnce()` after `stop()`, then `gripper_stopped_` set — ensures RT thread always sees fresh width
 - KittingState contains robot signals, gripper signals, and force ramp state — all published at 250 Hz
 - Publishing CLOSING on `state_cmd` triggers gripper `move()` + CLOSING_COMMAND state label (transitions to CLOSING when move confirmed executing)

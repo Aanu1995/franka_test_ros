@@ -56,6 +56,15 @@ namespace franka_kitting_controller {
             state = GraspState::CLOSING;
             publishStateLabel("CLOSING");
             logStateTransition("CLOSING", "Gripper move confirmed — closing");
+
+            // Activate SMS-CUSUM contact detection
+            if (sms_detector_.baseline_ready()) {
+              sms_detector_.enter_closing();
+              ROS_INFO("  [CLOSING]  SMS-CUSUM activated: k_eff=%.4f  baseline=%.3f  sigma=%.4f",
+                       sms_detector_.contact_cusum().k_effective(),
+                       sms_detector_.baseline().mean(),
+                       sms_detector_.baseline().sigma());
+            }
           }
         } else if (state == GraspState::CLOSING_COMMAND &&
                    (time - fr_phase_start_time_).toSec() > kClosingCmdTimeout) {
@@ -108,24 +117,23 @@ namespace franka_kitting_controller {
 
     // Baseline should already be collected during BASELINE state.
     // Fallback: if not ready (e.g., CLOSING sent without prior BASELINE), collect now.
-    if (!cd_baseline_ready_) {
-      ROS_WARN_THROTTLE(2.0, "  [CONTACT]  Baseline not ready — collecting during CLOSING (fallback)");
-      cd_baseline_sum_ += tau_ext_norm;
-      cd_baseline_count_++;
-      if (cd_baseline_count_ >= kContactBaselineSamples) {
-        cd_baseline_ = cd_baseline_sum_ / cd_baseline_count_;
+    if (!sms_detector_.baseline_ready()) {
+      sms_detector_.update(tau_ext_norm);
+      if (sms_detector_.baseline_ready() && !cd_baseline_ready_) {
         cd_baseline_ready_ = true;
-        ROS_INFO("  [CONTACT]  Baseline ready (fallback): tau_baseline=%.3f Nm  (from %d samples)",
-                cd_baseline_, cd_baseline_count_);
+        cd_baseline_ = sms_detector_.baseline().mean();
+        ROS_WARN("  [CONTACT]  SMS-CUSUM baseline ready (fallback): mu=%.3f Nm, sigma=%.4f Nm",
+                 sms_detector_.baseline().mean(), sms_detector_.baseline().sigma());
+        sms_detector_.enter_closing();
       }
       return;
     }
 
-    // Drop detection with debounce
-    double drop = cd_baseline_ - tau_ext_norm;
-    bool drop_detected = (drop > rt_contact_torque_thresh_);
+    // --- SMS-CUSUM contact detection (replaces fixed threshold + debounce) ---
+    auto result = sms_detector_.update(tau_ext_norm);
 
-    if (gripper_debounce_.check(drop_detected, time, rt_contact_debounce_time_)) {
+    if (result.detected &&
+        result.event.new_state == sms_cusum::GraspState::CONTACT) {
       contact_latched_ = true;
 
       // Publish CONTACT_CONFIRMED immediately at the point of detection.
@@ -133,14 +141,18 @@ namespace franka_kitting_controller {
       // It will be captured at the deferred CONTACT transition once the gripper has stopped.
       current_state_.store(GraspState::CONTACT_CONFIRMED, std::memory_order_relaxed);
       publishStateLabel("CONTACT_CONFIRMED");
-      logStateTransition("CONTACT_CONFIRMED", "Torque drop detected — gripper stopping");
+      logStateTransition("CONTACT_CONFIRMED", "SMS-CUSUM contact detected — gripper stopping");
 
       requestGripperStop("Contact");
 
-      ROS_INFO("  [CONTACT_CONFIRMED]  Torque drop detected: "
-              "tau_baseline=%.3f  tau=%.3f  drop=%.3f  thresh=%.3f  debounce=%.3fs  w=%.4f",
-              cd_baseline_, tau_ext_norm, drop, rt_contact_torque_thresh_,
-              rt_contact_debounce_time_, gripper_snapshot.width);
+      ROS_INFO("  [CONTACT_CONFIRMED]  SMS-CUSUM detection: "
+              "S=%.3f  baseline=%.3f  sigma=%.4f  k_eff=%.4f  tau=%.3f  w=%.4f",
+              result.event.cusum_statistic,
+              result.event.baseline_mean,
+              result.event.baseline_sigma,
+              result.event.k_effective,
+              tau_ext_norm,
+              gripper_snapshot.width);
     }
   }
 

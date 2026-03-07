@@ -80,6 +80,7 @@ target_include_directories(kitting_state_controller SYSTEM PUBLIC
 )
 target_include_directories(kitting_state_controller PUBLIC
   include
+  ${CMAKE_CURRENT_SOURCE_DIR}/../sms_cusum/cpp/include
 )
 
 ## Logger executable (standalone node)
