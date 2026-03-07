@@ -108,7 +108,7 @@ struct UpdateResult {
  *   FREE_MOTION -> CLOSING -> CONTACT
  */
 struct SMSCusumConfig {
-    CusumStageConfig contact_stage   = {0.02, 0.3, 5, 2.0};
+    CusumStageConfig contact_stage   = {0.02, 0.28, 3, 1.5};
     int32_t baseline_init_samples    = 50;
     double  baseline_alpha           = 0.01;
     double  sample_rate              = 250.0;

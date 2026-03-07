@@ -4,11 +4,11 @@ kitting_state_controller:
   publish_rate: 250.0 # [Hz]
 
   # Closing parameters
-  closing_width: 0.01 # [m] Default width for MoveAction in CLOSING
+  closing_width: 0.015 # [m] Default width for MoveAction in CLOSING (>0.01 to avoid finger-to-finger contact)
   closing_speed: 0.05 # [m/s] Default speed for MoveAction in CLOSING
 
   # Contact detection: SMS-CUSUM (noise-adaptive, no manual threshold tuning)
-  # Uses built-in optimized parameters: k_min=0.02, h=0.3, debounce=5 samples, noise_mult=2.0
+  # Uses built-in optimized parameters: k_min=0.02, h=0.28, debounce=3 samples, noise_mult=1.5
   # Baseline: 50 samples (0.2s at 250Hz), EMA alpha=0.01
 
   # Grasping parameters (overridable per-command via KittingGripperCommand)

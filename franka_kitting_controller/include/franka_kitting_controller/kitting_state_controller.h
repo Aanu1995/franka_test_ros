@@ -173,7 +173,7 @@ namespace franka_kitting_controller {
     realtime_tools::RealtimeBuffer<GripperData> gripper_data_buf_;
 
     // --- Grasp: Gripper default parameters (overridable per-command) ---
-    double closing_width_{0.01};
+    double closing_width_{0.015};
     double closing_speed_{0.05};
 
     // State machine — cross-thread synchronization
@@ -196,9 +196,9 @@ namespace franka_kitting_controller {
     std::atomic<double> contact_width_{0.0};  // [m] Width at contact — written by read thread after stop()
 
     // RT-local copies of CLOSING params (snapshotted at CLOSING_COMMAND entry)
-    double closing_w_cmd_{0.01};     // Resolved target width for active MoveAction
+    double closing_w_cmd_{0.015};    // Resolved target width for active MoveAction
     double closing_v_cmd_{0.05};     // Resolved speed for active MoveAction
-    double rt_closing_w_cmd_{0.01};  // Realtime-local copy
+    double rt_closing_w_cmd_{0.015}; // Realtime-local copy
     double rt_closing_v_cmd_{0.05};  // Realtime-local copy
     bool closing_cmd_seen_executing_{false};  ///< True once move() seen running during CLOSING
     bool closing_command_entered_{false};     ///< First-tick flag: ensures CLOSING_COMMAND label is published before transition
