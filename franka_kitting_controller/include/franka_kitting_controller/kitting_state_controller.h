@@ -242,7 +242,7 @@ namespace franka_kitting_controller {
     double fr_epsilon_{0.008};         // Single epsilon (inner == outer)
     double fr_slip_drop_thresh_{0.15};       // DF_TH: max allowed relative support force drop (15% = fail)
     double fr_slip_width_thresh_{0.0005};    // [m] W_TH: max allowed jaw widening P95-P5 (0.5mm = fail)
-    double fr_load_transfer_min_{2.0};       // [N] Min floor for load transfer threshold
+    double fr_load_transfer_min_{1.5};       // [N] Min floor for load transfer threshold
 
     // RT-local copies of force ramp params (snapshotted at GRASPING entry)
     double rt_fr_f_min_{3.0};
@@ -255,7 +255,7 @@ namespace franka_kitting_controller {
     double rt_fr_epsilon_{0.008};
     double rt_fr_slip_drop_thresh_{0.15};
     double rt_fr_slip_width_thresh_{0.0005};
-    double rt_fr_load_transfer_min_{2.0};
+    double rt_fr_load_transfer_min_{1.5};
 
     // Staging variables (subscriber → RT via state_changed_ release/acquire)
     double staging_fr_f_min_{3.0};
@@ -268,7 +268,7 @@ namespace franka_kitting_controller {
     double staging_fr_epsilon_{0.008};
     double staging_fr_slip_drop_thresh_{0.15};
     double staging_fr_slip_width_thresh_{0.0005};
-    double staging_fr_load_transfer_min_{2.0};
+    double staging_fr_load_transfer_min_{1.5};
 
     // --- Force ramp: runtime state (Realtime-thread owned) ---
     double fr_f_current_{0.0};           // Current grasp force [N]

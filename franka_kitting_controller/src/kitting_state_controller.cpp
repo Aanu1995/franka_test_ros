@@ -198,7 +198,7 @@ namespace franka_kitting_controller {
     node_handle.param("epsilon", fr_epsilon_, 0.008);
     node_handle.param("slip_drop_thresh", fr_slip_drop_thresh_, 0.15);
     node_handle.param("slip_width_thresh", fr_slip_width_thresh_, 0.0005);
-    node_handle.param("load_transfer_min", fr_load_transfer_min_, 2.0);
+    node_handle.param("load_transfer_min", fr_load_transfer_min_, 1.5);
 
     // Validate force ramp parameters
     if (fr_f_min_ <= 0.0) {

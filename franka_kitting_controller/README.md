@@ -342,7 +342,7 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
     fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
     fr_uplift_distance: 0.010, fr_lift_speed: 0.01, fr_uplift_hold: 1.0, \
     fr_slip_drop_thresh: 0.15, fr_slip_width_thresh: 0.0005, \
-    fr_load_transfer_min: 2.0}" --once
+    fr_load_transfer_min: 1.5}" --once
 
 # Stop recording
 rostopic pub /kitting_controller/record_control std_msgs/String "data: 'STOP'" --once
@@ -370,7 +370,7 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
     fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
     fr_uplift_distance: 0.010, fr_lift_speed: 0.01, fr_uplift_hold: 1.0, \
     fr_slip_drop_thresh: 0.15, fr_slip_width_thresh: 0.0005, \
-    fr_load_transfer_min: 2.0}" --once
+    fr_load_transfer_min: 1.5}" --once
 ```
 
 ## Gripper Action Servers
@@ -507,7 +507,7 @@ The load transfer gate confirms the object is actually supported by the gripper 
   Load transfer confirmed if:  deltaF > max(3 * sigma_pre, load_transfer_min)
 ```
 
-The `3 * sigma_pre` threshold adapts to sensor noise. The `load_transfer_min` floor (default 2.0 N, configurable) prevents declaring load transfer from noise alone. Lower this for light objects (e.g., 0.5 N for a ~51 g object).
+The `3 * sigma_pre` threshold adapts to sensor noise. The `load_transfer_min` floor (default 1.5 N, configurable) prevents declaring load transfer from noise alone. Lower this for light objects (e.g., 0.5 N for a ~51 g object).
 
 ### Gate 2: Support Drop Check
 
@@ -549,7 +549,7 @@ This rigid AND-gating approach ensures that: (1) the object was actually picked 
 | ----------------------- | -------- | ------------------------------------------------------------------ |
 | `slip_drop_thresh`      | 0.15     | DF_TH: maximum allowed relative support force drop (15% = fail)    |
 | `slip_width_thresh`     | 0.0005 m | W_TH: maximum allowed jaw widening P95-P5 [m] (0.5 mm = fail)     |
-| `load_transfer_min`     | 2.0 N    | Floor for load transfer threshold (lower for light objects)        |
+| `load_transfer_min`     | 1.5 N    | Floor for load transfer threshold (lower for light objects)        |
 
 ### Example Log Output
 
@@ -709,7 +709,7 @@ The **velocity profile** (first derivative) is:
 | `uplift_hold`              | double | `1.0`   | Hold time: early (first half) + late (second half) windows [s] (min 0.5, max 8.0). Also determines W_pre = uplift_hold/2 and settling time = uplift_hold/2 |
 | `slip_drop_thresh`         | double | `0.15`   | DF_TH: max allowed relative support force drop (15% = fail)         |
 | `slip_width_thresh`        | double | `0.0005` | W_TH: max allowed jaw widening P95-P5 [m] (0.5 mm = fail)          |
-| `load_transfer_min`        | double | `2.0`    | Floor for load transfer threshold [N] (lower for light objects)     |
+| `load_transfer_min`        | double | `1.5`    | Floor for load transfer threshold [N] (lower for light objects)     |
 | `require_logger`           | bool   | `false` | Gate commands behind logger readiness (set true when `record:=true`)|
 
 Gripper and GRASPING parameters are **defaults**. They can be overridden per-command by setting non-zero values in the `KittingGripperCommand` message published on `/kitting_controller/state_cmd`.
@@ -814,7 +814,7 @@ Per-object command published on `/kitting_controller/state_cmd`. Any float64 par
 | `fr_epsilon`           | float64 | Epsilon for ramp GraspAction, inner and outer [m] (0 = use default 0.008)          |
 | `fr_slip_drop_thresh`     | float64 | DF_TH: max allowed relative support force drop (0 = use default 0.15)           |
 | `fr_slip_width_thresh`    | float64 | W_TH: max allowed jaw widening P95-P5 [m] (0 = use default 0.0005)             |
-| `fr_load_transfer_min`    | float64 | Floor for load transfer threshold [N] (0 = use default 2.0)                     |
+| `fr_load_transfer_min`    | float64 | Floor for load transfer threshold [N] (0 = use default 1.5)                     |
 | `auto_delay`           | float64 | Delay between auto transitions [s] (0 = default 5.0). Only used by `AUTO` command  |
 
 Only the parameters relevant to the command are used:
