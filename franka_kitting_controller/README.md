@@ -681,7 +681,7 @@ The **velocity profile** (first derivative) is:
 | Maximum uplift distance | `d ≤ 0.02 m`      | Hard clamp — any `d > 20 mm` is clamped with a warning                     |
 | Minimum lift speed      | `v ≥ 0.001 m/s`   | Hard clamp — prevents divide-by-zero in UPLIFT/DOWNLIFT duration calc      |
 | Minimum uplift hold     | `t ≥ 0.5 s`       | Hard clamp — ensures W_pre ≥ 0.25 s for reliable pre-lift baseline         |
-| Maximum uplift hold     | `t ≤ 8.0 s`       | Hard clamp — prevents width sample vector from exceeding pre-allocated capacity |
+| Maximum uplift hold     | `t ≤ 120.0 s`     | Hard clamp — prevents width sample vector from exceeding pre-allocated capacity |
 | Precondition            | —                 | GRASPING requires CONTACT state                                           |
 | BASELINE interruption   | —                 | BASELINE clears active trajectories, returns to passthrough (with warning) |
 | CLOSING_COMMAND timeout | 10 s              | Transitions to FAILED if move command never starts executing               |
@@ -706,7 +706,7 @@ The **velocity profile** (first derivative) is:
 | `f_max`                    | double | `30.0`  | Maximum force — FAILED if exceeded [N]                              |
 | `uplift_distance`          | double | `0.010` | Micro-uplift distance per iteration [m] (max 0.02)                  |
 | `lift_speed`               | double | `0.01`  | Lift speed for UPLIFT and DOWNLIFT [m/s] (min 0.001)                |
-| `uplift_hold`              | double | `1.0`   | Hold time: early (first half) + late (second half) windows [s] (min 0.5, max 8.0). Also determines W_pre = uplift_hold/2 and settling time = uplift_hold/2 |
+| `uplift_hold`              | double | `1.0`   | Hold time: early (first half) + late (second half) windows [s] (min 0.5, max 120.0). Also determines W_pre = uplift_hold/2 and settling time = uplift_hold/2 |
 | `slip_drop_thresh`         | double | `0.15`   | DF_TH: max allowed relative support force drop (15% = fail)         |
 | `slip_width_thresh`        | double | `0.0005` | W_TH: max allowed jaw widening P95-P5 [m] (0.5 mm = fail)          |
 | `load_transfer_min`        | double | `1.5`    | Floor for load transfer threshold [N] (lower for light objects)     |
@@ -809,7 +809,7 @@ Per-object command published on `/kitting_controller/state_cmd`. Any float64 par
 | `f_max`                | float64 | Maximum force — FAILED if exceeded [N] (0 = use default 30.0)                      |
 | `fr_uplift_distance`   | float64 | Micro-uplift distance per iteration [m] (0 = use default 0.010, max 0.02)          |
 | `fr_lift_speed`        | float64 | Lift speed for UPLIFT and DOWNLIFT [m/s] (0 = use default 0.01, min 0.001)         |
-| `fr_uplift_hold`       | float64 | Hold time at top for evaluation [s] (0 = use default 1.0, min 0.5, max 8.0)        |
+| `fr_uplift_hold`       | float64 | Hold time at top for evaluation [s] (0 = use default 1.0, min 0.5, max 120.0)      |
 | `fr_grasp_speed`       | float64 | Gripper speed for ramp GraspAction [m/s] (0 = use default 0.02)                    |
 | `fr_epsilon`           | float64 | Epsilon for ramp GraspAction, inner and outer [m] (0 = use default 0.008)          |
 | `fr_slip_drop_thresh`     | float64 | DF_TH: max allowed relative support force drop (0 = use default 0.15)           |
@@ -871,7 +871,7 @@ The `franka_gripper` package is used only for action type definitions — `frank
 ## Real-Time Safety
 
 - Uses `realtime_tools::RealtimePublisher` with non-blocking `trylock()`
-- No dynamic memory allocation in `update()` — width sample vector pre-allocated in `starting()` with capacity for 8 s at 250 Hz (`kMaxWidthSamples = 2000`)
+- No dynamic memory allocation in `update()` — width sample vector pre-allocated in `starting()` with capacity for 120 s at 250 Hz (`kMaxWidthSamples = 30000`)
 - No blocking operations in `update()`
 - Model queries are only called at the publish rate, not every control tick
 - Contact detection (SMS-CUSUM) uses O(1) per sample, zero dynamic allocation, only scalar arithmetic
@@ -943,7 +943,7 @@ The Grasp logger is written in C++ using the `rosbag::Bag` API directly and `top
 - UPLIFT/DOWNLIFT orientation remains unchanged throughout the motion
 - Uplift distance is clamped to 20 mm maximum (with warning)
 - Lift speed is clamped to minimum `kMinLiftSpeed` (0.001 m/s) — prevents divide-by-zero in UPLIFT/DOWNLIFT duration calculation
-- Uplift hold is clamped to maximum `kMaxUpliftHold` (8.0 s) — prevents width sample vector from exceeding pre-allocated capacity
+- Uplift hold is clamped to maximum `kMaxUpliftHold` (120.0 s) — prevents width sample vector from exceeding pre-allocated capacity
 - SUCCESS keeps arm elevated for pick-and-place; accumulated uplift corrected automatically on next BASELINE
 - BASELINE during active force ramp clears trajectories and returns to passthrough
 - Per-command force ramp parameters override YAML defaults when non-zero

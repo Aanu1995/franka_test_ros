@@ -22,7 +22,7 @@ kitting_state_controller:
   f_max: 30.0 # [N] Maximum force (FAILED if exceeded)
   uplift_distance: 0.010 # [m] Micro-uplift distance per iteration
   lift_speed: 0.01 # [m/s] Lift speed for both UPLIFT and DOWNLIFT (clamped to min 0.001)
-  uplift_hold: 1.0  # [s] Hold at top; early (0–0.5s) + late (0.5–1.0s) windows (clamped to 0.5–8.0)
+  uplift_hold: 1.0  # [s] Hold at top; early (0–0.5s) + late (0.5–1.0s) windows (clamped to 0.5–120.0)
   slip_drop_thresh: 0.15    # DF_TH: max allowed relative support force drop (15% = fail)
   slip_width_thresh: 0.0005 # [m] W_TH: max allowed jaw widening P95-P5 (0.5mm = fail)
   load_transfer_min: 1.5    # [N] Minimum load transfer threshold (lighter objects need lower value)

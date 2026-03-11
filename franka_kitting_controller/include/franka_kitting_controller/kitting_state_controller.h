@@ -302,10 +302,10 @@ namespace franka_kitting_controller {
     static constexpr double kMaxClosingSpeed{0.10};    // [m/s] Hard cap on closing speed
     static constexpr double kMaxUpliftDistance{0.02};   // [m] Safety cap on uplift distance
     static constexpr double kMinUpliftHold{0.5};        // [s] Minimum uplift hold (ensures W_pre ≥ 0.25s)
-    static constexpr double kMaxUpliftHold{8.0};         // [s] Maximum uplift hold (kMaxWidthSamples / 250Hz)
+    static constexpr double kMaxUpliftHold{120.0};        // [s] Maximum uplift hold (kMaxWidthSamples / 250Hz)
     static constexpr double kMinLiftSpeed{0.001};        // [m/s] Minimum lift speed (prevents div-by-zero in duration calc)
     static constexpr int kWidthSamplesPerSec{250};        // Width sample rate [Hz] — for reserve sizing
-    static constexpr int kMaxWidthSamples{2000};           // Pre-allocated capacity (8s at 250Hz)
+    static constexpr int kMaxWidthSamples{30000};          // Pre-allocated capacity (120s at 250Hz)
     static constexpr int kActionTimeoutSec{30};              // Action server command timeout [s]
 
     // --- Force ramp internal timing constants ---
