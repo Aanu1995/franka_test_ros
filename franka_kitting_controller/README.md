@@ -38,6 +38,29 @@ catkin_make
 catkin build franka_kitting_controller
 ```
 
+## Testing
+
+Unit and state-machine tests use GTest (no ROS master or robot hardware required):
+
+```bash
+# Build and run tests
+catkin build franka_kitting_controller --catkin-make-args run_tests
+# or
+catkin_make run_tests_franka_kitting_controller
+
+# View results
+catkin_test_results build/franka_kitting_controller
+```
+
+**Test tiers:**
+
+| Tier | File | What's tested |
+|------|------|---------------|
+| 1 — Pure unit | `test/kitting_unit_test.cpp` | `arrayNorm`, `resolveParam`, `stateToString`, `isClosingPhase`, `isForceRampPhase` |
+| 2 — State machine | `test/kitting_state_machine_test.cpp` | All 6 tick functions, 3-gate slip detection (each gate individually), trajectory math (uplift/downlift cosine smoothing), force ramp retry cycle, constants consistency |
+
+Tests bypass `init()` (which requires a real `franka::Gripper`) using a friend-class test fixture with `MockModel` and real `franka_hw` handles backed by test data.
+
 ## Usage
 
 ### Prerequisites: Launch the robot

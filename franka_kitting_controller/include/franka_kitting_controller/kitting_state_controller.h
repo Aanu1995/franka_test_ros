@@ -469,6 +469,9 @@ namespace franka_kitting_controller {
     void tickSettling(const ros::Time& time, double tau_ext_norm,
                       double support_force,
                       const GripperData& gripper_snapshot);
+
+    // Test support
+    friend class KittingControllerTestFixture;
   };
 
 }  // namespace franka_kitting_controller

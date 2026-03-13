@@ -105,6 +105,34 @@ target_include_directories(kitting_logger PUBLIC
   include
 )
 
+## Tests
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(kitting_controller_test
+    test/main.cpp
+    test/kitting_unit_test.cpp
+    test/kitting_state_machine_test.cpp
+  )
+  add_dependencies(kitting_controller_test
+    ${${PROJECT_NAME}_EXPORTED_TARGETS}
+    ${catkin_EXPORTED_TARGETS}
+    ${PROJECT_NAME}_generate_messages_cpp
+  )
+  target_link_libraries(kitting_controller_test
+    kitting_state_controller
+    ${catkin_LIBRARIES}
+    ${Franka_LIBRARIES}
+    Threads::Threads
+  )
+  target_include_directories(kitting_controller_test SYSTEM PUBLIC
+    ${Franka_INCLUDE_DIRS}
+    ${catkin_INCLUDE_DIRS}
+  )
+  target_include_directories(kitting_controller_test PUBLIC
+    include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../sms_cusum/cpp/include
+  )
+endif()
+
 ## Installation
 install(TARGETS kitting_state_controller kitting_logger
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
