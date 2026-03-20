@@ -441,17 +441,35 @@ namespace franka_kitting_controller {
 
       ROS_INFO("  [BASELINE]  State machine reset for new trial");
 
-      // Correct accumulated uplift from previous SUCCESS (arm stayed elevated
-      // for pick-and-place; now returning to original height for next trial).
-      if (accumulated_uplift_ > 0.001) {
+      // --- Sequential baseline preparation: lower → open → collect ---
+      bool needs_downlift = (accumulated_uplift_ > 0.001);
+
+      // Step 1: Lower arm if elevated from previous SUCCESS
+      if (needs_downlift) {
         downlift_start_pose_ = cartesian_pose_handle_->getRobotState().O_T_EE_d;
         downlift_z_start_ = downlift_start_pose_[14];
         downlift_elapsed_ = 0.0;
         rt_downlift_distance_ = accumulated_uplift_;
         rt_downlift_duration_ = accumulated_uplift_ / fr_lift_speed_;
         downlift_active_.store(true, std::memory_order_relaxed);
-        ROS_INFO("  [BASELINE]  Correcting accumulated uplift: %.4f m", accumulated_uplift_);
+        ROS_INFO("  [BASELINE]  Step 1: Lowering arm (%.4f m, %.2f s)",
+                 accumulated_uplift_, rt_downlift_duration_);
         accumulated_uplift_ = 0.0;
+      }
+
+      // baseline_prep_done_ stays FALSE (set by handleBaselineCmd) if:
+      //   - arm needs lowering (downlift active), OR
+      //   - gripper needs opening (baseline_needs_open_)
+      // It is set TRUE only when both are complete.
+      // If neither is needed, mark prep done immediately.
+      if (!needs_downlift && !baseline_needs_open_) {
+        baseline_prep_done_.store(true, std::memory_order_relaxed);
+        ROS_INFO("  [BASELINE]  No prep needed — baseline collection starting");
+      } else {
+        ROS_INFO("  [BASELINE]  Prep: %s%s%s — baseline collection gated",
+                 needs_downlift ? "lowering" : "",
+                 (needs_downlift && baseline_needs_open_) ? " + " : "",
+                 baseline_needs_open_ ? "opening" : "");
       }
     }
 
@@ -520,6 +538,14 @@ namespace franka_kitting_controller {
         downlift_active_.store(false, std::memory_order_relaxed);
         ROS_INFO("KittingStateController: DOWNLIFT trajectory complete (%.3fs, %.4fm)",
                 rt_downlift_duration_, rt_downlift_distance_);
+
+        // Baseline prep: if we just finished the BASELINE downlift and no open needed,
+        // mark prep done now so baseline collection can start.
+        if (current_state_.load(std::memory_order_relaxed) == GraspState::BASELINE &&
+            !baseline_needs_open_) {
+          baseline_prep_done_.store(true, std::memory_order_release);
+          ROS_INFO("  [BASELINE]  Arm lowered — no open needed — baseline collection starting");
+        }
       }
     } else {
       // Passthrough: send current desired pose back as command (hold position).
@@ -613,13 +639,13 @@ namespace franka_kitting_controller {
 
       const GripperData gripper_snapshot = *gripper_data_buf_.readFromRT();
 
-      // SMS-CUSUM baseline collection (BASELINE state, skips during downlift correction
-      // and gripper open — ensures clean baseline with arm lowered and gripper fully open)
+      // SMS-CUSUM baseline collection (BASELINE state only, gated on baseline_prep_done_).
+      // baseline_prep_done_ is FALSE until: arm lowered AND gripper opened (if applicable).
+      // This ensures clean baseline with arm at rest and gripper fully open.
       {
         GraspState bl_state = current_state_.load(std::memory_order_relaxed);
         if (bl_state == GraspState::BASELINE &&
-            !downlift_active_.load(std::memory_order_relaxed) &&
-            !baseline_open_pending_.load(std::memory_order_relaxed)) {
+            baseline_prep_done_.load(std::memory_order_acquire)) {
           sms_detector_.update(tau_ext_norm);
 
           if (!cd_baseline_ready_ && sms_detector_.baseline_ready()) {
@@ -651,12 +677,15 @@ namespace franka_kitting_controller {
         if (state == GraspState::BASELINE) {
           if (cd_baseline_ready_) {
             ROS_INFO("  [SIGNAL]  BASELINE  |  tau_baseline=%.3f Nm  (ready)", cd_baseline_);
-          } else if (downlift_active_.load(std::memory_order_relaxed)) {
-            ROS_INFO("  [SIGNAL]  BASELINE  |  awaiting downlift correction");
-          } else if (baseline_open_pending_.load(std::memory_order_relaxed)) {
-            ROS_INFO("  [SIGNAL]  BASELINE  |  awaiting gripper open%s",
-                     baseline_open_dispatched_.load(std::memory_order_relaxed)
-                         ? " (in progress)" : " (queuing)");
+          } else if (!baseline_prep_done_.load(std::memory_order_relaxed)) {
+            // Prep still in progress — show which step
+            if (downlift_active_.load(std::memory_order_relaxed)) {
+              ROS_INFO("  [SIGNAL]  BASELINE  |  prep: lowering arm");
+            } else if (!baseline_open_dispatched_.load(std::memory_order_relaxed)) {
+              ROS_INFO("  [SIGNAL]  BASELINE  |  prep: queuing gripper open");
+            } else {
+              ROS_INFO("  [SIGNAL]  BASELINE  |  prep: gripper opening");
+            }
           } else {
             ROS_INFO("  [SIGNAL]  BASELINE  |  collecting: %d/%d samples  tau_ext_norm=%.3f",
                     sms_detector_.baseline().count(), sms_detector_.config().baseline_init_samples, tau_ext_norm);

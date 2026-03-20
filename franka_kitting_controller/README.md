@@ -152,7 +152,7 @@ Initial state after the controller is launched. No baseline collection, no conta
 
 Prepare for a new grasp trial. Published via `/kitting_controller/state_cmd` with `command: "BASELINE"`.
 
-- **Sequential preparation**: If the arm is elevated from a previous uplift, BASELINE first lowers the arm (cosine-smoothed downlift at `lift_speed`), then opens the gripper, then collects baseline data — in that order. Baseline collection is gated on both downlift and gripper open completion to ensure clean sensor readings
+- **Sequential preparation**: If the arm is elevated from a previous uplift, BASELINE first lowers the arm (cosine-smoothed downlift at `lift_speed`), then opens the gripper, then collects baseline data — strictly sequential. A single `baseline_prep_done` flag gates all baseline collection: it starts `false` when BASELINE is entered and becomes `true` only after lowering completes AND gripper open completes (if applicable). No baseline samples are collected until both steps finish
 - **Gripper open**: Opens automatically when `open_gripper: true` OR when `record:=true` (ensures clean baseline). Opens to `open_width` (or `max_width` from firmware if not specified) at 0.1 m/s. The open is deferred until any downlift correction completes
 - Resets all state machine variables (contact latch, force ramp, trajectories) for a fresh grasp cycle
 - BASELINE is a one-shot state — publish once from START to begin the grasp sequence

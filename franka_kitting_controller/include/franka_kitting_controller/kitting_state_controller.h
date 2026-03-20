@@ -172,10 +172,16 @@ namespace franka_kitting_controller {
     // Gripper data buffer (read thread → realtime update)
     realtime_tools::RealtimeBuffer<GripperData> gripper_data_buf_;
 
-    // --- Baseline preparation: deferred open (lower first, then open, then collect) ---
-    std::atomic<bool> baseline_open_pending_{false};    // Open needed before baseline collection
-    std::atomic<bool> baseline_open_dispatched_{false};  // Open command has been queued by read thread
-    bool baseline_open_seen_executing_{false};           // cmd_executing_ seen true after dispatch (read thread)
+    // --- Baseline preparation: sequential lower → open → collect ---
+    // baseline_prep_done_ is the SOLE gate for baseline collection.
+    // It starts FALSE when BASELINE is entered and becomes TRUE only after:
+    //   1. Downlift completes (if arm was elevated)
+    //   2. Gripper open completes (if open_gripper or record:=true)
+    // The RT thread sets it when no prep is needed or when all prep finishes.
+    std::atomic<bool> baseline_prep_done_{true};         // FALSE = prep in progress, baseline gated
+    bool baseline_needs_open_{false};                    // Open requested (subscriber thread → RT thread)
+    std::atomic<bool> baseline_open_dispatched_{false};  // Open command queued by read thread
+    bool baseline_open_seen_executing_{false};           // cmd_executing_ went true after dispatch (read thread)
     double baseline_open_width_{0.0};                    // Width to open to [m]
 
     // --- Grasp: Gripper default parameters (overridable per-command) ---

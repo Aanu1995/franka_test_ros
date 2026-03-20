@@ -83,18 +83,18 @@ namespace franka_kitting_controller {
       const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg) {
     // Determine if gripper open is needed before baseline collection.
     // When require_logger_ (record:=true), always open to ensure clean baseline.
-    bool need_open = msg->open_gripper || require_logger_;
+    baseline_needs_open_ = msg->open_gripper || require_logger_;
 
-    if (need_open) {
+    if (baseline_needs_open_) {
       baseline_open_width_ = resolveParam(msg->open_width,
                                           gripper_data_buf_.readFromNonRT()->max_width);
-      baseline_open_dispatched_.store(false, std::memory_order_relaxed);
-      baseline_open_pending_.store(true, std::memory_order_release);
-      ROS_INFO("  [BASELINE]  Gripper open deferred: width=%.4f (awaiting downlift completion)",
-               baseline_open_width_);
-    } else {
-      baseline_open_pending_.store(false, std::memory_order_relaxed);
+      ROS_INFO("  [BASELINE]  Gripper open deferred: width=%.4f", baseline_open_width_);
     }
+
+    // baseline_prep_done_ is set FALSE here; it will be set TRUE by the RT thread
+    // only after downlift completes AND gripper open completes (if needed).
+    baseline_prep_done_.store(false, std::memory_order_release);
+    baseline_open_dispatched_.store(false, std::memory_order_relaxed);
 
     pending_state_.store(GraspState::BASELINE, std::memory_order_relaxed);
     state_changed_.store(true, std::memory_order_release);
