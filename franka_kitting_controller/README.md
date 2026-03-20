@@ -207,7 +207,7 @@ Initiate automated force ramp. Published via `/kitting_controller/state_cmd` wit
 
 Validate grasp robustness under load. **Auto-triggered** by the controller after GRASPING completes — not a user command.
 
-- Controller displaces end-effector upward by `fr_uplift_distance` (default 10 mm, max 20 mm)
+- Controller displaces end-effector upward by `fr_uplift_distance` (default 10 mm, max 300 mm)
 - Duration computed from distance and speed: `T = fr_uplift_distance / fr_lift_speed`
 - Cosine-smoothed trajectory `s = 0.5(1 - cos(π · s_raw))` ensures zero velocity at start and end
 - Only z-translation of `O_T_EE_d[14]` is modified — orientation and x/y unchanged
@@ -639,7 +639,7 @@ The UPLIFT and DOWNLIFT states execute smooth Cartesian micro-lifts internally u
 
 | Symbol     | Name                      | Unit | Default  | Description                                                                |
 | ---------- | ------------------------- | ---- | -------- | -------------------------------------------------------------------------- |
-| `d`        | Lift distance             | m    | 0.010    | Total displacement along the z-axis (max 0.02)                             |
+| `d`        | Lift distance             | m    | 0.010    | Total displacement along the z-axis (max 0.3)                              |
 | `v_lift`   | Lift speed                | m/s  | 0.01     | Speed for both UPLIFT and DOWNLIFT (min 0.001)                             |
 | `T`        | Lift duration             | s    | computed | `T = d / v_lift` (computed from distance and speed)                        |
 | `t`        | Elapsed time              | s    | —        | Time since lift started, incremented by `Δt` (control period) each tick    |
@@ -701,7 +701,7 @@ The **velocity profile** (first derivative) is:
 | Constraint              | Symbol / Value    | Description                                                                |
 | ----------------------- | ----------------- | -------------------------------------------------------------------------- |
 | Maximum closing speed   | `v ≤ 0.10 m/s`    | Hard clamp — speeds above 0.10 m/s are clamped with a warning              |
-| Maximum uplift distance | `d ≤ 0.02 m`      | Hard clamp — any `d > 20 mm` is clamped with a warning                     |
+| Maximum uplift distance | `d ≤ 0.3 m`       | Hard clamp — any `d > 300 mm` is clamped with a warning                    |
 | Minimum lift speed      | `v ≥ 0.001 m/s`   | Hard clamp — prevents divide-by-zero in UPLIFT/DOWNLIFT duration calc      |
 | Minimum uplift hold     | `t ≥ 0.5 s`       | Hard clamp — ensures W_pre ≥ 0.25 s for reliable pre-lift baseline         |
 | Maximum uplift hold     | `t ≤ 120.0 s`     | Hard clamp — prevents width sample vector from exceeding pre-allocated capacity |
@@ -727,7 +727,7 @@ The **velocity profile** (first derivative) is:
 | `f_min`                    | double | `3.0`   | Starting grasp force [N]                                            |
 | `f_step`                   | double | `3.0`   | Force increment per iteration [N]                                   |
 | `f_max`                    | double | `30.0`  | Maximum force — FAILED if exceeded [N]                              |
-| `uplift_distance`          | double | `0.010` | Micro-uplift distance per iteration [m] (max 0.02)                  |
+| `uplift_distance`          | double | `0.010` | Micro-uplift distance per iteration [m] (max 0.3)                   |
 | `lift_speed`               | double | `0.01`  | Lift speed for UPLIFT and DOWNLIFT [m/s] (min 0.001)                |
 | `uplift_hold`              | double | `1.0`   | Hold time: early (first half) + late (second half) windows [s] (min 0.5, max 120.0). Also determines W_pre = uplift_hold/2 and settling time = uplift_hold/2 |
 | `slip_drop_thresh`         | double | `0.15`   | DF_TH: max allowed relative support force drop (15% = fail)         |
@@ -830,7 +830,7 @@ Per-object command published on `/kitting_controller/state_cmd`. Any float64 par
 | `f_min`                | float64 | Starting grasp force [N] (0 = use default 3.0)                                     |
 | `f_step`               | float64 | Force increment per iteration [N] (0 = use default 3.0)                            |
 | `f_max`                | float64 | Maximum force — FAILED if exceeded [N] (0 = use default 30.0)                      |
-| `fr_uplift_distance`   | float64 | Micro-uplift distance per iteration [m] (0 = use default 0.010, max 0.02)          |
+| `fr_uplift_distance`   | float64 | Micro-uplift distance per iteration [m] (0 = use default 0.010, max 0.3)           |
 | `fr_lift_speed`        | float64 | Lift speed for UPLIFT and DOWNLIFT [m/s] (0 = use default 0.01, min 0.001)         |
 | `fr_uplift_hold`       | float64 | Hold time at top for evaluation [s] (0 = use default 1.0, min 0.5, max 120.0)      |
 | `fr_grasp_speed`       | float64 | Gripper speed for ramp GraspAction [m/s] (0 = use default 0.02)                    |
@@ -964,7 +964,7 @@ The Grasp logger is written in C++ using the `rosbag::Bag` API directly and `top
 - GRASPING timeout sends `stop_requested_` to cancel the in-flight gripper command — prevents stale commands from blocking future operations
 - UPLIFT and DOWNLIFT trajectories use cosine smoothing with duration computed from distance/speed
 - UPLIFT/DOWNLIFT orientation remains unchanged throughout the motion
-- Uplift distance is clamped to 20 mm maximum (with warning)
+- Uplift distance is clamped to 300 mm maximum (with warning)
 - Lift speed is clamped to minimum `kMinLiftSpeed` (0.001 m/s) — prevents divide-by-zero in UPLIFT/DOWNLIFT duration calculation
 - Uplift hold is clamped to maximum `kMaxUpliftHold` (120.0 s) — prevents width sample vector from exceeding pre-allocated capacity
 - SUCCESS keeps arm elevated for pick-and-place; accumulated uplift corrected automatically on next BASELINE
