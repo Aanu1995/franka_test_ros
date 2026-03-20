@@ -215,10 +215,10 @@ namespace franka_kitting_controller {
     bool closing_cmd_seen_executing_{false};  ///< True once move() seen running during CLOSING
     bool closing_command_entered_{false};     ///< First-tick flag: ensures CLOSING_COMMAND label is published before transition
 
-    // Contact detection runtime state (RT-thread owned, kept for signal logging compatibility)
+    // Contact detection runtime state (RT-thread owned, read by timer thread via AUTO polling)
     int    cd_baseline_count_{0};
     double cd_baseline_{0.0};
-    bool   cd_baseline_ready_{false};
+    std::atomic<bool> cd_baseline_ready_{false};  // Atomic: written by RT, read by AUTO poll timer
 
     // Slow-rate logger for contact signal monitoring (2 Hz — readable in terminal)
     franka_hw::TriggerRate signal_log_trigger_{2.0};
@@ -396,6 +396,9 @@ namespace franka_kitting_controller {
     }
 
     /// Resolve a per-command parameter: use msg_value if positive, else default_value.
+    /// Convention: ROS message float64 fields default to 0.0, which means "use YAML default".
+    /// Any positive value overrides the YAML default. This is safe because all gripper
+    /// parameters (widths, speeds, forces, thresholds) are strictly positive in valid usage.
     static inline double resolveParam(double msg_value, double default_value) {
       return (msg_value > 0.0) ? msg_value : default_value;
     }
@@ -422,12 +425,14 @@ namespace franka_kitting_controller {
     std::atomic<bool> auto_mode_{false};  // Accessed from subscriber + timer threads
     ros::NodeHandle auto_nh_;
     ros::Timer auto_delay_timer_;
+    ros::Timer auto_baseline_poll_timer_;
     ros::Timer auto_contact_poll_timer_;
     double auto_delay_{5.0};
     franka_kitting_controller::KittingGripperCommand auto_cmd_;
 
     void handleAutoCmd(const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg);
     void cancelAutoMode();
+    void autoBaselinePollCallback(const ros::TimerEvent&);
     void autoClosingCallback(const ros::TimerEvent&);
     void autoContactPollCallback(const ros::TimerEvent&);
     void autoGraspingCallback(const ros::TimerEvent&);

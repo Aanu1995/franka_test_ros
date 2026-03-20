@@ -171,7 +171,7 @@ class KittingControllerTestFixture : public ::testing::Test {
 
     // Pre-allocate width samples vector (mimics starting())
     controller_.fr_width_samples_.reserve(
-        KittingStateController::kMaxWidthSamples);
+        KittingStateController::kMaxWidthSamples + 1);
   }
 
   // --- Accessor / mutator helpers ---

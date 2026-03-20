@@ -231,11 +231,41 @@ namespace franka_kitting_controller {
 
     handleBaselineCmd(msg);
 
-    auto_delay_timer_ = auto_nh_.createTimer(
-        ros::Duration(auto_delay_),
-        &KittingStateController::autoClosingCallback, this, /*oneshot=*/true);
+    // Poll for baseline readiness instead of using a fixed timer.
+    // The prep sequence (lower → open → collect) can take variable time,
+    // so we must wait until baseline_prep_done_ AND cd_baseline_ready_
+    // before advancing to CLOSING.
+    auto_baseline_poll_timer_ = auto_nh_.createTimer(
+        ros::Duration(0.1),
+        &KittingStateController::autoBaselinePollCallback, this);
 
-    ROS_INFO("KittingStateController: AUTO mode started (delay=%.1fs)", auto_delay_);
+    ROS_INFO("KittingStateController: AUTO mode started — polling for baseline ready");
+  }
+
+  void KittingStateController::autoBaselinePollCallback(const ros::TimerEvent&) {
+    if (!auto_mode_.load(std::memory_order_relaxed)) {
+      auto_baseline_poll_timer_.stop();
+      return;
+    }
+
+    auto state = current_state_.load(std::memory_order_relaxed);
+    if (state == GraspState::FAILED) {
+      auto_baseline_poll_timer_.stop();
+      auto_mode_.store(false, std::memory_order_relaxed);
+      ROS_INFO("KittingStateController: AUTO -> FAILED during BASELINE prep, auto mode ended");
+      return;
+    }
+
+    // Wait for prep done AND baseline data collected
+    if (baseline_prep_done_.load(std::memory_order_relaxed) &&
+        cd_baseline_ready_.load(std::memory_order_relaxed)) {
+      auto_baseline_poll_timer_.stop();
+      // Apply auto_delay AFTER baseline is ready
+      auto_delay_timer_ = auto_nh_.createTimer(
+          ros::Duration(auto_delay_),
+          &KittingStateController::autoClosingCallback, this, /*oneshot=*/true);
+      ROS_INFO("KittingStateController: AUTO -> BASELINE ready, CLOSING in %.1fs", auto_delay_);
+    }
   }
 
   void KittingStateController::autoClosingCallback(const ros::TimerEvent&) {
@@ -298,6 +328,7 @@ namespace franka_kitting_controller {
   void KittingStateController::cancelAutoMode() {
     if (!auto_mode_.load(std::memory_order_relaxed)) return;
     auto_delay_timer_.stop();
+    auto_baseline_poll_timer_.stop();
     auto_contact_poll_timer_.stop();
     auto_mode_.store(false, std::memory_order_relaxed);
     ROS_INFO("KittingStateController: AUTO mode cancelled");

@@ -116,7 +116,7 @@ Manual:          BASELINE ──> CLOSING_COMMAND ──> CLOSING ──> CONTAC
                  (user cmd)   (user cmd)          (auto)      (auto)                (auto)      (user cmd)
 
 Auto (single command):
-                 BASELINE ─(delay)─> CLOSING_COMMAND ──> CLOSING ─(wait)─> CONTACT_CONFIRMED ──> CONTACT ─(delay)─> GRASPING
+                 BASELINE ─(prep ready)─(delay)─> CLOSING_COMMAND ──> CLOSING ─(wait)─> CONTACT_CONFIRMED ──> CONTACT ─(delay)─> GRASPING
                                                                               │
 Force ramp (both modes):  ┌───────────────────────────────────────────────────┘
                           │
@@ -278,10 +278,12 @@ Terminal state indicating grasp failure. **Auto-triggered** on any of:
 
 A single command that runs the full grasp sequence automatically. Published via `/kitting_controller/state_cmd` with `command: "AUTO"`.
 
-- Executes BASELINE → *(delay)* → CLOSING_COMMAND → CLOSING → *(wait for CONTACT_CONFIRMED → CONTACT)* → *(delay)* → GRASPING automatically
-- `auto_delay` parameter controls the wait time between transitions (default 5.0 seconds)
+- Executes BASELINE → *(wait for prep + baseline ready)* → *(delay)* → CLOSING_COMMAND → CLOSING → *(wait for CONTACT_CONFIRMED → CONTACT)* → *(delay)* → GRASPING automatically
+- **Baseline-ready polling**: AUTO polls every 100 ms for `baseline_prep_done` AND `cd_baseline_ready` before starting the `auto_delay` countdown. This ensures the arm is lowered, gripper is opened (if applicable), and baseline data is fully collected before advancing to CLOSING — even when prep takes variable time
+- `auto_delay` parameter controls the wait time between transitions (default 5.0 seconds), applied *after* baseline is ready
 - All BASELINE, CLOSING, and GRASPING parameters are accepted and forwarded to each stage
 - The force ramp runs autonomously after GRASPING (same as manual mode)
+- If BASELINE prep results in FAILED, auto mode ends at FAILED
 - If CLOSING results in FAILED (no contact), auto mode ends at FAILED
 - Any manual command (`BASELINE`, `CLOSING`, `GRASPING`) published during auto mode cancels auto mode
 - Re-sending `AUTO` cancels the current auto sequence and starts a new one
@@ -379,7 +381,7 @@ rostopic pub /kitting_controller/record_control std_msgs/String "data: 'ABORT'" 
 
 ### Auto Mode
 
-A single `AUTO` command runs the full sequence: BASELINE → *(delay)* → CLOSING_COMMAND → CLOSING → *(wait for CONTACT_CONFIRMED → CONTACT)* → *(delay)* → GRASPING. All parameters from BASELINE, CLOSING, and GRASPING are accepted and forwarded to each stage.
+A single `AUTO` command runs the full sequence: BASELINE → *(wait for prep + baseline ready)* → *(delay)* → CLOSING_COMMAND → CLOSING → *(wait for CONTACT_CONFIRMED → CONTACT)* → *(delay)* → GRASPING. AUTO polls for baseline readiness before starting the `auto_delay` countdown, so the delay is always applied *after* arm lowering, gripper open, and baseline data collection complete. All parameters from BASELINE, CLOSING, and GRASPING are accepted and forwarded to each stage.
 
 ```bash
 # AUTO — run full sequence automatically (default 5s delay between transitions)
@@ -989,12 +991,13 @@ The Grasp logger is written in C++ using the `rosbag::Bag` API directly and `top
 - Move, grasp, homing actions routed through command thread to prevent concurrent libfranka calls
 - Action server commands time out after `kActionTimeoutSec` (30 s) — prevents indefinite blocking if the gripper firmware hangs
 - Action server shutdown before gripper thread shutdown prevents hanging futures on controller unload
-- AUTO command runs full grasp sequence: BASELINE → *(delay)* → CLOSING_COMMAND → CLOSING → *(wait for CONTACT_CONFIRMED → CONTACT)* → *(delay)* → GRASPING
-- AUTO mode uses configurable `auto_delay` (default 5.0 seconds) between BASELINE→CLOSING_COMMAND and CONTACT→GRASPING transitions
+- AUTO command runs full grasp sequence: BASELINE → *(wait for prep + baseline ready)* → *(delay)* → CLOSING_COMMAND → CLOSING → *(wait for CONTACT_CONFIRMED → CONTACT)* → *(delay)* → GRASPING
+- AUTO mode polls for baseline readiness (`baseline_prep_done_ && cd_baseline_ready_`) every 100 ms via `autoBaselinePollCallback` — only starts `auto_delay` countdown after baseline is fully ready, ensuring arm lowering, gripper open, and baseline data collection all complete before advancing
+- AUTO mode uses configurable `auto_delay` (default 5.0 seconds) between baseline-ready→CLOSING_COMMAND and CONTACT→GRASPING transitions
 - AUTO mode forwards all BASELINE, CLOSING, and GRASPING parameters from the single message to each stage
 - AUTO mode cancelled by any manual command (BASELINE, CLOSING, GRASPING) — allows user override at any point
 - `auto_mode_` flag is `std::atomic<bool>` — safe with `ros::AsyncSpinner` concurrent timer/subscriber callbacks
-- AUTO mode ends automatically on FAILED during CLOSING (no contact detected) or after GRASPING starts (force ramp is autonomous)
+- AUTO mode ends automatically on FAILED during BASELINE prep or CLOSING (no contact detected), or after GRASPING starts (force ramp is autonomous)
 - Auto mode timers run on ROS spinner thread (non-RT); reuse existing handle functions — no duplicated logic
 
 ## License

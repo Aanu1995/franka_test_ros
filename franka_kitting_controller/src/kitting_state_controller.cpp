@@ -384,7 +384,7 @@ namespace franka_kitting_controller {
 
     // Reset force ramp state
     resetForceRampState();
-    fr_width_samples_.reserve(kMaxWidthSamples);  // Pre-allocate to avoid RT allocation
+    fr_width_samples_.reserve(kMaxWidthSamples + 1);  // +1: edge case where push_back fires on the same tick as evaluation
     accumulated_uplift_ = 0.0;
 
     logStateTransition("START", "Controller running");
@@ -427,6 +427,8 @@ namespace franka_kitting_controller {
       deferred_grasp_pending_.store(false, std::memory_order_relaxed);
 
       contact_latched_ = false;
+      closing_command_entered_ = false;
+      closing_cmd_seen_executing_ = false;
       sms_detector_.reset();
       baseline_open_dispatched_.store(false, std::memory_order_relaxed);
       gripper_stop_sent_.store(false, std::memory_order_relaxed);
@@ -437,7 +439,7 @@ namespace franka_kitting_controller {
       resetForceRampState();
 
       cd_baseline_count_ = 0;
-      cd_baseline_ = 0.0;      cd_baseline_ready_ = false;
+      cd_baseline_ = 0.0;      cd_baseline_ready_.store(false, std::memory_order_relaxed);
 
       ROS_INFO("  [BASELINE]  State machine reset for new trial");
 
@@ -454,7 +456,9 @@ namespace franka_kitting_controller {
         downlift_active_.store(true, std::memory_order_relaxed);
         ROS_INFO("  [BASELINE]  Step 1: Lowering arm (%.4f m, %.2f s)",
                  accumulated_uplift_, rt_downlift_duration_);
-        accumulated_uplift_ = 0.0;
+        // Do NOT zero accumulated_uplift_ here — wait until downlift completes.
+        // If BASELINE is interrupted mid-downlift, the remaining uplift is preserved
+        // so the next BASELINE will continue lowering from the correct height.
       }
 
       // baseline_prep_done_ stays FALSE (set by handleBaselineCmd) if:
@@ -463,7 +467,7 @@ namespace franka_kitting_controller {
       // It is set TRUE only when both are complete.
       // If neither is needed, mark prep done immediately.
       if (!needs_downlift && !baseline_needs_open_) {
-        baseline_prep_done_.store(true, std::memory_order_relaxed);
+        baseline_prep_done_.store(true, std::memory_order_release);
         ROS_INFO("  [BASELINE]  No prep needed — baseline collection starting");
       } else {
         ROS_INFO("  [BASELINE]  Prep: %s%s%s — baseline collection gated",
@@ -490,7 +494,7 @@ namespace franka_kitting_controller {
               rt_closing_v_cmd_,
               cd_baseline_,
               sms_detector_.baseline_ready() ? sms_detector_.baseline().sigma() : 0.0,
-              cd_baseline_ready_ ? "" : " (NOT READY)");
+              cd_baseline_ready_.load(std::memory_order_relaxed) ? "" : " (NOT READY)");
     }
 
     // Handle GRASPING start: snapshot force ramp parameters, initialize force ramp state
@@ -538,6 +542,12 @@ namespace franka_kitting_controller {
         downlift_active_.store(false, std::memory_order_relaxed);
         ROS_INFO("KittingStateController: DOWNLIFT trajectory complete (%.3fs, %.4fm)",
                 rt_downlift_duration_, rt_downlift_distance_);
+
+        // Zero accumulated uplift now that the downlift has actually completed.
+        // This ensures interrupted BASELINE commands don't lose the uplift record.
+        if (current_state_.load(std::memory_order_relaxed) == GraspState::BASELINE) {
+          accumulated_uplift_ = 0.0;
+        }
 
         // Baseline prep: if we just finished the BASELINE downlift and no open needed,
         // mark prep done now so baseline collection can start.
@@ -648,8 +658,8 @@ namespace franka_kitting_controller {
             baseline_prep_done_.load(std::memory_order_acquire)) {
           sms_detector_.update(tau_ext_norm);
 
-          if (!cd_baseline_ready_ && sms_detector_.baseline_ready()) {
-            cd_baseline_ready_ = true;
+          if (!cd_baseline_ready_.load(std::memory_order_relaxed) && sms_detector_.baseline_ready()) {
+            cd_baseline_ready_.store(true, std::memory_order_relaxed);
             cd_baseline_ = sms_detector_.baseline().mean();
             cd_baseline_count_ = sms_detector_.config().baseline_init_samples;
             ROS_INFO("  [BASELINE]  SMS-CUSUM baseline ready: mu=%.3f Nm, sigma=%.4f Nm  "
@@ -675,7 +685,7 @@ namespace franka_kitting_controller {
       const GraspState state = current_state_.load(std::memory_order_relaxed);
       if (signal_log_trigger_()) {
         if (state == GraspState::BASELINE) {
-          if (cd_baseline_ready_) {
+          if (cd_baseline_ready_.load(std::memory_order_relaxed)) {
             ROS_INFO("  [SIGNAL]  BASELINE  |  tau_baseline=%.3f Nm  (ready)", cd_baseline_);
           } else if (!baseline_prep_done_.load(std::memory_order_relaxed)) {
             // Prep still in progress — show which step
@@ -696,7 +706,7 @@ namespace franka_kitting_controller {
                   stateToString(state), tau_ext_norm, cd_baseline_,
                   sms_detector_.contact_cusum().statistic(),
                   sms_detector_.contact_cusum().k_effective(),
-                  cd_baseline_ready_ ? "active" : "collecting");
+                  cd_baseline_ready_.load(std::memory_order_relaxed) ? "active" : "collecting");
         } else if (isForceRampPhase(state)) {
           ROS_INFO("  [SIGNAL]  %s  |  F=%.1f  iter=%d  Fn=%.2f",
                   stateToString(state), fr_f_current_, fr_iteration_,

@@ -55,7 +55,9 @@ namespace franka_kitting_controller {
         // gripper_stopped_, so the RT thread always sees a fresh width.
         if (width_capture_pending_.load(std::memory_order_relaxed)) {
           contact_width_.store(gs.width, std::memory_order_relaxed);
-          gripper_stopped_.store(true, std::memory_order_relaxed);
+          // Release: ensures contact_width_ store is visible to the RT thread
+          // before it observes gripper_stopped_ == true (loaded with acquire).
+          gripper_stopped_.store(true, std::memory_order_release);
           width_capture_pending_.store(false, std::memory_order_relaxed);
           ROS_INFO("  [GRIPPER]  Post-stop width captured: %.4f m", gs.width);
         }
@@ -110,9 +112,11 @@ namespace franka_kitting_controller {
           open_cmd.type = GripperCommandType::MOVE;
           open_cmd.width = baseline_open_width_;
           open_cmd.speed = 0.1;
+          // Set tracking state BEFORE queueing to avoid race where the command
+          // completes before we initialize the tracking flag.
+          baseline_open_seen_executing_ = false;
           queueGripperCommand(open_cmd);
           baseline_open_dispatched_.store(true, std::memory_order_relaxed);
-          baseline_open_seen_executing_ = false;
           ROS_INFO("  [BASELINE]  Step 2: Gripper open queued (post-downlift): "
                    "move(width=%.4f, speed=0.1)", baseline_open_width_);
         }
@@ -287,16 +291,24 @@ namespace franka_kitting_controller {
   }
 
   void KittingStateController::executeStopAction(const franka_gripper::StopGoalConstPtr& /*goal*/) {
+    // Route stop through the read thread's stop_requested_ flag to avoid
+    // concurrent gripper_->stop() calls from multiple threads (the read thread
+    // may be calling readOnce() or stop() simultaneously). The read thread
+    // serializes all gripper I/O.
     franka_gripper::StopResult result;
-    try {
-      gripper_->stop();
-      result.success = true;
-      stop_action_server_->setSucceeded(result);
-    } catch (const franka::Exception& ex) {
-      result.success = false;
-      result.error = ex.what();
-      stop_action_server_->setAborted(result, result.error);
+    stop_requested_.store(true, std::memory_order_relaxed);
+    // Wait briefly for the read thread to execute stop()
+    for (int i = 0; i < 50; ++i) {  // 50 × 10ms = 500ms max
+      if (!stop_requested_.load(std::memory_order_relaxed)) {
+        result.success = true;
+        stop_action_server_->setSucceeded(result);
+        return;
+      }
+      ros::Duration(0.01).sleep();
     }
+    result.success = false;
+    result.error = "stop() timed out (read thread did not execute within 500ms)";
+    stop_action_server_->setAborted(result, result.error);
   }
 
 }  // namespace franka_kitting_controller

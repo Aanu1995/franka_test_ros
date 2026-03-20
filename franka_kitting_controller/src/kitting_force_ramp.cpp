@@ -99,17 +99,18 @@ namespace franka_kitting_controller {
           ROS_WARN("  [CLOSING]  Timeout after %.1f s: w=%.4f  w_cmd=%.4f  -> FAILED",
                    kClosingTimeout, gripper_snapshot.width, rt_closing_w_cmd_);
           requestGripperStop("Closing timeout");
+          return;
         }
       }
     }
 
     // Deferred CONTACT transition: wait for gripper to physically stop.
     // contact_width_ is captured by the read thread (gripperReadLoop) on the
-    // first readOnce() after stop(). gripper_stopped_ is only set AFTER the
-    // width is stored, so it is guaranteed fresh by the time we see it here.
+    // first readOnce() after stop(). gripper_stopped_ is stored with release
+    // AFTER contact_width_, so acquire here guarantees fresh width visibility.
     if (contact_latched_ &&
         current_state_.load(std::memory_order_relaxed) == GraspState::CONTACT_CONFIRMED &&
-        gripper_stopped_.load(std::memory_order_relaxed)) {
+        gripper_stopped_.load(std::memory_order_acquire)) {
       // contact_width_ already set by read thread — do NOT capture from RT buffer
       current_state_.store(GraspState::CONTACT, std::memory_order_relaxed);
       publishStateLabel("CONTACT");
@@ -131,8 +132,8 @@ namespace franka_kitting_controller {
     // Fallback: if not ready (e.g., CLOSING sent without prior BASELINE), collect now.
     if (!sms_detector_.baseline_ready()) {
       sms_detector_.update(tau_ext_norm);
-      if (sms_detector_.baseline_ready() && !cd_baseline_ready_) {
-        cd_baseline_ready_ = true;
+      if (sms_detector_.baseline_ready() && !cd_baseline_ready_.load(std::memory_order_relaxed)) {
+        cd_baseline_ready_.store(true, std::memory_order_relaxed);
         cd_baseline_ = sms_detector_.baseline().mean();
         ROS_WARN("  [CONTACT]  SMS-CUSUM baseline ready (fallback): mu=%.3f Nm, sigma=%.4f Nm",
                  sms_detector_.baseline().mean(), sms_detector_.baseline().sigma());
