@@ -119,9 +119,9 @@ Optimized via grid search across 7 Franka Panda grasping trials (6 objects +
 | Parameter | Value | Description |
 |-----------|-------|-------------|
 | `k_min` | 0.02 | Minimum allowance (Nm). Ensures sensitivity with low noise |
-| `h` | 0.28 | Decision threshold. Lower = faster detection |
-| `debounce_count` | 3 | Consecutive samples (12 ms at 250 Hz) for alarm |
-| `noise_multiplier` | 1.5 | Adaptive scaling: `k_eff = max(k_min, 1.5 * sigma)` |
+| `h` | 0.3 | Decision threshold. Lower = faster detection |
+| `debounce_count` | 5 | Consecutive samples (20 ms at 250 Hz) for alarm |
+| `noise_multiplier` | 2.0 | Adaptive scaling: `k_eff = max(k_min, 2.0 * sigma)` |
 
 ### Baseline Estimator
 

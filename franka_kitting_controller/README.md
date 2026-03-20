@@ -344,7 +344,7 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
 
 # CLOSING — override width and speed for a specific object
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
-  "{command: 'CLOSING', closing_width: 0.015, closing_speed: 0.05}" --once
+  "{command: 'CLOSING', closing_width: 0.001, closing_speed: 0.05}" --once
 
 # ... CONTACT is published by the controller automatically ...
 
@@ -388,7 +388,7 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
 # command and forwarded to each stage when it runs. 0 = use YAML default.
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
   "{command: 'AUTO', open_gripper: true, auto_delay: 3.0, \
-    closing_width: 0.015, closing_speed: 0.05, \
+    closing_width: 0.001, closing_speed: 0.05, \
     f_min: 3.0, f_step: 3.0, f_max: 30.0, \
     fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
     fr_uplift_distance: 0.010, fr_lift_speed: 0.01, fr_uplift_hold: 1.0, \
@@ -450,7 +450,7 @@ Detects contact by monitoring tau_ext_norm during CLOSING using a one-sided down
 1. **Baseline collection**: During BASELINE state (after any accumulated-uplift correction completes), feed tau_ext_norm samples to `sms_detector_.update()`. The `AdaptiveBaseline` collects 50 samples (0.2 s at 250 Hz) to compute both the **mean** (μ) and **noise sigma** (σ). After 50 samples, the baseline transitions to EMA tracking. This captures the at-rest external torque norm and its variability before any gripper motion.
 2. **Baseline freeze**: At the CLOSING_COMMAND → CLOSING transition, `sms_detector_.enter_closing()` freezes the baseline (preventing corruption during detection) and adapts the CUSUM allowance: `k_eff = max(k_min, noise_multiplier × σ)`.
 3. **CUSUM detection**: Each tick during CLOSING, the CUSUM statistic accumulates evidence of a torque drop: `S = max(0, S + (μ − tau_ext_norm) − k_eff)`. The allowance `k_eff` absorbs noise-level fluctuations; only genuine drops accumulate S.
-4. **Debounce**: The alarm condition `S ≥ h` must persist for `debounce_count` (3) consecutive samples before triggering contact. This replaces time-based debounce with sample-based debounce.
+4. **Debounce**: The alarm condition `S ≥ h` must persist for `debounce_count` (5) consecutive samples before triggering contact. This replaces time-based debounce with sample-based debounce.
 5. **On trigger**: Sets `contact_latched_`, transitions to `CONTACT_CONFIRMED`, calls `requestGripperStop()`. `contact_width_` is captured later when the gripper has physically stopped (CONTACT).
 
 #### Parameters
@@ -458,9 +458,9 @@ Detects contact by monitoring tau_ext_norm during CLOSING using a one-sided down
 | Parameter              | Name                          | Default | Description                                                                      |
 | ---------------------- | ----------------------------- | ------- | -------------------------------------------------------------------------------- |
 | `k_min`                | Minimum CUSUM allowance       | 0.02    | Floor for k_eff — ensures detection of very small drops even with low noise      |
-| `h`                    | CUSUM threshold               | 0.28    | CUSUM statistic S must reach this value to trigger alarm                         |
-| `debounce_count`       | Debounce samples              | 3       | Alarm must persist for this many consecutive samples (12 ms at 250 Hz)           |
-| `noise_multiplier`     | Noise scaling factor          | 1.5     | k_eff = max(k_min, noise_multiplier × σ) — scales allowance to noise level      |
+| `h`                    | CUSUM threshold               | 0.3     | CUSUM statistic S must reach this value to trigger alarm                         |
+| `debounce_count`       | Debounce samples              | 5       | Alarm must persist for this many consecutive samples (20 ms at 250 Hz)           |
+| `noise_multiplier`     | Noise scaling factor          | 2.0     | k_eff = max(k_min, noise_multiplier × σ) — scales allowance to noise level      |
 | `baseline_init_samples`| Baseline collection count     | 50      | Samples for initial mean and sigma estimation (0.2 s at 250 Hz)                  |
 | `baseline_alpha`       | EMA smoothing factor          | 0.01    | Exponential moving average coefficient for baseline tracking after initialization|
 
@@ -720,7 +720,7 @@ The **velocity profile** (first derivative) is:
 | -------------------------- | ------ | ------- | ------------------------------------------------------------------- |
 | `arm_id`                   | string | `panda` | Robot arm identifier                                                |
 | `publish_rate`             | double | `250.0` | State data publish rate [Hz]                                        |
-| `closing_width`            | double | `0.015` | Default width for MoveAction in CLOSING [m] (>0.01 to avoid finger-to-finger contact) |
+| `closing_width`            | double | `0.001` | Default width for MoveAction in CLOSING [m]                                |
 | `closing_speed`            | double | `0.05`  | Default speed for MoveAction in CLOSING [m/s] (clamped to max 0.10) |
 | `grasp_speed`              | double | `0.02`  | Gripper speed for GraspAction [m/s]                                 |
 | `epsilon`                  | double | `0.008` | Epsilon for GraspAction (inner and outer) [m]                       |

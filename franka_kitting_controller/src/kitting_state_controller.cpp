@@ -176,7 +176,7 @@ namespace franka_kitting_controller {
                     << " | noise_mult=" << sms_detector_.config().contact_stage.noise_multiplier);
 
     // --- Grasp: Gripper default parameters (overridable per-command via KittingGripperCommand) ---
-    node_handle.param("closing_width", closing_width_, 0.01);
+    node_handle.param("closing_width", closing_width_, 0.001);
     node_handle.param("closing_speed", closing_speed_, 0.05);
     if (closing_speed_ > kMaxClosingSpeed) {
       ROS_WARN("KittingStateController: closing_speed %.4f exceeds max %.4f, clamping",

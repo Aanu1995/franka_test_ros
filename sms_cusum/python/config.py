@@ -34,9 +34,9 @@ class CusumStageConfig:
     """
 
     k_min: float = 0.02
-    h: float = 0.28
-    debounce_count: int = 3
-    noise_multiplier: float = 1.5
+    h: float = 0.3
+    debounce_count: int = 5
+    noise_multiplier: float = 2.0
 
 
 @dataclass
@@ -67,7 +67,7 @@ class SMSCusumConfig:
     """
 
     contact_stage: CusumStageConfig = field(default_factory=lambda: CusumStageConfig(
-        k_min=0.02, h=0.28, debounce_count=3, noise_multiplier=1.5
+        k_min=0.02, h=0.3, debounce_count=5, noise_multiplier=2.0
     ))
     baseline_init_samples: int = 50
     baseline_alpha: float = 0.01

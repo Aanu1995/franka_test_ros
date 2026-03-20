@@ -48,9 +48,9 @@ namespace sms_cusum {
  */
 struct CusumStageConfig {
     double k_min           = 0.02;
-    double h               = 0.28;
-    int32_t debounce_count = 3;
-    double noise_multiplier = 1.5;
+    double h               = 0.3;
+    int32_t debounce_count = 5;
+    double noise_multiplier = 2.0;
 };
 
 /**
@@ -83,9 +83,9 @@ public:
      */
     explicit CUSUMDetector(
         double k_min           = 0.02,
-        double h               = 0.28,
-        int32_t debounce_count = 3,
-        double noise_multiplier = 1.5
+        double h               = 0.3,
+        int32_t debounce_count = 5,
+        double noise_multiplier = 2.0
     ) noexcept
         : config_{k_min, h, debounce_count, noise_multiplier}
         , S_{0.0}
