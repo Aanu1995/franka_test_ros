@@ -174,6 +174,7 @@ Observe approach dynamics before contact. Published **automatically** by the con
 - SMS-CUSUM contact detection runs during this state (see [SMS-CUSUM Contact Detection](#sms-cusum-contact-detection))
 - On contact detection, transitions immediately to **CONTACT_CONFIRMED**
 - If gripper reaches target width without detecting contact (no object present), transitions to **FAILED** — "no contact detected"
+- If CLOSING phase exceeds 30 seconds without contact, transitions to **FAILED** — "CLOSING timeout" (safety net for stuck gripper)
 
 ### CONTACT_CONFIRMED
 
@@ -199,7 +200,7 @@ Initiate automated force ramp. Published via `/kitting_controller/state_cmd` wit
 
 - Gripper applies force `F` via GraspAction to width `w` with tolerance `ε`
 - Grasp width is always the `contact_width` captured at CONTACT (not configurable)
-- Initial force is `f_min` (default 3.0 N); on slip, force increments by `f_step` (default 3.0 N) up to `f_max` (default 30.0 N)
+- Initial force is `f_min` (default 3.0 N); on slip, force increments by `f_step` (default 3.0 N) up to `f_max` (default 70.0 N)
 - After grasp completion + W_pre window (`uplift_hold/2`), the controller automatically transitions to UPLIFT
 - **Timeout**: If the grasp command does not complete within 10 seconds, the controller transitions to FAILED
 
@@ -265,6 +266,7 @@ Terminal state indicating stable grasp confirmed. **Auto-triggered** when EVALUA
 Terminal state indicating grasp failure. **Auto-triggered** on any of:
 
 - No contact detected during CLOSING (gripper reached target width without detecting contact)
+- CLOSING timeout (CLOSING phase exceeded 30 seconds without contact — gripper stuck or action never completed)
 - CLOSING_COMMAND timeout (move command did not start executing within 10 seconds)
 - Maximum force exceeded (`f_current > f_max`) after all force ramp iterations
 - GRASPING timeout (gripper command did not complete within 10 seconds)
@@ -348,7 +350,7 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
 
 # ... CONTACT is published by the controller automatically ...
 
-# GRASPING — use YAML defaults (f_min=3N, f_max=30N, f_step=3N)
+# GRASPING — use YAML defaults (f_min=3N, f_max=70N, f_step=3N)
 # Uses contact_width from CONTACT as grasp width. After this command, the force ramp
 # runs autonomously: GRASPING → UPLIFT → EVALUATE → SUCCESS (or retry → FAILED)
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
@@ -356,12 +358,12 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
 
 # GRASPING — override force range for a specific object
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
-  "{command: 'GRASPING', f_min: 3.0, f_max: 30.0, f_step: 3.0}" --once
+  "{command: 'GRASPING', f_min: 3.0, f_max: 70.0, f_step: 3.0}" --once
 
 # GRASPING — override all force ramp parameters for a specific object
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
   "{command: 'GRASPING', \
-    f_min: 3.0, f_step: 3.0, f_max: 30.0, \
+    f_min: 3.0, f_step: 3.0, f_max: 70.0, \
     fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
     fr_uplift_distance: 0.010, fr_lift_speed: 0.01, fr_uplift_hold: 1.0, \
     fr_slip_drop_thresh: 0.15, fr_slip_width_thresh: 0.0005, \
@@ -389,7 +391,7 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
   "{command: 'AUTO', open_gripper: true, auto_delay: 3.0, \
     closing_width: 0.001, closing_speed: 0.05, \
-    f_min: 3.0, f_step: 3.0, f_max: 30.0, \
+    f_min: 3.0, f_step: 3.0, f_max: 70.0, \
     fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
     fr_uplift_distance: 0.010, fr_lift_speed: 0.01, fr_uplift_hold: 1.0, \
     fr_slip_drop_thresh: 0.15, fr_slip_width_thresh: 0.0005, \
@@ -708,6 +710,7 @@ The **velocity profile** (first derivative) is:
 | Precondition            | —                 | GRASPING requires CONTACT state                                           |
 | BASELINE interruption   | —                 | BASELINE clears active trajectories, returns to passthrough (with warning) |
 | CLOSING_COMMAND timeout | 10 s              | Transitions to FAILED if move command never starts executing               |
+| CLOSING timeout         | 30 s              | Transitions to FAILED if CLOSING phase exceeds duration without contact    |
 | GRASPING timeout        | 10 s              | Transitions to FAILED if gripper command does not complete; sends `stop_requested_` to cancel in-flight command |
 | Action server timeout   | 30 s              | Action server commands abort if gripper does not respond within timeout     |
 | Force ramp limit        | `F ≤ f_max`       | Transitions to FAILED if maximum force is exceeded                         |
@@ -726,7 +729,7 @@ The **velocity profile** (first derivative) is:
 | `epsilon`                  | double | `0.008` | Epsilon for GraspAction (inner and outer) [m]                       |
 | `f_min`                    | double | `3.0`   | Starting grasp force [N]                                            |
 | `f_step`                   | double | `3.0`   | Force increment per iteration [N]                                   |
-| `f_max`                    | double | `30.0`  | Maximum force — FAILED if exceeded [N]                              |
+| `f_max`                    | double | `70.0`  | Maximum force — FAILED if exceeded [N]                              |
 | `uplift_distance`          | double | `0.010` | Micro-uplift distance per iteration [m] (max 0.3)                   |
 | `lift_speed`               | double | `0.01`  | Lift speed for UPLIFT and DOWNLIFT [m/s] (min 0.001)                |
 | `uplift_hold`              | double | `1.0`   | Hold time: early (first half) + late (second half) windows [s] (min 0.5, max 120.0). Also determines W_pre = uplift_hold/2 and settling time = uplift_hold/2 |
@@ -829,7 +832,7 @@ Per-object command published on `/kitting_controller/state_cmd`. Any float64 par
 | `contact_debounce_time` | float64 | *Ignored* — kept for message compatibility. SMS-CUSUM uses sample-based debounce    |
 | `f_min`                | float64 | Starting grasp force [N] (0 = use default 3.0)                                     |
 | `f_step`               | float64 | Force increment per iteration [N] (0 = use default 3.0)                            |
-| `f_max`                | float64 | Maximum force — FAILED if exceeded [N] (0 = use default 30.0)                      |
+| `f_max`                | float64 | Maximum force — FAILED if exceeded [N] (0 = use default 70.0)                      |
 | `fr_uplift_distance`   | float64 | Micro-uplift distance per iteration [m] (0 = use default 0.010, max 0.3)           |
 | `fr_lift_speed`        | float64 | Lift speed for UPLIFT and DOWNLIFT [m/s] (0 = use default 0.01, min 0.001)         |
 | `fr_uplift_hold`       | float64 | Hold time at top for evaluation [s] (0 = use default 1.0, min 0.5, max 120.0)      |
@@ -973,6 +976,7 @@ The Grasp logger is written in C++ using the `rosbag::Bag` API directly and `top
 - Parameters left at 0.0 fall back to YAML config values
 - Duplicate CLOSING commands are ignored (rejected during CLOSING_COMMAND or CLOSING)
 - CLOSING_COMMAND times out after `kClosingCmdTimeout` (10 s) if the move command never starts executing — prevents indefinite stall if the command thread is blocked
+- CLOSING phase times out after `kClosingTimeout` (30 s) if contact is not detected — prevents indefinite stall if the gripper gets stuck or the action never completes
 - Controller holds position (passthrough) when not executing trajectory — no drift or jerk
 - Gripper connection failure at init returns false (controller not loaded)
 - Controller destructor shuts down action servers then joins gripper threads cleanly on unload

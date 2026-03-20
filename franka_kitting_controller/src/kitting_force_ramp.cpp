@@ -88,6 +88,17 @@ namespace franka_kitting_controller {
           ROS_WARN("  [CLOSING]  No contact: w=%.4f  w_cmd=%.4f  -> FAILED",
                    gripper_snapshot.width, rt_closing_w_cmd_);
         }
+
+        // Timeout: CLOSING phase exceeded maximum duration without contact → FAILED
+        if (!contact_latched_ &&
+            (time - fr_phase_start_time_).toSec() > kClosingTimeout) {
+          current_state_.store(GraspState::FAILED, std::memory_order_relaxed);
+          publishStateLabel("FAILED");
+          logStateTransition("FAILED", "CLOSING timeout — no contact detected");
+          ROS_WARN("  [CLOSING]  Timeout after %.1f s: w=%.4f  w_cmd=%.4f  -> FAILED",
+                   kClosingTimeout, gripper_snapshot.width, rt_closing_w_cmd_);
+          requestGripperStop("Closing timeout");
+        }
       }
     }
 

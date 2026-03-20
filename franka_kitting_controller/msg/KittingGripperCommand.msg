@@ -43,7 +43,7 @@ float64 contact_debounce_time    # [s] Sustained drop duration before triggering
 #   On slip: SLIP → DOWNLIFT → SETTLING → GRASPING (retry with F += f_step)
 float64 f_min                # [N]   Starting grasp force (0 = use default 3.0)
 float64 f_step               # [N]   Force increment per iteration (0 = use default 3.0)
-float64 f_max                # [N]   Maximum force, FAILED if exceeded (0 = use default 30.0)
+float64 f_max                # [N]   Maximum force, FAILED if exceeded (0 = use default 70.0)
 float64 fr_uplift_distance   # [m]   Micro-uplift distance (0 = use default 0.010)
 float64 fr_lift_speed        # [m/s] Lift speed for UPLIFT and DOWNLIFT (0 = use default 0.01)
 float64 fr_uplift_hold       # [s]   Hold at top; early + late windows (0 = use default 1.0)

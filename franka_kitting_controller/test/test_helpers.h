@@ -159,7 +159,7 @@ class KittingControllerTestFixture : public ::testing::Test {
     // Set default RT force ramp parameters
     controller_.rt_fr_f_min_ = 3.0;
     controller_.rt_fr_f_step_ = 3.0;
-    controller_.rt_fr_f_max_ = 30.0;
+    controller_.rt_fr_f_max_ = 70.0;
     controller_.rt_fr_uplift_distance_ = 0.010;
     controller_.rt_fr_lift_speed_ = 0.01;
     controller_.rt_fr_uplift_hold_ = 1.0;

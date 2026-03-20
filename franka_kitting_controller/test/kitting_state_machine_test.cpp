@@ -375,9 +375,9 @@ TEST_F(KittingControllerTestFixture, TickSettling_ForceIncrement) {
 TEST_F(KittingControllerTestFixture, TickSettling_MaxForceExceeded) {
   // f_current + f_step > f_max → FAILED
   setCurrentState(GraspState::SETTLING);
-  setForceCurrent(28.0);
-  setIteration(8);
-  setForceRampParams(3.0, 3.0, 30.0, 0.010, 0.01, 1.0);
+  setForceCurrent(68.0);
+  setIteration(22);
+  setForceRampParams(3.0, 3.0, 70.0, 0.010, 0.01, 1.0);
   ros::Time phase_start(100.0);
   setPhaseStartTime(phase_start);
   auto g = makeDefaultGripper();
@@ -385,7 +385,7 @@ TEST_F(KittingControllerTestFixture, TickSettling_MaxForceExceeded) {
   ros::Time t(100.6);
   callTickSettling(t, 0.0, 0.0, g);
 
-  // f_current becomes 31.0, which > f_max 30.0 → FAILED
+  // f_current becomes 71.0, which > f_max 70.0 → FAILED
   EXPECT_EQ(currentState(), GraspState::FAILED);
 }
 

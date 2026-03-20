@@ -19,7 +19,7 @@ kitting_state_controller:
   epsilon: 0.008 # [m] Epsilon for GraspAction (same for inner/outer)
   f_min: 3.0 # [N] Starting grasp force
   f_step: 3.0 # [N] Force increment per iteration
-  f_max: 30.0 # [N] Maximum force (FAILED if exceeded)
+  f_max: 70.0 # [N] Maximum force (FAILED if exceeded)
   uplift_distance: 0.010 # [m] Micro-uplift distance per iteration
   lift_speed: 0.01 # [m/s] Lift speed for both UPLIFT and DOWNLIFT (clamped to min 0.001)
   uplift_hold: 1.0  # [s] Hold at top; early (0–0.5s) + late (0.5–1.0s) windows (clamped to 0.5–120.0)

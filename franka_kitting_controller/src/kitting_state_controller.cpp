@@ -190,7 +190,7 @@ namespace franka_kitting_controller {
     // --- GRASPING: Force ramp parameters (overridable per-command via KittingGripperCommand) ---
     node_handle.param("f_min", fr_f_min_, 3.0);
     node_handle.param("f_step", fr_f_step_, 3.0);
-    node_handle.param("f_max", fr_f_max_, 30.0);
+    node_handle.param("f_max", fr_f_max_, 70.0);
     node_handle.param("uplift_distance", fr_uplift_distance_, 0.010);
     node_handle.param("lift_speed", fr_lift_speed_, 0.01);
     node_handle.param("uplift_hold", fr_uplift_hold_, 1.0);

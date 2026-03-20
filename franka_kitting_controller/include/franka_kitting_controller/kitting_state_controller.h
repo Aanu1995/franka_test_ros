@@ -234,7 +234,7 @@ namespace franka_kitting_controller {
     // --- Force ramp: YAML default parameters (overridable per-command via KittingGripperCommand) ---
     double fr_f_min_{3.0};
     double fr_f_step_{3.0};
-    double fr_f_max_{30.0};
+    double fr_f_max_{70.0};
     double fr_uplift_distance_{0.010};
     double fr_lift_speed_{0.01};
     double fr_uplift_hold_{1.0};
@@ -247,7 +247,7 @@ namespace franka_kitting_controller {
     // RT-local copies of force ramp params (snapshotted at GRASPING entry)
     double rt_fr_f_min_{3.0};
     double rt_fr_f_step_{3.0};
-    double rt_fr_f_max_{30.0};
+    double rt_fr_f_max_{70.0};
     double rt_fr_uplift_distance_{0.010};
     double rt_fr_lift_speed_{0.01};
     double rt_fr_uplift_hold_{1.0};
@@ -260,7 +260,7 @@ namespace franka_kitting_controller {
     // Staging variables (subscriber → RT via state_changed_ release/acquire)
     double staging_fr_f_min_{3.0};
     double staging_fr_f_step_{3.0};
-    double staging_fr_f_max_{30.0};
+    double staging_fr_f_max_{70.0};
     double staging_fr_uplift_distance_{0.010};
     double staging_fr_lift_speed_{0.01};
     double staging_fr_uplift_hold_{1.0};
@@ -310,6 +310,7 @@ namespace franka_kitting_controller {
 
     // --- Force ramp internal timing constants ---
     static constexpr double kClosingCmdTimeout{10.0};   // [s] Fail if move command doesn't start executing
+    static constexpr double kClosingTimeout{30.0};     // [s] Fail if CLOSING phase exceeds this without contact
     static constexpr double kGraspSettleDelay{0.1};     // [s] Wait for command thread pickup
     static constexpr double kGraspTimeout{10.0};        // [s] Fail if grasp doesn't complete
 
