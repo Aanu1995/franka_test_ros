@@ -99,6 +99,38 @@ namespace franka_kitting_controller {
                   deferred_grasp_force_, deferred_grasp_epsilon_);
           deferred_grasp_pending_.store(false, std::memory_order_relaxed);
         }
+
+        // Baseline open dispatch: queue open after downlift completes
+        if (baseline_open_pending_.load(std::memory_order_acquire) &&
+            !baseline_open_dispatched_.load(std::memory_order_relaxed) &&
+            !downlift_active_.load(std::memory_order_relaxed) &&
+            current_state_.load(std::memory_order_relaxed) == GraspState::BASELINE) {
+          GripperCommand open_cmd;
+          open_cmd.type = GripperCommandType::MOVE;
+          open_cmd.width = baseline_open_width_;
+          open_cmd.speed = 0.1;
+          queueGripperCommand(open_cmd);
+          baseline_open_dispatched_.store(true, std::memory_order_relaxed);
+          baseline_open_seen_executing_ = false;
+          ROS_INFO("  [BASELINE]  Gripper open queued (post-downlift): "
+                   "move(width=%.4f, speed=0.1)", baseline_open_width_);
+        }
+
+        // Clear open pending once the open command has completed.
+        // Guard: wait for cmd_executing_ to go true (command thread picked it up)
+        // then false (command completed), to avoid false-clearing on dispatch delay.
+        if (baseline_open_dispatched_.load(std::memory_order_relaxed) &&
+            baseline_open_pending_.load(std::memory_order_relaxed)) {
+          if (!baseline_open_seen_executing_ &&
+              cmd_executing_.load(std::memory_order_relaxed)) {
+            baseline_open_seen_executing_ = true;
+          }
+          if (baseline_open_seen_executing_ &&
+              !cmd_executing_.load(std::memory_order_relaxed)) {
+            baseline_open_pending_.store(false, std::memory_order_release);
+            ROS_INFO("  [BASELINE]  Gripper open complete — baseline collection enabled");
+          }
+        }
       } catch (const franka::Exception& ex) {
         ROS_ERROR_STREAM_THROTTLE(1.0, "KittingStateController: readOnce() failed: " << ex.what());
         prev_valid = false;

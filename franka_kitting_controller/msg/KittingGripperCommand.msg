@@ -26,8 +26,8 @@
 string command
 
 # --- BASELINE parameters (used when command == "BASELINE") ---
-bool open_gripper           # If true, open gripper before baseline collection (default: false)
-float64 open_width          # [m] Width to open to (0 = max_width from firmware). Only used if open_gripper is true
+bool open_gripper           # If true, open gripper before baseline collection. Also auto-enabled when record:=true (default: false)
+float64 open_width          # [m] Width to open to (0 = max_width from firmware). Open is deferred until downlift completes
 
 # --- CLOSING parameters (used when command == "CLOSING") ---
 float64 closing_width    # [m]   Target width for MoveAction  (0 = use default)

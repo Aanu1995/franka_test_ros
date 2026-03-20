@@ -34,6 +34,7 @@ namespace franka_kitting_controller {
   constexpr int    KittingStateController::kMaxWidthSamples;
   constexpr int    KittingStateController::kActionTimeoutSec;
   constexpr double KittingStateController::kClosingCmdTimeout;
+  constexpr double KittingStateController::kClosingTimeout;
 
   // ============================================================================
   // Utilities (used by all translation units)
@@ -427,6 +428,7 @@ namespace franka_kitting_controller {
 
       contact_latched_ = false;
       sms_detector_.reset();
+      baseline_open_dispatched_.store(false, std::memory_order_relaxed);
       gripper_stop_sent_.store(false, std::memory_order_relaxed);
       gripper_stopped_.store(false, std::memory_order_relaxed);
       width_capture_pending_.store(false, std::memory_order_relaxed);
@@ -611,11 +613,13 @@ namespace franka_kitting_controller {
 
       const GripperData gripper_snapshot = *gripper_data_buf_.readFromRT();
 
-      // SMS-CUSUM baseline collection (BASELINE state, skips during downlift correction)
+      // SMS-CUSUM baseline collection (BASELINE state, skips during downlift correction
+      // and gripper open — ensures clean baseline with arm lowered and gripper fully open)
       {
         GraspState bl_state = current_state_.load(std::memory_order_relaxed);
         if (bl_state == GraspState::BASELINE &&
-            !downlift_active_.load(std::memory_order_relaxed)) {
+            !downlift_active_.load(std::memory_order_relaxed) &&
+            !baseline_open_pending_.load(std::memory_order_relaxed)) {
           sms_detector_.update(tau_ext_norm);
 
           if (!cd_baseline_ready_ && sms_detector_.baseline_ready()) {
@@ -649,6 +653,10 @@ namespace franka_kitting_controller {
             ROS_INFO("  [SIGNAL]  BASELINE  |  tau_baseline=%.3f Nm  (ready)", cd_baseline_);
           } else if (downlift_active_.load(std::memory_order_relaxed)) {
             ROS_INFO("  [SIGNAL]  BASELINE  |  awaiting downlift correction");
+          } else if (baseline_open_pending_.load(std::memory_order_relaxed)) {
+            ROS_INFO("  [SIGNAL]  BASELINE  |  awaiting gripper open%s",
+                     baseline_open_dispatched_.load(std::memory_order_relaxed)
+                         ? " (in progress)" : " (queuing)");
           } else {
             ROS_INFO("  [SIGNAL]  BASELINE  |  collecting: %d/%d samples  tau_ext_norm=%.3f",
                     sms_detector_.baseline().count(), sms_detector_.config().baseline_init_samples, tau_ext_norm);

@@ -81,15 +81,19 @@ namespace franka_kitting_controller {
 
   void KittingStateController::handleBaselineCmd(
       const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg) {
-    if (msg->open_gripper) {
-      double open_w = resolveParam(msg->open_width,
-                                  gripper_data_buf_.readFromNonRT()->max_width);
-      GripperCommand open_cmd;
-      open_cmd.type = GripperCommandType::MOVE;
-      open_cmd.width = open_w;
-      open_cmd.speed = 0.1;
-      queueGripperCommand(open_cmd);
-      ROS_INFO("  [GRIPPER]  Open queued: move(width=%.4f, speed=0.1)", open_w);
+    // Determine if gripper open is needed before baseline collection.
+    // When require_logger_ (record:=true), always open to ensure clean baseline.
+    bool need_open = msg->open_gripper || require_logger_;
+
+    if (need_open) {
+      baseline_open_width_ = resolveParam(msg->open_width,
+                                          gripper_data_buf_.readFromNonRT()->max_width);
+      baseline_open_dispatched_.store(false, std::memory_order_relaxed);
+      baseline_open_pending_.store(true, std::memory_order_release);
+      ROS_INFO("  [BASELINE]  Gripper open deferred: width=%.4f (awaiting downlift completion)",
+               baseline_open_width_);
+    } else {
+      baseline_open_pending_.store(false, std::memory_order_relaxed);
     }
 
     pending_state_.store(GraspState::BASELINE, std::memory_order_relaxed);

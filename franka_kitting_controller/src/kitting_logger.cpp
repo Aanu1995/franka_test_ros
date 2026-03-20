@@ -177,6 +177,24 @@ namespace franka_kitting_controller {
         }
       }
     }
+
+    // Auto-start new trial on BASELINE: enables multi-trial recording
+    // without relaunching the logger. The BASELINE message is written
+    // to the new bag as the first message.
+    if (!is_recording_ && topic == "/kitting_controller/state") {
+      auto str_msg = msg->instantiate<std_msgs::String>();
+      if (str_msg && str_msg->data == "BASELINE") {
+        ROS_INFO("KittingLogger: BASELINE detected — starting new trial");
+        startTrial();
+        if (is_recording_ && bag_) {
+          try {
+            bag_->write(topic, now, *msg);
+          } catch (const rosbag::BagIOException& e) {
+            ROS_ERROR_THROTTLE(1.0, "KittingLogger: Failed to write BASELINE to new bag: %s", e.what());
+          }
+        }
+      }
+    }
   }
 
   // ============================================================================

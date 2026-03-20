@@ -87,6 +87,7 @@ namespace franka_kitting_controller {
               "Gripper closed to target width — no contact detected");
           ROS_WARN("  [CLOSING]  No contact: w=%.4f  w_cmd=%.4f  -> FAILED",
                    gripper_snapshot.width, rt_closing_w_cmd_);
+          return;
         }
 
         // Timeout: CLOSING phase exceeded maximum duration without contact → FAILED

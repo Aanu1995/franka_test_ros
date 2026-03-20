@@ -172,6 +172,12 @@ namespace franka_kitting_controller {
     // Gripper data buffer (read thread → realtime update)
     realtime_tools::RealtimeBuffer<GripperData> gripper_data_buf_;
 
+    // --- Baseline preparation: deferred open (lower first, then open, then collect) ---
+    std::atomic<bool> baseline_open_pending_{false};    // Open needed before baseline collection
+    std::atomic<bool> baseline_open_dispatched_{false};  // Open command has been queued by read thread
+    bool baseline_open_seen_executing_{false};           // cmd_executing_ seen true after dispatch (read thread)
+    double baseline_open_width_{0.0};                    // Width to open to [m]
+
     // --- Grasp: Gripper default parameters (overridable per-command) ---
     double closing_width_{0.001};
     double closing_speed_{0.05};

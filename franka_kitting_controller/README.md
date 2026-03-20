@@ -152,9 +152,9 @@ Initial state after the controller is launched. No baseline collection, no conta
 
 Prepare for a new grasp trial. Published via `/kitting_controller/state_cmd` with `command: "BASELINE"`.
 
-- **Optional gripper open**: If `open_gripper: true`, the gripper opens to `open_width` (or `max_width` from firmware if not specified) at 0.1 m/s
+- **Sequential preparation**: If the arm is elevated from a previous uplift, BASELINE first lowers the arm (cosine-smoothed downlift at `lift_speed`), then opens the gripper, then collects baseline data — in that order. Baseline collection is gated on both downlift and gripper open completion to ensure clean sensor readings
+- **Gripper open**: Opens automatically when `open_gripper: true` OR when `record:=true` (ensures clean baseline). Opens to `open_width` (or `max_width` from firmware if not specified) at 0.1 m/s. The open is deferred until any downlift correction completes
 - Resets all state machine variables (contact latch, force ramp, trajectories) for a fresh grasp cycle
-- **Accumulated uplift correction**: If previous SUCCESS runs left the arm elevated, BASELINE automatically lowers the arm back to the original height before the next trial (cosine-smoothed downlift at `lift_speed`)
 - BASELINE is a one-shot state — publish once from START to begin the grasp sequence
 
 ### CLOSING_COMMAND
@@ -309,7 +309,7 @@ Recording and state labeling are independent concerns.
 
 ### Recording
 
-One rosbag per trial. **Recording starts automatically** when the logger node is launched — no START command is needed. The logger opens a new trial bag immediately on startup and records all configured topics.
+One rosbag per trial. **Recording starts automatically** when the logger node is launched — no START command is needed. The logger opens a new trial bag immediately on startup and records all configured topics. **Multi-trial support**: after a trial ends (SUCCESS/FAILED), the logger automatically starts a new trial when the next BASELINE state is detected — no need to relaunch the logger between trials.
 
 | Command | Action                                            |
 | ------- | ------------------------------------------------- |
@@ -320,6 +320,7 @@ One rosbag per trial. **Recording starts automatically** when the logger node is
 - **ABORT** is ignored if not recording.
 - If the logger node is shut down (Ctrl+C), recording is automatically stopped (equivalent to STOP).
 - **Auto-stop on terminal state**: When the logger detects SUCCESS or FAILED on `/kitting_controller/state`, recording stops automatically (equivalent to STOP). The terminal state message is written to the bag before it is closed.
+- **Auto-start on BASELINE**: When not recording (after terminal state or STOP), the logger automatically starts a new trial when it detects BASELINE on `/kitting_controller/state`. The BASELINE message is written as the first message in the new bag. This enables back-to-back trials without relaunching.
 
 Recording continues through all state transitions until stopped by STOP, ABORT, terminal state (SUCCESS/FAILED), or node shutdown.
 
@@ -824,7 +825,7 @@ Per-object command published on `/kitting_controller/state_cmd`. Any float64 par
 | Field                  | Type    | Description                                                                        |
 | ---------------------- | ------- | ---------------------------------------------------------------------------------- |
 | `command`              | string  | `"BASELINE"`, `"CLOSING"`, `"GRASPING"`, or `"AUTO"`                               |
-| `open_gripper`         | bool    | If true, open gripper before baseline collection (default: false)                  |
+| `open_gripper`         | bool    | If true, open gripper before baseline collection. Also auto-enabled when `record:=true` (default: false) |
 | `open_width`           | float64 | Width to open to [m] (0 = max_width from firmware). Only if `open_gripper` is true |
 | `closing_width`        | float64 | Target width for MoveAction [m] (0 = use default)                                  |
 | `closing_speed`        | float64 | Speed for MoveAction [m/s] (0 = use default, max 0.10)                             |
@@ -934,11 +935,12 @@ The Grasp logger is written in C++ using the `rosbag::Bag` API directly and `top
 - **Logger gate** (only when `record:=true`) — controller rejects commands until logger is ready
 - **Four user commands** go through `/kitting_controller/state_cmd` — BASELINE, CLOSING, GRASPING, AUTO
 - **BASELINE** is published once from START to begin the grasp sequence
-- **BASELINE with `open_gripper: true`** queues a gripper open command (fire-and-forget) and immediately transitions to BASELINE — the gripper opens asynchronously
+- **BASELINE with `open_gripper: true`** (or `record:=true`) defers gripper open until any downlift correction completes, then opens the gripper, then starts baseline collection — sequential preparation ensures clean sensor data
 - **BASELINE** can be published from any state to reset the state machine for a new trial
 - Recording starts automatically when the logger launches — no START command needed
 - Recording continues through all state transitions until STOP, ABORT, terminal state (SUCCESS/FAILED), or node shutdown
 - Recording auto-stops on SUCCESS or FAILED (terminal state message is written to bag before closing)
+- Recording auto-starts a new trial on BASELINE after a terminal state — each trial gets its own directory and incrementing trial number
 - Recording and state labeling are independent
 - State labels on `/kitting_controller/state` are published by the controller for offline segmentation (14 states)
 - State labels merged into CSV from `/kitting_controller/state` topic for per-sample state identification
