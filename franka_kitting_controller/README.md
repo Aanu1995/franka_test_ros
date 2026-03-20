@@ -418,7 +418,7 @@ Action server requests are only accepted when the internal state machine is **id
 | `/franka_gripper/homing`  | `franka_gripper/HomingAction` | Run the gripper homing routine (recalibrate)             |
 | `/franka_gripper/stop`    | `franka_gripper/StopAction`   | Immediately stop the gripper (always allowed, any state) |
 
-**Move**, **Grasp**, and **Homing** are routed through the existing gripper command thread to prevent concurrent `libfranka` calls. **Stop** calls `gripper_->stop()` directly — it is thread-safe and must work even when another command is executing (to abort it).
+**Move**, **Grasp**, and **Homing** are routed through the existing gripper command thread to prevent concurrent `libfranka` calls. **Stop** is routed through the read thread's `stop_requested_` flag to avoid concurrent `gripper_->stop()` calls from multiple threads — the read thread serializes all gripper I/O. The action server polls for completion (up to 500 ms timeout).
 
 ### Usage Examples
 
@@ -893,14 +893,14 @@ When not executing a trajectory, the controller operates in **passthrough mode**
 - **Read thread**: Continuously calls `readOnce()` at firmware rate, computes width velocity via finite difference, writes `GripperData` to `RealtimeBuffer`, executes `stop()` when the RT loop sets the `stop_requested_` atomic flag, and dispatches deferred grasp commands from the RT force ramp via atomic flag polling (calls `stop()` before each deferred grasp to release any existing grip — prevents libfranka hang on re-grasp)
 - **Command thread**: Waits on a condition variable for queued `move()`/`grasp()`/`homing()` commands from the subscriber callback or action server threads, then executes them (blocking calls, interruptible by `stop()`)
 
-The controller also exposes four `franka_gripper`-compatible action servers (`/franka_gripper/move`, `/franka_gripper/grasp`, `/franka_gripper/homing`, `/franka_gripper/stop`) for external gripper control. Move, grasp, and homing actions are routed through the command thread; stop calls `gripper_->stop()` directly. Actions are guarded by the state machine — only allowed when idle (START, SUCCESS, FAILED). See [Gripper Action Servers](#gripper-action-servers).
+The controller also exposes four `franka_gripper`-compatible action servers (`/franka_gripper/move`, `/franka_gripper/grasp`, `/franka_gripper/homing`, `/franka_gripper/stop`) for external gripper control. Move, grasp, and homing actions are routed through the command thread; stop is routed through the read thread's `stop_requested_` flag to serialize all gripper I/O. Actions are guarded by the state machine — only allowed when idle (START, SUCCESS, FAILED). See [Gripper Action Servers](#gripper-action-servers).
 
 The `franka_gripper` package is used only for action type definitions — `franka_gripper_node` is **not** launched. The robot must be launched with `load_gripper:=false` to prevent conflicting gripper connections (only one `franka::Gripper` connection per robot is allowed).
 
 ## Real-Time Safety
 
 - Uses `realtime_tools::RealtimePublisher` with non-blocking `trylock()`
-- No dynamic memory allocation in `update()` — width sample vector pre-allocated in `starting()` with capacity for 120 s at 250 Hz (`kMaxWidthSamples = 30000`)
+- No dynamic memory allocation in `update()` — width sample vector pre-allocated in `starting()` with capacity for 120 s at 250 Hz (`kMaxWidthSamples + 1 = 30001`, the extra slot prevents a heap allocation on the edge-case tick where push_back fires simultaneously with evaluation)
 - No blocking operations in `update()`
 - Model queries are only called at the publish rate, not every control tick
 - Contact detection (SMS-CUSUM) uses O(1) per sample, zero dynamic allocation, only scalar arithmetic
@@ -987,12 +987,12 @@ The Grasp logger is written in C++ using the `rosbag::Bag` API directly and `top
 - Gripper action servers (move, grasp, homing, stop) advertised under `/franka_gripper/` namespace
 - Action servers guarded by state machine — only allowed in START, SUCCESS, FAILED
 - Action server requests rejected with descriptive error during active grasp sequence (BASELINE through SETTLING)
-- Stop action always allowed regardless of state (thread-safe `gripper_->stop()`)
+- Stop action always allowed regardless of state — routed through read thread's `stop_requested_` flag (serializes all gripper I/O, 500 ms timeout)
 - Move, grasp, homing actions routed through command thread to prevent concurrent libfranka calls
 - Action server commands time out after `kActionTimeoutSec` (30 s) — prevents indefinite blocking if the gripper firmware hangs
 - Action server shutdown before gripper thread shutdown prevents hanging futures on controller unload
 - AUTO command runs full grasp sequence: BASELINE → *(wait for prep + baseline ready)* → *(delay)* → CLOSING_COMMAND → CLOSING → *(wait for CONTACT_CONFIRMED → CONTACT)* → *(delay)* → GRASPING
-- AUTO mode polls for baseline readiness (`baseline_prep_done_ && cd_baseline_ready_`) every 100 ms via `autoBaselinePollCallback` — only starts `auto_delay` countdown after baseline is fully ready, ensuring arm lowering, gripper open, and baseline data collection all complete before advancing
+- AUTO mode polls for baseline readiness (`baseline_prep_done_` && `cd_baseline_ready_`, both `std::atomic<bool>`) every 100 ms via `autoBaselinePollCallback` — only starts `auto_delay` countdown after baseline is fully ready, ensuring arm lowering, gripper open, and baseline data collection all complete before advancing
 - AUTO mode uses configurable `auto_delay` (default 5.0 seconds) between baseline-ready→CLOSING_COMMAND and CONTACT→GRASPING transitions
 - AUTO mode forwards all BASELINE, CLOSING, and GRASPING parameters from the single message to each stage
 - AUTO mode cancelled by any manual command (BASELINE, CLOSING, GRASPING) — allows user override at any point
