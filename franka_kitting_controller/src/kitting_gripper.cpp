@@ -194,6 +194,7 @@ namespace franka_kitting_controller {
       if (cmd.result_promise) {
         cmd.result_promise->set_value(success);
       }
+      cmd_success_.store(success, std::memory_order_release);
       cmd_executing_.store(false, std::memory_order_relaxed);
     }
   }

@@ -97,9 +97,6 @@ TEST(StateToStringTest, AllStates) {
   EXPECT_STREQ(KittingStateController::stateToString(GraspState::GRASPING), "GRASPING");
   EXPECT_STREQ(KittingStateController::stateToString(GraspState::UPLIFT), "UPLIFT");
   EXPECT_STREQ(KittingStateController::stateToString(GraspState::EVALUATE), "EVALUATE");
-  EXPECT_STREQ(KittingStateController::stateToString(GraspState::SLIP), "SLIP");
-  EXPECT_STREQ(KittingStateController::stateToString(GraspState::DOWNLIFT), "DOWNLIFT");
-  EXPECT_STREQ(KittingStateController::stateToString(GraspState::SETTLING), "SETTLING");
   EXPECT_STREQ(KittingStateController::stateToString(GraspState::SUCCESS), "SUCCESS");
   EXPECT_STREQ(KittingStateController::stateToString(GraspState::FAILED), "FAILED");
 }
@@ -127,9 +124,6 @@ TEST(IsClosingPhaseTest, NonClosingStates) {
   EXPECT_FALSE(KittingStateController::isClosingPhase(GraspState::GRASPING));
   EXPECT_FALSE(KittingStateController::isClosingPhase(GraspState::UPLIFT));
   EXPECT_FALSE(KittingStateController::isClosingPhase(GraspState::EVALUATE));
-  EXPECT_FALSE(KittingStateController::isClosingPhase(GraspState::SLIP));
-  EXPECT_FALSE(KittingStateController::isClosingPhase(GraspState::DOWNLIFT));
-  EXPECT_FALSE(KittingStateController::isClosingPhase(GraspState::SETTLING));
   EXPECT_FALSE(KittingStateController::isClosingPhase(GraspState::SUCCESS));
   EXPECT_FALSE(KittingStateController::isClosingPhase(GraspState::FAILED));
 }
@@ -142,9 +136,6 @@ TEST(IsForceRampPhaseTest, ForceRampStates) {
   EXPECT_TRUE(KittingStateController::isForceRampPhase(GraspState::GRASPING));
   EXPECT_TRUE(KittingStateController::isForceRampPhase(GraspState::UPLIFT));
   EXPECT_TRUE(KittingStateController::isForceRampPhase(GraspState::EVALUATE));
-  EXPECT_TRUE(KittingStateController::isForceRampPhase(GraspState::SLIP));
-  EXPECT_TRUE(KittingStateController::isForceRampPhase(GraspState::DOWNLIFT));
-  EXPECT_TRUE(KittingStateController::isForceRampPhase(GraspState::SETTLING));
 }
 
 TEST(IsForceRampPhaseTest, NonForceRampStates) {

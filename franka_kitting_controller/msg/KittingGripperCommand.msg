@@ -38,15 +38,17 @@ float64 contact_debounce_time    # [s] Sustained drop duration before triggering
 # --- Force ramp parameters (used when command == "GRASPING") ---
 # grasp_width is always the contact_width captured at CONTACT (not configurable).
 # All parameters are per-command overridable. 0 = use YAML default.
-# The controller runs an automated force ramp loop:
-#   GRASPING → UPLIFT → EVALUATE → SUCCESS
-#   On slip: SLIP → DOWNLIFT → SETTLING → GRASPING (retry with F += f_step)
+# The controller runs a contact-only force ramp:
+#   GRASP_1 → GRASP_2 → ... → GRASP_N → UPLIFT → EVALUATE → SUCCESS/FAILED
+# Each ramp step: grasp at force → settle → hold/log → update contact_width
 float64 f_min                # [N]   Starting grasp force (0 = use default 3.0)
-float64 f_step               # [N]   Force increment per iteration (0 = use default 3.0)
-float64 f_max                # [N]   Maximum force, FAILED if exceeded (0 = use default 70.0)
-float64 fr_uplift_distance   # [m]   Micro-uplift distance (0 = use default 0.010)
-float64 fr_lift_speed        # [m/s] Lift speed for UPLIFT and DOWNLIFT (0 = use default 0.01)
-float64 fr_uplift_hold       # [s]   Hold at top; early + late windows (0 = use default 1.0)
+float64 f_step               # [N]   Force increment per step (0 = use default 3.0)
+float64 f_max                # [N]   Maximum force for the final step (0 = use default 70.0)
+float64 grasp_force_hold_time   # [s] Hold at each force step before advancing (0 = use default 1.0)
+float64 grasp_settle_time       # [s] Settle after each grasp completes (0 = use default 0.5)
+float64 fr_uplift_distance   # [m]   Micro-uplift distance after final ramp step (0 = use default 0.010)
+float64 fr_lift_speed        # [m/s] Lift speed for final UPLIFT (0 = use default 0.01)
+float64 fr_uplift_hold       # [s]   Evaluation hold at top; early + late windows (0 = use default 1.0)
 float64 fr_grasp_speed       # [m/s] Gripper speed for ramp grasps (0 = use default 0.02)
 float64 fr_epsilon           # [m]   Epsilon for ramp grasps, same for inner/outer (0 = use default 0.008)
 float64 fr_slip_drop_thresh     # DF_TH: max allowed relative support force drop (0 = use default 0.15)

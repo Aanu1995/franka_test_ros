@@ -3,8 +3,8 @@
 // Use of this source code is governed by the Apache-2.0 license, see LICENSE
 //
 // Test helpers: MockModel, identity pose builder, and KittingControllerTestFixture.
-// The fixture uses friend access to set private members directly, bypassing init()
-// which requires a real franka::Gripper connection.
+// The fixture uses friend access to set private members directly, bypassing init().
+// Provides accessors for the RampPhase sub-state machine and force ramp timing.
 
 #pragma once
 
@@ -118,6 +118,7 @@ inline std::array<double, 16> makeIdentityPose(double z = 0.4) {
 using franka_kitting_controller::GraspState;
 using franka_kitting_controller::GripperData;
 using franka_kitting_controller::KittingStateController;
+using franka_kitting_controller::RampPhase;
 
 class KittingControllerTestFixture : public ::testing::Test {
  protected:
@@ -168,6 +169,8 @@ class KittingControllerTestFixture : public ::testing::Test {
     controller_.rt_fr_slip_drop_thresh_ = 0.15;
     controller_.rt_fr_slip_width_thresh_ = 0.0005;
     controller_.rt_fr_load_transfer_min_ = 1.5;
+    controller_.rt_fr_grasp_force_hold_time_ = 1.0;
+    controller_.rt_fr_grasp_settle_time_ = 0.5;
 
     // Pre-allocate width samples vector (mimics starting())
     controller_.fr_width_samples_.reserve(
@@ -205,6 +208,9 @@ class KittingControllerTestFixture : public ::testing::Test {
   void setCmdExecuting(bool val) {
     controller_.cmd_executing_.store(val, std::memory_order_relaxed);
   }
+  void setCmdSuccess(bool val) {
+    controller_.cmd_success_.store(val, std::memory_order_relaxed);
+  }
 
   void setPhaseStartTime(const ros::Time& t) {
     controller_.fr_phase_start_time_ = t;
@@ -218,12 +224,19 @@ class KittingControllerTestFixture : public ::testing::Test {
     controller_.fr_grasp_cmd_seen_executing_ = val;
   }
 
-  void setGraspStabilizing(bool val) {
-    controller_.fr_grasp_stabilizing_ = val;
+  void setRampPhase(RampPhase p) { controller_.fr_ramp_phase_ = p; }
+  RampPhase rampPhase() const { return controller_.fr_ramp_phase_; }
+
+  void setRampStepStartTime(const ros::Time& t) {
+    controller_.fr_ramp_step_start_time_ = t;
   }
 
-  void setGraspStabilizeStart(const ros::Time& t) {
-    controller_.fr_grasp_stabilize_start_ = t;
+  void setGraspForceHoldTime(double t) {
+    controller_.rt_fr_grasp_force_hold_time_ = t;
+  }
+
+  void setGraspSettleTime(double t) {
+    controller_.rt_fr_grasp_settle_time_ = t;
   }
 
   void setForceCurrent(double f) { controller_.fr_f_current_ = f; }
@@ -290,6 +303,18 @@ class KittingControllerTestFixture : public ::testing::Test {
 
   double accumulatedUplift() const { return controller_.accumulated_uplift_; }
 
+  void setContactWidth(double w) {
+    controller_.contact_width_.store(w, std::memory_order_relaxed);
+  }
+
+  double contactWidth() const {
+    return controller_.contact_width_.load(std::memory_order_relaxed);
+  }
+
+  bool deferredGraspPending() const {
+    return controller_.deferred_grasp_pending_.load(std::memory_order_relaxed);
+  }
+
   // --- Wrappers for private tick functions ---
 
   void callTickGrasping(const ros::Time& time, double tau, double fn,
@@ -305,21 +330,6 @@ class KittingControllerTestFixture : public ::testing::Test {
   void callTickEvaluate(const ros::Time& time, double tau, double fn,
                         const GripperData& g) {
     controller_.tickEvaluate(time, tau, fn, g);
-  }
-
-  void callTickSlip(const ros::Time& time, double tau, double fn,
-                    const GripperData& g) {
-    controller_.tickSlip(time, tau, fn, g);
-  }
-
-  void callTickDownlift(const ros::Time& time, double tau, double fn,
-                        const GripperData& g) {
-    controller_.tickDownlift(time, tau, fn, g);
-  }
-
-  void callTickSettling(const ros::Time& time, double tau, double fn,
-                        const GripperData& g) {
-    controller_.tickSettling(time, tau, fn, g);
   }
 
   void callResetForceRampState() { controller_.resetForceRampState(); }

@@ -15,6 +15,7 @@
 
 using franka_kitting_controller::GraspState;
 using franka_kitting_controller::GripperData;
+using franka_kitting_controller::RampPhase;
 
 // ============================================================================
 // resetForceRampState tests
@@ -25,7 +26,7 @@ TEST_F(KittingControllerTestFixture, ResetForceRampState_ClearsAll) {
   setForceCurrent(10.0);
   setIteration(5);
   setGraspCmdSeenExecuting(true);
-  setGraspStabilizing(true);
+  setRampPhase(RampPhase::HOLDING);
   setGraspingInitialized(true);
   widthSamples().push_back(1.0);
   widthSamples().push_back(2.0);
@@ -76,44 +77,47 @@ TEST_F(KittingControllerTestFixture, TickGrasping_Timeout) {
 }
 
 TEST_F(KittingControllerTestFixture, TickGrasping_NormalFlow_ToUplift) {
-  // Simulate: settle → cmd starts → cmd finishes → W_pre window → UPLIFT
+  // Simulate full single-step ramp: COMMAND_SENT → WAITING → SETTLING → HOLDING → STEP_COMPLETE → UPLIFT
+  // Use f_min = f_max so there's only one step (last step)
   setCurrentState(GraspState::GRASPING);
-  setForceCurrent(3.0);
+  setForceCurrent(70.0);
+  setForceRampParams(70.0, 3.0, 70.0, 0.010, 0.01, 1.0);
+  setGraspSettleTime(0.5);
+  setGraspForceHoldTime(1.0);
   auto g = makeDefaultGripper();
   ros::Time t0(100.0);
 
-  // Step 1: Initialize phase
+  // Step 1: Initialize phase (COMMAND_SENT)
   callTickGrasping(t0, 0.0, 0.0, g);
+  EXPECT_EQ(rampPhase(), RampPhase::COMMAND_SENT);
 
-  // Step 2: After settle delay, cmd not yet executing
+  // Step 2: After settle delay, cmd starts executing
+  setCmdExecuting(true);
   ros::Time t1(100.15);
   callTickGrasping(t1, 0.0, 0.0, g);
-  EXPECT_EQ(currentState(), GraspState::GRASPING);
+  // Should transition to WAITING_EXECUTION
+  EXPECT_EQ(rampPhase(), RampPhase::WAITING_EXECUTION);
 
-  // Step 3: cmd starts executing
-  setCmdExecuting(true);
-  ros::Time t2(100.2);
-  callTickGrasping(t2, 0.0, 0.0, g);
-  EXPECT_EQ(currentState(), GraspState::GRASPING);
-
-  // Step 4: cmd still executing
-  ros::Time t3(100.5);
-  callTickGrasping(t3, 0.0, 5.0, g);
-  EXPECT_EQ(currentState(), GraspState::GRASPING);
-
-  // Step 5: cmd finishes → starts stabilization + W_pre accumulation
+  // Step 3: cmd finishes successfully → SETTLING
   setCmdExecuting(false);
-  ros::Time t4(100.7);
+  setCmdSuccess(true);
+  ros::Time t2(100.5);
+  callTickGrasping(t2, 0.0, 5.0, g);
+  EXPECT_EQ(rampPhase(), RampPhase::SETTLING);
+
+  // Step 4: Settle time passes → HOLDING
+  ros::Time t3(101.1);
+  callTickGrasping(t3, 0.0, 5.0, g);
+  EXPECT_EQ(rampPhase(), RampPhase::HOLDING);
+
+  // Step 5: Hold time passes → STEP_COMPLETE
+  ros::Time t4(102.2);
   callTickGrasping(t4, 0.0, 5.0, g);
-  EXPECT_EQ(currentState(), GraspState::GRASPING);
+  EXPECT_EQ(rampPhase(), RampPhase::STEP_COMPLETE);
 
-  // Step 6: W_pre window = uplift_hold/2 = 0.5s after stabilization start
-  // t4 was the stabilization start. Feed samples until 0.5s passes.
-  for (int i = 0; i < 125; ++i) {  // 125 ticks at 250Hz = 0.5s
-    ros::Time t_tick(100.7 + 0.004 * (i + 1));
-    callTickGrasping(t_tick, 0.0, 5.0, g);
-  }
-
+  // Step 6: Last step → UPLIFT
+  ros::Time t5(102.3);
+  callTickGrasping(t5, 0.0, 5.0, g);
   EXPECT_EQ(currentState(), GraspState::UPLIFT);
   EXPECT_TRUE(upliftActive());
 }
@@ -214,7 +218,7 @@ TEST_F(EvaluateTest, Gate1Fail_NoLoadTransfer) {
   ros::Time t(101.1);
   callTickEvaluate(t, 0.0, 5.0, g);
 
-  EXPECT_EQ(currentState(), GraspState::SLIP);
+  EXPECT_EQ(currentState(), GraspState::FAILED);
 }
 
 TEST_F(EvaluateTest, Gate2Fail_SupportDrop) {
@@ -231,7 +235,7 @@ TEST_F(EvaluateTest, Gate2Fail_SupportDrop) {
   ros::Time t(101.1);
   callTickEvaluate(t, 0.0, 5.0, g);
 
-  EXPECT_EQ(currentState(), GraspState::SLIP);
+  EXPECT_EQ(currentState(), GraspState::FAILED);
 }
 
 TEST_F(EvaluateTest, Gate3Fail_JawWidening) {
@@ -253,7 +257,7 @@ TEST_F(EvaluateTest, Gate3Fail_JawWidening) {
   ros::Time t(101.1);
   callTickEvaluate(t, 0.0, 5.0, g);
 
-  EXPECT_EQ(currentState(), GraspState::SLIP);
+  EXPECT_EQ(currentState(), GraspState::FAILED);
 }
 
 TEST_F(EvaluateTest, EarlyWindowAccumulates) {
@@ -295,98 +299,126 @@ TEST_F(EvaluateTest, LateWindowAccumulates) {
 }
 
 // ============================================================================
-// tickSlip tests
+// Ramp sub-phase machine tests (RampPhase within GRASPING)
 // ============================================================================
 
-TEST_F(KittingControllerTestFixture, TickSlip_InitiatesDownlift) {
-  setCurrentState(GraspState::SLIP);
-  auto g = makeDefaultGripper();
-  ros::Time t(100.0);
-
-  callTickSlip(t, 0.0, 0.0, g);
-
-  EXPECT_EQ(currentState(), GraspState::DOWNLIFT);
-  EXPECT_TRUE(downliftActive());
-}
-
-// ============================================================================
-// tickDownlift tests
-// ============================================================================
-
-TEST_F(KittingControllerTestFixture, TickDownlift_TrajectoryRunning) {
-  setCurrentState(GraspState::DOWNLIFT);
-  setDownliftActive(true);
-  auto g = makeDefaultGripper();
-  ros::Time t(100.0);
-
-  callTickDownlift(t, 0.0, 0.0, g);
-
-  EXPECT_EQ(currentState(), GraspState::DOWNLIFT);
-}
-
-TEST_F(KittingControllerTestFixture, TickDownlift_TrajectoryDone) {
-  setCurrentState(GraspState::DOWNLIFT);
-  setDownliftActive(false);
-  auto g = makeDefaultGripper();
-  ros::Time t(100.0);
-
-  callTickDownlift(t, 0.0, 0.0, g);
-
-  EXPECT_EQ(currentState(), GraspState::SETTLING);
-}
-
-// ============================================================================
-// tickSettling tests
-// ============================================================================
-
-TEST_F(KittingControllerTestFixture, TickSettling_StillSettling) {
-  setCurrentState(GraspState::SETTLING);
+TEST_F(KittingControllerTestFixture, TickGrasping_RampSettling) {
+  // After grasp command completes (WAITING_EXECUTION → SETTLING sub-phase)
+  setCurrentState(GraspState::GRASPING);
   setForceCurrent(3.0);
-  ros::Time phase_start(100.0);
-  setPhaseStartTime(phase_start);
+  setGraspingInitialized(true);
+  setPhaseStartTime(ros::Time(100.0));
+  setGraspCmdSeenExecuting(true);
+  setRampPhase(RampPhase::WAITING_EXECUTION);
+  setGraspSettleTime(0.5);
+  setCmdExecuting(false);  // Grasp command just finished
+  setCmdSuccess(true);     // Hardware confirmed grasp OK
+
   auto g = makeDefaultGripper();
-
-  // elapsed = 0.2s < uplift_hold/2 = 0.5s
-  ros::Time t(100.2);
-  callTickSettling(t, 0.0, 0.0, g);
-
-  EXPECT_EQ(currentState(), GraspState::SETTLING);
-}
-
-TEST_F(KittingControllerTestFixture, TickSettling_ForceIncrement) {
-  // elapsed ≥ uplift_hold/2 and f_current + f_step ≤ f_max → GRASPING retry
-  setCurrentState(GraspState::SETTLING);
-  setForceCurrent(3.0);
-  setIteration(0);
-  setForceRampParams(3.0, 3.0, 30.0, 0.010, 0.01, 1.0);
-  ros::Time phase_start(100.0);
-  setPhaseStartTime(phase_start);
-  auto g = makeDefaultGripper(0.04);
-
-  // elapsed = 0.6s ≥ uplift_hold/2 = 0.5s
-  ros::Time t(100.6);
-  callTickSettling(t, 0.0, 0.0, g);
+  ros::Time t(100.5);
+  callTickGrasping(t, 0.0, 5.0, g);
 
   EXPECT_EQ(currentState(), GraspState::GRASPING);
-  EXPECT_DOUBLE_EQ(forceCurrent(), 6.0);  // 3.0 + 3.0
-  EXPECT_EQ(iteration(), 1);
+  EXPECT_EQ(rampPhase(), RampPhase::SETTLING);
 }
 
-TEST_F(KittingControllerTestFixture, TickSettling_MaxForceExceeded) {
-  // f_current + f_step > f_max → FAILED
-  setCurrentState(GraspState::SETTLING);
-  setForceCurrent(68.0);
-  setIteration(22);
-  setForceRampParams(3.0, 3.0, 70.0, 0.010, 0.01, 1.0);
-  ros::Time phase_start(100.0);
-  setPhaseStartTime(phase_start);
+TEST_F(KittingControllerTestFixture, TickGrasping_GraspFailed_HardwareRejected) {
+  // Grasp command completed but grasp() returned false → FAILED
+  setCurrentState(GraspState::GRASPING);
+  setForceCurrent(3.0);
+  setGraspingInitialized(true);
+  setPhaseStartTime(ros::Time(100.0));
+  setGraspCmdSeenExecuting(true);
+  setRampPhase(RampPhase::WAITING_EXECUTION);
+  setCmdExecuting(false);  // Grasp command finished
+  setCmdSuccess(false);    // Hardware says grasp failed
+
   auto g = makeDefaultGripper();
+  ros::Time t(100.5);
+  callTickGrasping(t, 0.0, 5.0, g);
 
-  ros::Time t(100.6);
-  callTickSettling(t, 0.0, 0.0, g);
-
-  // f_current becomes 71.0, which > f_max 70.0 → FAILED
   EXPECT_EQ(currentState(), GraspState::FAILED);
+}
+
+TEST_F(KittingControllerTestFixture, TickGrasping_RampHolding) {
+  // After settle time expires → HOLDING sub-phase
+  setCurrentState(GraspState::GRASPING);
+  setForceCurrent(3.0);
+  setGraspingInitialized(true);
+  setPhaseStartTime(ros::Time(100.0));
+  setRampPhase(RampPhase::SETTLING);
+  setGraspSettleTime(0.5);
+  setGraspForceHoldTime(1.0);
+  setRampStepStartTime(ros::Time(100.0));
+
+  auto g = makeDefaultGripper();
+  // 0.6s after settle start > 0.5s settle time
+  ros::Time t(100.6);
+  callTickGrasping(t, 0.0, 5.0, g);
+
+  EXPECT_EQ(currentState(), GraspState::GRASPING);
+  EXPECT_EQ(rampPhase(), RampPhase::HOLDING);
+}
+
+TEST_F(KittingControllerTestFixture, TickGrasping_RampStepAdvance) {
+  // On STEP_COMPLETE with more steps remaining → advance force, dispatch deferred grasp
+  setCurrentState(GraspState::GRASPING);
+  setForceCurrent(3.0);
+  setIteration(0);
+  setGraspingInitialized(true);
+  setPhaseStartTime(ros::Time(100.0));
+  setRampPhase(RampPhase::STEP_COMPLETE);
+  setForceRampParams(3.0, 3.0, 30.0, 0.010, 0.01, 1.0);
+  setContactWidth(0.04);
+
+  auto g = makeDefaultGripper();
+  ros::Time t(101.0);
+  callTickGrasping(t, 0.0, 5.0, g);
+
+  EXPECT_EQ(currentState(), GraspState::GRASPING);
+  EXPECT_EQ(rampPhase(), RampPhase::COMMAND_SENT);
+  EXPECT_DOUBLE_EQ(forceCurrent(), 6.0);  // 3.0 + 3.0
+  EXPECT_EQ(iteration(), 1);
+  EXPECT_TRUE(deferredGraspPending());
+}
+
+TEST_F(KittingControllerTestFixture, TickGrasping_RampComplete) {
+  // On last step's STEP_COMPLETE → transition to UPLIFT
+  setCurrentState(GraspState::GRASPING);
+  setForceCurrent(69.0);  // 69 + 3 > 70 → last step
+  setIteration(22);
+  setGraspingInitialized(true);
+  setPhaseStartTime(ros::Time(100.0));
+  setRampPhase(RampPhase::STEP_COMPLETE);
+  setForceRampParams(3.0, 3.0, 70.0, 0.010, 0.01, 1.0);
+
+  auto g = makeDefaultGripper();
+  ros::Time t(101.0);
+  callTickGrasping(t, 0.0, 5.0, g);
+
+  EXPECT_EQ(currentState(), GraspState::UPLIFT);
+  EXPECT_TRUE(upliftActive());
+}
+
+TEST_F(KittingControllerTestFixture, TickGrasping_ContactWidthUpdate) {
+  // After hold completes (HOLDING → STEP_COMPLETE), contact_width_ is updated
+  setCurrentState(GraspState::GRASPING);
+  setForceCurrent(3.0);
+  setGraspingInitialized(true);
+  setPhaseStartTime(ros::Time(100.0));
+  setRampPhase(RampPhase::HOLDING);
+  setGraspForceHoldTime(1.0);
+  setRampStepStartTime(ros::Time(100.0));
+  setForceRampParams(3.0, 3.0, 30.0, 0.010, 0.01, 1.0);
+  setContactWidth(0.040);
+
+  auto g = makeDefaultGripper(0.038);  // New gripper width
+  // 1.1s after hold start > 1.0s hold time
+  ros::Time t(101.1);
+  callTickGrasping(t, 0.0, 5.0, g);
+
+  EXPECT_EQ(rampPhase(), RampPhase::STEP_COMPLETE);
+  EXPECT_NEAR(contactWidth(), 0.038, 1e-10);
 }
 
 // ============================================================================
@@ -511,36 +543,43 @@ TEST(ConstantsTest, SafetyLimits) {
 
 TEST_F(KittingControllerTestFixture, FullCycle_GraspingToSuccess) {
   // This test exercises the full happy path through the force ramp cycle.
+  // Use f_min = f_max so there's only one step (last step).
   setCurrentState(GraspState::GRASPING);
-  setForceCurrent(5.0);
+  setForceCurrent(70.0);
   setIteration(0);
+  setForceRampParams(70.0, 3.0, 70.0, 0.010, 0.01, 1.0);
+  setGraspSettleTime(0.5);
+  setGraspForceHoldTime(1.0);
   auto g = makeDefaultGripper();
 
   // --- GRASPING phase ---
   ros::Time t(100.0);
 
-  // Init phase
+  // Init phase (COMMAND_SENT)
   callTickGrasping(t, 0.0, 0.0, g);
 
-  // Past settle delay
+  // cmd starts executing → WAITING_EXECUTION
+  setCmdExecuting(true);
   t = ros::Time(100.15);
   callTickGrasping(t, 0.0, 0.0, g);
 
-  // cmd starts
-  setCmdExecuting(true);
-  t = ros::Time(100.2);
-  callTickGrasping(t, 0.0, 0.0, g);
-
-  // cmd finishes
+  // cmd finishes successfully → SETTLING
   setCmdExecuting(false);
-  t = ros::Time(100.7);
+  setCmdSuccess(true);
+  t = ros::Time(100.5);
   callTickGrasping(t, 0.0, 8.0, g);
 
-  // W_pre accumulation (0.5s of samples at 250Hz)
-  for (int i = 0; i < 125; ++i) {
-    t = ros::Time(100.7 + 0.004 * (i + 1));
-    callTickGrasping(t, 0.0, 8.0, g);
-  }
+  // Settle time passes → HOLDING (last step, W_pre accumulates)
+  t = ros::Time(101.1);
+  callTickGrasping(t, 0.0, 8.0, g);
+
+  // Hold time passes → STEP_COMPLETE
+  t = ros::Time(102.2);
+  callTickGrasping(t, 0.0, 8.0, g);
+
+  // Last step → UPLIFT
+  t = ros::Time(102.3);
+  callTickGrasping(t, 0.0, 8.0, g);
   EXPECT_EQ(currentState(), GraspState::UPLIFT);
 
   // --- UPLIFT phase (trajectory handled by updateCartesianCommand, not tested here) ---
@@ -570,43 +609,3 @@ TEST_F(KittingControllerTestFixture, FullCycle_GraspingToSuccess) {
   EXPECT_EQ(currentState(), GraspState::SUCCESS);
 }
 
-// ============================================================================
-// Full force ramp retry cycle: EVALUATE→SLIP→DOWNLIFT→SETTLING→GRASPING
-// ============================================================================
-
-TEST_F(KittingControllerTestFixture, RetryCycle_SlipToGrasping) {
-  // Start at SLIP
-  setCurrentState(GraspState::SLIP);
-  setForceCurrent(3.0);
-  setIteration(0);
-  auto g = makeDefaultGripper();
-  ros::Time t(100.0);
-
-  // SLIP → DOWNLIFT
-  callTickSlip(t, 0.0, 0.0, g);
-  EXPECT_EQ(currentState(), GraspState::DOWNLIFT);
-  EXPECT_TRUE(downliftActive());
-
-  // DOWNLIFT running
-  t = ros::Time(101.0);
-  callTickDownlift(t, 0.0, 0.0, g);
-  EXPECT_EQ(currentState(), GraspState::DOWNLIFT);
-
-  // DOWNLIFT done → SETTLING
-  setDownliftActive(false);
-  t = ros::Time(102.0);
-  callTickDownlift(t, 0.0, 0.0, g);
-  EXPECT_EQ(currentState(), GraspState::SETTLING);
-
-  // SETTLING waits for uplift_hold/2 (0.5s)
-  t = ros::Time(102.3);
-  callTickSettling(t, 0.0, 0.0, g);
-  EXPECT_EQ(currentState(), GraspState::SETTLING);
-
-  // SETTLING done → increments force → GRASPING
-  t = ros::Time(102.6);
-  callTickSettling(t, 0.0, 0.0, g);
-  EXPECT_EQ(currentState(), GraspState::GRASPING);
-  EXPECT_DOUBLE_EQ(forceCurrent(), 6.0);  // 3.0 + 3.0
-  EXPECT_EQ(iteration(), 1);
-}

@@ -140,7 +140,7 @@ namespace franka_kitting_controller {
 
   void KittingStateController::handleGraspingCmd(
       const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg) {
-    // Guard: GRASPING requires CONTACT (retries bypass this via requestDeferredGrasp)
+    // Guard: GRASPING requires CONTACT (ramp step advances bypass this via requestDeferredGrasp)
     auto cur = current_state_.load(std::memory_order_relaxed);
     if (cur != GraspState::CONTACT) {
       ROS_WARN("KittingStateController: GRASPING rejected — not in CONTACT state (current: %s)",
@@ -168,6 +168,8 @@ namespace franka_kitting_controller {
     staging_fr_slip_drop_thresh_     = resolveParam(msg->fr_slip_drop_thresh, fr_slip_drop_thresh_);
     staging_fr_slip_width_thresh_    = resolveParam(msg->fr_slip_width_thresh, fr_slip_width_thresh_);
     staging_fr_load_transfer_min_    = resolveParam(msg->fr_load_transfer_min, fr_load_transfer_min_);
+    staging_fr_grasp_force_hold_time_ = resolveParam(msg->grasp_force_hold_time, fr_grasp_force_hold_time_);
+    staging_fr_grasp_settle_time_     = resolveParam(msg->grasp_settle_time, fr_grasp_settle_time_);
 
     if (staging_fr_uplift_distance_ > kMaxUpliftDistance) {
       ROS_WARN("KittingStateController: fr_uplift_distance %.4f exceeds max %.4f, clamping",
@@ -202,17 +204,21 @@ namespace franka_kitting_controller {
             "speed=%.4f, force=%.1f)",
             width, staging_fr_epsilon_, staging_fr_grasp_speed_, staging_fr_f_min_);
 
+    int total_steps = 1 + static_cast<int>((staging_fr_f_max_ - staging_fr_f_min_) / staging_fr_f_step_);
+
     pending_state_.store(GraspState::GRASPING, std::memory_order_relaxed);
     state_changed_.store(true, std::memory_order_release);
-    publishStateLabel("GRASPING");
-    logStateTransition("GRASPING", "Force ramp starting");
-    ROS_INFO("    width=%.4f m  f_min=%.1f N  f_max=%.1f N  f_step=%.1f N",
-            width, staging_fr_f_min_, staging_fr_f_max_, staging_fr_f_step_);
-    ROS_INFO("    uplift: dist=%.4f m  speed=%.4f m/s  hold=%.2f s",
+    publishStateLabel("GRASP_1");
+    logStateTransition("GRASP_1", "Force ramp starting");
+    ROS_INFO("    width=%.4f m  f_min=%.1f N  f_max=%.1f N  f_step=%.1f N  (%d steps)",
+            width, staging_fr_f_min_, staging_fr_f_max_, staging_fr_f_step_, total_steps);
+    ROS_INFO("    ramp: hold=%.2f s  settle=%.2f s",
+            staging_fr_grasp_force_hold_time_, staging_fr_grasp_settle_time_);
+    ROS_INFO("    uplift: dist=%.4f m  speed=%.4f m/s  eval_hold=%.2f s",
             staging_fr_uplift_distance_, staging_fr_lift_speed_, staging_fr_uplift_hold_);
     ROS_INFO("    grasp: speed=%.4f m/s  eps=%.4f m",
             staging_fr_grasp_speed_, staging_fr_epsilon_);
-    ROS_INFO("    slip: DF_TH=%.3f  W_TH=%.4f m  load_min=%.2f N",
+    ROS_INFO("    eval: DF_TH=%.3f  W_TH=%.4f m  load_min=%.2f N",
             staging_fr_slip_drop_thresh_, staging_fr_slip_width_thresh_,
             staging_fr_load_transfer_min_);
   }

@@ -2,14 +2,15 @@
 // Author: Aanu Olakunle
 // Use of this source code is governed by the Apache-2.0 license, see LICENSE
 //
-// Contact detection during CLOSING and force ramp state machine
-// (GRASPING → UPLIFT → EVALUATE → SUCCESS, with slip retry loop).
+// Contact detection during CLOSING and contact-only force ramp state machine
+// (GRASPING ramp f_min→f_max on table → single UPLIFT → EVALUATE → SUCCESS/FAILED).
 // Part of KittingStateController — see kitting_state_controller.h for class definition.
 
 #include <franka_kitting_controller/kitting_state_controller.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 #include <ros/ros.h>
 
@@ -171,7 +172,12 @@ namespace franka_kitting_controller {
 
   // ============================================================================
   // Force ramp state machine (250Hz, realtime-safe)
-  // Called from update() when state is GRASPING/UPLIFT/EVALUATE/DOWNLIFT/SETTLING.
+  // Called from update() when state is GRASPING, UPLIFT, or EVALUATE.
+  //
+  // GRASPING: ramp force from f_min to f_max in f_step increments while object
+  //           remains on table. Each step: grasp → settle → hold/log.
+  //           Published as GRASP_1, GRASP_2, ..., GRASP_N.
+  // After final step: → UPLIFT → EVALUATE → SUCCESS/FAILED.
   // ============================================================================
 
   void KittingStateController::runInternalTransitions(const ros::Time& time,
@@ -182,9 +188,6 @@ namespace franka_kitting_controller {
       case GraspState::GRASPING:  tickGrasping(time, tau_ext_norm, support_force, gripper_snapshot); break;
       case GraspState::UPLIFT:    tickUplift(time, tau_ext_norm, support_force, gripper_snapshot);   break;
       case GraspState::EVALUATE:  tickEvaluate(time, tau_ext_norm, support_force, gripper_snapshot); break;
-      case GraspState::SLIP:      tickSlip(time, tau_ext_norm, support_force, gripper_snapshot);     break;
-      case GraspState::DOWNLIFT:  tickDownlift(time, tau_ext_norm, support_force, gripper_snapshot); break;
-      case GraspState::SETTLING:  tickSettling(time, tau_ext_norm, support_force, gripper_snapshot); break;
       default: break;
     }
   }
@@ -200,78 +203,152 @@ namespace franka_kitting_controller {
 
     double elapsed = (time - fr_phase_start_time_).toSec();
 
-    // Step 1: Settle delay — wait for command thread to pick up the grasp command
-    if (elapsed < kGraspSettleDelay) {
-      return;
-    }
-
-    // Timeout: if grasp command doesn't complete in time, fail
+    // Global timeout for the current ramp step
     if (elapsed > kGraspTimeout) {
-      // Stop the in-flight gripper command so it doesn't stall future commands
       if (cmd_executing_.load(std::memory_order_relaxed)) {
         stop_requested_.store(true, std::memory_order_relaxed);
       }
       current_state_.store(GraspState::FAILED, std::memory_order_relaxed);
       publishStateLabel("FAILED");
       logStateTransition("FAILED", "GRASPING timeout");
-      ROS_INFO("    elapsed=%.1fs  cmd_executing_=%s  seen_executing=%s  stabilizing=%s",
-              elapsed,
-              cmd_executing_.load(std::memory_order_relaxed) ? "true" : "false",
-              fr_grasp_cmd_seen_executing_ ? "true" : "false",
-              fr_grasp_stabilizing_ ? "true" : "false");
+      ROS_INFO("    elapsed=%.1fs  iter=%d  F=%.1f N  ramp_phase=%d",
+              elapsed, fr_iteration_, fr_f_current_,
+              static_cast<int>(fr_ramp_phase_));
       return;
     }
 
-    // Step 2: Poll cmd_executing_ — wait for grasp to start then complete
-    if (!fr_grasp_stabilizing_) {
-      bool executing = cmd_executing_.load(std::memory_order_relaxed);
-      if (!fr_grasp_cmd_seen_executing_) {
-        if (executing) {
-          fr_grasp_cmd_seen_executing_ = true;
+    switch (fr_ramp_phase_) {
+      case RampPhase::COMMAND_SENT: {
+        // Wait for command thread to pick up the grasp command
+        if (elapsed < kGraspSettleDelay) {
+          return;
         }
-        return;
+        // Wait for cmd_executing_ to go true
+        if (!fr_grasp_cmd_seen_executing_) {
+          if (cmd_executing_.load(std::memory_order_relaxed)) {
+            fr_grasp_cmd_seen_executing_ = true;
+          }
+          return;
+        }
+        fr_ramp_phase_ = RampPhase::WAITING_EXECUTION;
+        break;
       }
-      if (executing) {
-        return;
+
+      case RampPhase::WAITING_EXECUTION: {
+        // Wait for grasp command to finish (cmd_executing_ → false)
+        if (cmd_executing_.load(std::memory_order_relaxed)) {
+          return;
+        }
+        // Check hardware result: grasp() returns false if the gripper could not
+        // grasp at the commanded width/force/epsilon (e.g., object not present,
+        // width outside tolerance). cmd_success_ is set by the command thread
+        // with release ordering before cmd_executing_ goes false.
+        if (!cmd_success_.load(std::memory_order_acquire)) {
+          current_state_.store(GraspState::FAILED, std::memory_order_relaxed);
+          publishStateLabel("FAILED");
+          logStateTransition("FAILED", "Grasp command failed (hardware rejected)");
+          ROS_WARN("    GRASP_%d: F=%.1f N  grasp() returned false  width=%.4f m -> FAILED",
+                  fr_iteration_ + 1, fr_f_current_, gripper_snapshot.width);
+          return;
+        }
+        fr_ramp_phase_ = RampPhase::SETTLING;
+        fr_ramp_step_start_time_ = time;
+        ROS_INFO("    GRASP_%d: grasp complete at F=%.1f N, settling for %.2fs",
+                fr_iteration_ + 1, fr_f_current_, rt_fr_grasp_settle_time_);
+        break;
       }
-      fr_grasp_stabilizing_ = true;
-      fr_grasp_stabilize_start_ = time;
-      fr_pre_sum_ = 0.0;
-      fr_pre_sum_sq_ = 0.0;
-      fr_pre_count_ = 0;
-      return;
+
+      case RampPhase::SETTLING: {
+        // Wait grasp_settle_time for gripper to stabilize
+        if ((time - fr_ramp_step_start_time_).toSec() < rt_fr_grasp_settle_time_) {
+          return;
+        }
+        fr_ramp_phase_ = RampPhase::HOLDING;
+        fr_ramp_step_start_time_ = time;
+
+        // On the last ramp step, initialize W_pre accumulators for EVALUATE
+        bool is_last_step = (fr_f_current_ + rt_fr_f_step_ > rt_fr_f_max_);
+        if (is_last_step) {
+          fr_pre_sum_ = 0.0;
+          fr_pre_sum_sq_ = 0.0;
+          fr_pre_count_ = 0;
+          ROS_INFO("    GRASP_%d: last step — accumulating W_pre during hold",
+                  fr_iteration_ + 1);
+        }
+        ROS_INFO("    GRASP_%d: holding at F=%.1f N for %.2fs",
+                fr_iteration_ + 1, fr_f_current_, rt_fr_grasp_force_hold_time_);
+        break;
+      }
+
+      case RampPhase::HOLDING: {
+        double hold_elapsed = (time - fr_ramp_step_start_time_).toSec();
+
+        // On the last ramp step, accumulate W_pre (support force) during hold
+        bool is_last_step = (fr_f_current_ + rt_fr_f_step_ > rt_fr_f_max_);
+        if (is_last_step) {
+          fr_pre_sum_ += support_force;
+          fr_pre_sum_sq_ += support_force * support_force;
+          fr_pre_count_++;
+        }
+
+        if (hold_elapsed < rt_fr_grasp_force_hold_time_) {
+          return;
+        }
+
+        // Hold complete — update contact_width from current gripper measurement
+        contact_width_.store(gripper_snapshot.width, std::memory_order_relaxed);
+
+        ROS_INFO("    GRASP_%d: hold complete  F=%.1f N  width=%.4f m (updated)",
+                fr_iteration_ + 1, fr_f_current_, gripper_snapshot.width);
+
+        fr_ramp_phase_ = RampPhase::STEP_COMPLETE;
+        break;
+      }
+
+      case RampPhase::STEP_COMPLETE: {
+        bool is_last_step = (fr_f_current_ + rt_fr_f_step_ > rt_fr_f_max_);
+
+        if (is_last_step) {
+          // All ramp steps done — transition to UPLIFT
+          uplift_start_pose_ = cartesian_pose_handle_->getRobotState().O_T_EE_d;
+          uplift_z_start_ = uplift_start_pose_[14];
+          uplift_elapsed_ = 0.0;
+          rt_uplift_distance_ = rt_fr_uplift_distance_;
+          rt_uplift_duration_ = rt_fr_uplift_distance_ / rt_fr_lift_speed_;
+          uplift_active_.store(true, std::memory_order_relaxed);
+
+          current_state_.store(GraspState::UPLIFT, std::memory_order_relaxed);
+          publishStateLabel("UPLIFT");
+          logStateTransition("UPLIFT", "Ramp complete — micro-lift starting");
+          ROS_INFO("    final_iter=%d  F=%.1f N  width=%.4f m  "
+                  "distance=%.4f m  duration=%.2f s",
+                  fr_iteration_ + 1, fr_f_current_, gripper_snapshot.width,
+                  rt_fr_uplift_distance_, rt_uplift_duration_);
+        } else {
+          // Advance to next force step
+          fr_f_current_ += rt_fr_f_step_;
+          fr_iteration_++;
+
+          // Dispatch deferred grasp at new force with updated contact_width
+          double w = contact_width_.load(std::memory_order_relaxed);
+          requestDeferredGrasp(w, rt_fr_grasp_speed_, fr_f_current_, rt_fr_epsilon_);
+
+          // Reset for next step
+          fr_phase_start_time_ = time;
+          fr_grasping_phase_initialized_ = true;
+          fr_grasp_cmd_seen_executing_ = false;
+          fr_ramp_phase_ = RampPhase::COMMAND_SENT;
+
+          // Publish GRASP_N label for the new step
+          char label[16];
+          std::snprintf(label, sizeof(label), "GRASP_%d", fr_iteration_ + 1);
+          publishStateLabel(label);
+          logStateTransition(label, "Force ramp step");
+          ROS_INFO("    iter=%d  F=%.1f N  width=%.4f m", fr_iteration_ + 1, fr_f_current_, w);
+        }
+        break;
+      }
     }
-
-    // Step 3: W_pre accumulation (Fn, uplift_hold/2)
-    double stab_elapsed = (time - fr_grasp_stabilize_start_).toSec();
-    fr_pre_sum_ += support_force;
-    fr_pre_sum_sq_ += support_force * support_force;
-    fr_pre_count_++;
-    if (stab_elapsed < (rt_fr_uplift_hold_ / 2.0)) {
-      return;
-    }
-
-    ROS_INFO("    Grasp force applied: %.2f N (iteration %d)", fr_f_current_, fr_iteration_);
-
-    // Snapshot gripper width right before uplift — used for retry grasp
-    fr_grasp_width_snapshot_ = gripper_snapshot.width;
-
-    // Step 4: Initialize UPLIFT trajectory
-    uplift_start_pose_ = cartesian_pose_handle_->getRobotState().O_T_EE_d;
-    uplift_z_start_ = uplift_start_pose_[14];
-    uplift_elapsed_ = 0.0;
-    rt_uplift_distance_ = rt_fr_uplift_distance_;
-    rt_uplift_duration_ = rt_fr_uplift_distance_ / rt_fr_lift_speed_;
-    uplift_active_.store(true, std::memory_order_relaxed);
-
-    // Step 5: Transition to UPLIFT
-    current_state_.store(GraspState::UPLIFT, std::memory_order_relaxed);
-    publishStateLabel("UPLIFT");
-    logStateTransition("UPLIFT", "Micro-lift starting");
-    ROS_INFO("    iter=%d  F=%.1f N  width=%.4f  "
-            "distance=%.4f  duration=%.2f",
-            fr_iteration_, fr_f_current_, gripper_snapshot.width,
-            rt_fr_uplift_distance_, rt_uplift_duration_);
   }
 
   void KittingStateController::tickUplift(const ros::Time& time,
@@ -364,97 +441,31 @@ namespace franka_kitting_controller {
     // --- Verdict: secure = Gate1 AND Gate2 AND Gate3 ---
     bool is_slipping = !(load_transferred && drop_ok && width_ok);
 
-    ROS_INFO("  [SLIP] Gate 1 — Load Transfer:  deltaF=%.3f N  threshold=%.3f N  "
+    ROS_INFO("  [EVAL] Gate 1 — Load Transfer:  deltaF=%.3f N  threshold=%.3f N  "
              "(Fn_pre=%.3f  sigma=%.3f  Fn_early=%.3f)  %s",
              deltaF, load_thresh, Fn_pre, sigma_pre, Fn_early,
              load_transferred ? "PASS" : "FAIL");
-    ROS_INFO("  [SLIP] Gate 2 — Support Drop:   dF=%.1f%%  threshold=%.0f%%  %s",
+    ROS_INFO("  [EVAL] Gate 2 — Support Drop:   dF=%.1f%%  threshold=%.0f%%  %s",
              dF * 100.0, rt_fr_slip_drop_thresh_ * 100.0,
              drop_ok ? "PASS" : "FAIL");
-    ROS_INFO("  [SLIP] Gate 3 — Jaw Widening:   P95-P5=%.5f m  threshold=%.4f m  "
+    ROS_INFO("  [EVAL] Gate 3 — Jaw Widening:   P95-P5=%.5f m  threshold=%.4f m  "
              "(P5=%.5f  P95=%.5f)  %s",
              dw, rt_fr_slip_width_thresh_, p5, p95,
              width_ok ? "PASS" : "FAIL");
-    ROS_INFO("  [SLIP] Verdict: %s", is_slipping ? "SLIPPING" : "SECURE");
+    ROS_INFO("  [EVAL] Verdict: %s", is_slipping ? "SLIPPING" : "SECURE");
 
     if (!is_slipping) {
-      accumulated_uplift_ += rt_fr_uplift_distance_;  // This UPLIFT wasn't DOWNLIFTed
+      accumulated_uplift_ += rt_fr_uplift_distance_;  // Track for BASELINE prep lowering
       current_state_.store(GraspState::SUCCESS, std::memory_order_relaxed);
       publishStateLabel("SUCCESS");
       logStateTransition("SUCCESS", "Secure grasp confirmed");
-      ROS_INFO("    F=%.1f N  iter=%d", fr_f_current_, fr_iteration_);
+      ROS_INFO("    F=%.1f N  iter=%d", fr_f_current_, fr_iteration_ + 1);
     } else {
-      current_state_.store(GraspState::SLIP, std::memory_order_relaxed);
-      publishStateLabel("SLIP");
-      logStateTransition("SLIP", load_transferred ? "Slip detected" : "No load transfer");
-      ROS_INFO("    F=%.1f N  iter=%d", fr_f_current_, fr_iteration_);
-    }
-  }
-
-  void KittingStateController::tickSlip(const ros::Time& /* time */,
-                                        double /* tau_ext_norm */,
-                                        double /* support_force */,
-                                        const GripperData& /* gripper_snapshot */) {
-    downlift_start_pose_ = cartesian_pose_handle_->getRobotState().O_T_EE_d;
-    downlift_z_start_ = downlift_start_pose_[14];
-    downlift_elapsed_ = 0.0;
-    rt_downlift_distance_ = rt_fr_uplift_distance_;
-    rt_downlift_duration_ = rt_fr_uplift_distance_ / rt_fr_lift_speed_;
-    downlift_active_.store(true, std::memory_order_relaxed);
-
-    current_state_.store(GraspState::DOWNLIFT, std::memory_order_relaxed);
-    publishStateLabel("DOWNLIFT");
-    logStateTransition("DOWNLIFT", "Returning before force increment");
-    ROS_INFO("    distance=%.4f m  duration=%.2f s",
-            rt_downlift_distance_, rt_downlift_duration_);
-  }
-
-  void KittingStateController::tickDownlift(const ros::Time& time,
-                                            double /* tau_ext_norm */,
-                                            double /* support_force */,
-                                            const GripperData& /* gripper_snapshot */) {
-    if (downlift_active_.load(std::memory_order_relaxed)) {
-      return;  // Trajectory still running
-    }
-
-    fr_phase_start_time_ = time;
-    current_state_.store(GraspState::SETTLING, std::memory_order_relaxed);
-    publishStateLabel("SETTLING");
-    ROS_INFO("  [STATE]  >>  SETTLING  <<  Post-downlift stabilization (%.2fs)",
-            rt_fr_uplift_hold_ / 2.0);
-  }
-
-  void KittingStateController::tickSettling(const ros::Time& time,
-                                            double /* tau_ext_norm */,
-                                            double /* support_force */,
-                                            const GripperData& /* gripper_snapshot */) {
-    double elapsed = (time - fr_phase_start_time_).toSec();
-    if (elapsed < (rt_fr_uplift_hold_ / 2.0)) {
-      return;  // Still settling
-    }
-
-    fr_f_current_ += rt_fr_f_step_;
-    fr_iteration_++;
-
-    if (fr_f_current_ > rt_fr_f_max_) {
       current_state_.store(GraspState::FAILED, std::memory_order_relaxed);
       publishStateLabel("FAILED");
-      logStateTransition("FAILED", "Max force exceeded");
-      ROS_INFO("    f_current=%.1f N > f_max=%.1f N  after %d iterations",
-              fr_f_current_, rt_fr_f_max_, fr_iteration_);
-      return;
+      logStateTransition("FAILED", load_transferred ? "Slip detected" : "No load transfer");
+      ROS_INFO("    F=%.1f N  iter=%d", fr_f_current_, fr_iteration_ + 1);
     }
-
-    fr_phase_start_time_ = time;
-    fr_grasping_phase_initialized_ = true;
-    fr_grasp_cmd_seen_executing_ = false;
-    fr_grasp_stabilizing_ = false;
-    requestDeferredGrasp(fr_grasp_width_snapshot_, rt_fr_grasp_speed_,
-                        fr_f_current_, rt_fr_epsilon_);
-    current_state_.store(GraspState::GRASPING, std::memory_order_relaxed);
-    publishStateLabel("GRASPING");
-    logStateTransition("GRASPING", "Force ramp retry");
-    ROS_INFO("    iter=%d  F=%.1f N", fr_iteration_, fr_f_current_);
   }
 
 }  // namespace franka_kitting_controller

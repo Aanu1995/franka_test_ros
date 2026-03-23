@@ -12,17 +12,20 @@ kitting_state_controller:
   # Baseline: 50 samples (0.2s at 250Hz), EMA alpha=0.01
 
   # Grasping parameters (overridable per-command via KittingGripperCommand)
-  # After GRASPING command, controller runs: GRASPING -> UPLIFT -> EVALUATE -> SUCCESS
-  # On slip: SLIP -> DOWNLIFT -> SETTLING -> GRASPING (retry with F += f_step)
+  # After GRASPING command, controller runs a contact-only force ramp:
+  #   GRASP_1 → GRASP_2 → ... → GRASP_N → UPLIFT → EVALUATE → SUCCESS/FAILED
+  # Each ramp step: grasp at force → settle → hold/log → update contact_width
   # grasp_width is always the contact_width captured at CONTACT (not configurable)
   grasp_speed: 0.02 # [m/s] Gripper speed for GraspAction
   epsilon: 0.008 # [m] Epsilon for GraspAction (same for inner/outer)
   f_min: 3.0 # [N] Starting grasp force
-  f_step: 3.0 # [N] Force increment per iteration
-  f_max: 70.0 # [N] Maximum force (FAILED if exceeded)
-  uplift_distance: 0.010 # [m] Micro-uplift distance per iteration
-  lift_speed: 0.01 # [m/s] Lift speed for both UPLIFT and DOWNLIFT (clamped to min 0.001)
-  uplift_hold: 1.0  # [s] Hold at top; early (0–0.5s) + late (0.5–1.0s) windows (clamped to 0.5–120.0)
+  f_step: 3.0 # [N] Force increment per step
+  f_max: 70.0 # [N] Maximum force for the final ramp step
+  grasp_force_hold_time: 1.0  # [s] Hold at each force step before advancing (clamped to min 0.25)
+  grasp_settle_time: 0.5      # [s] Wait after each grasp command completes for gripper to stabilize
+  uplift_distance: 0.010 # [m] Micro-uplift distance after final ramp step
+  lift_speed: 0.01 # [m/s] Lift speed for final UPLIFT (clamped to min 0.001)
+  uplift_hold: 1.0  # [s] Evaluation hold at top; early + late windows (clamped to 0.5–120.0)
   slip_drop_thresh: 0.15    # DF_TH: max allowed relative support force drop (15% = fail)
   slip_width_thresh: 0.0005 # [m] W_TH: max allowed jaw widening P95-P5 (0.5mm = fail)
   load_transfer_min: 1.5    # [N] Minimum load transfer threshold (lighter objects need lower value)

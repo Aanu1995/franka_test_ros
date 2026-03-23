@@ -60,12 +60,6 @@ namespace franka_kitting_controller {
         return "UPLIFT";
       case GraspState::EVALUATE:
         return "EVALUATE";
-      case GraspState::SLIP:
-        return "SLIP";
-      case GraspState::DOWNLIFT:
-        return "DOWNLIFT";
-      case GraspState::SETTLING:
-        return "SETTLING";
       case GraspState::SUCCESS:
         return "SUCCESS";
       case GraspState::FAILED:
@@ -200,6 +194,8 @@ namespace franka_kitting_controller {
     node_handle.param("slip_drop_thresh", fr_slip_drop_thresh_, 0.15);
     node_handle.param("slip_width_thresh", fr_slip_width_thresh_, 0.0005);
     node_handle.param("load_transfer_min", fr_load_transfer_min_, 1.5);
+    node_handle.param("grasp_force_hold_time", fr_grasp_force_hold_time_, 1.0);
+    node_handle.param("grasp_settle_time", fr_grasp_settle_time_, 0.5);
 
     // Validate force ramp parameters
     if (fr_f_min_ <= 0.0) {
@@ -235,14 +231,26 @@ namespace franka_kitting_controller {
               fr_uplift_hold_, kMinUpliftHold);
       fr_uplift_hold_ = kMinUpliftHold;
     }
+    if (fr_grasp_force_hold_time_ < 0.25) {
+      ROS_WARN("KittingStateController: grasp_force_hold_time %.2f below min 0.25, clamping",
+              fr_grasp_force_hold_time_);
+      fr_grasp_force_hold_time_ = 0.25;
+    }
+    if (fr_grasp_settle_time_ < 0.0) {
+      ROS_WARN("KittingStateController: grasp_settle_time %.2f negative, clamping to 0",
+              fr_grasp_settle_time_);
+      fr_grasp_settle_time_ = 0.0;
+    }
 
     ROS_INFO_STREAM("KittingStateController: Force ramp config"
                     << " | f: min=" << fr_f_min_ << " step=" << fr_f_step_
                     << " max=" << fr_f_max_
+                    << " | ramp: hold=" << fr_grasp_force_hold_time_
+                    << "s settle=" << fr_grasp_settle_time_ << "s"
                     << " | uplift: dist=" << fr_uplift_distance_
-                    << " speed=" << fr_lift_speed_ << " hold=" << fr_uplift_hold_
+                    << " speed=" << fr_lift_speed_ << " eval_hold=" << fr_uplift_hold_
                     << " | grasp: speed=" << fr_grasp_speed_ << " eps=" << fr_epsilon_
-                    << " | slip: DF_TH=" << fr_slip_drop_thresh_
+                    << " | eval: DF_TH=" << fr_slip_drop_thresh_
                     << " W_TH=" << fr_slip_width_thresh_
                     << " load_min=" << fr_load_transfer_min_);
 
@@ -377,7 +385,7 @@ namespace franka_kitting_controller {
     uplift_active_.store(false, std::memory_order_relaxed);
     uplift_elapsed_ = 0.0;
 
-    // Reset DOWNLIFT and deferred grasp state
+    // Reset BASELINE prep lowering and deferred grasp state
     downlift_active_.store(false, std::memory_order_relaxed);
     downlift_elapsed_ = 0.0;
     deferred_grasp_pending_.store(false, std::memory_order_relaxed);
@@ -404,8 +412,8 @@ namespace franka_kitting_controller {
     fr_f_current_ = 0.0;
     fr_iteration_ = 0;
     fr_grasp_cmd_seen_executing_ = false;
-    fr_grasp_stabilizing_ = false;
     fr_grasping_phase_initialized_ = false;
+    fr_ramp_phase_ = RampPhase::COMMAND_SENT;
     fr_width_samples_.clear();
   }
 
@@ -497,7 +505,7 @@ namespace franka_kitting_controller {
               cd_baseline_ready_.load(std::memory_order_relaxed) ? "" : " (NOT READY)");
     }
 
-    // Handle GRASPING start: snapshot force ramp parameters, initialize force ramp state
+    // Handle GRASPING start: snapshot force ramp parameters, initialize ramp state
     if (new_state == GraspState::GRASPING) {
       rt_fr_f_min_ = staging_fr_f_min_;
       rt_fr_f_step_ = staging_fr_f_step_;
@@ -510,15 +518,16 @@ namespace franka_kitting_controller {
       rt_fr_slip_drop_thresh_ = staging_fr_slip_drop_thresh_;
       rt_fr_slip_width_thresh_ = staging_fr_slip_width_thresh_;
       rt_fr_load_transfer_min_ = staging_fr_load_transfer_min_;
+      rt_fr_grasp_force_hold_time_ = staging_fr_grasp_force_hold_time_;
+      rt_fr_grasp_settle_time_ = staging_fr_grasp_settle_time_;
 
       fr_f_current_ = rt_fr_f_min_;
       fr_iteration_ = 0;
-      fr_grasping_phase_initialized_ = false;  // Set on first runInternalTransitions tick
+      fr_grasping_phase_initialized_ = false;  // Set on first tickGrasping tick
       fr_grasp_cmd_seen_executing_ = false;
-      fr_grasp_stabilizing_ = false;
+      fr_ramp_phase_ = RampPhase::COMMAND_SENT;
 
       uplift_active_.store(false, std::memory_order_relaxed);
-      downlift_active_.store(false, std::memory_order_relaxed);
       deferred_grasp_pending_.store(false, std::memory_order_relaxed);
     }
 
@@ -611,9 +620,20 @@ namespace franka_kitting_controller {
     kitting_publisher_.msg_.gripper_max_width = gripper_snapshot.max_width;
     kitting_publisher_.msg_.gripper_is_grasped = gripper_snapshot.is_grasped;
 
-    // Force ramp state
+    // Force ramp state (grasp_iteration is 1-based to match GRASP_N labels)
     kitting_publisher_.msg_.grasp_force = fr_f_current_;
-    kitting_publisher_.msg_.grasp_iteration = fr_iteration_;
+    kitting_publisher_.msg_.grasp_iteration = fr_iteration_ + 1;
+
+    // Ramp sub-phase label (helps analysis distinguish settle vs hold in rosbag data)
+    if (current_state_.load(std::memory_order_relaxed) == GraspState::GRASPING) {
+      switch (fr_ramp_phase_) {
+        case RampPhase::SETTLING:  kitting_publisher_.msg_.grasp_ramp_phase = "settling"; break;
+        case RampPhase::HOLDING:   kitting_publisher_.msg_.grasp_ramp_phase = "holding"; break;
+        default:                   kitting_publisher_.msg_.grasp_ramp_phase = ""; break;
+      }
+    } else {
+      kitting_publisher_.msg_.grasp_ramp_phase = "";
+    }
   }
 
   // ============================================================================
@@ -708,9 +728,18 @@ namespace franka_kitting_controller {
                   sms_detector_.contact_cusum().k_effective(),
                   cd_baseline_ready_.load(std::memory_order_relaxed) ? "active" : "collecting");
         } else if (isForceRampPhase(state)) {
-          ROS_INFO("  [SIGNAL]  %s  |  F=%.1f  iter=%d  Fn=%.2f",
-                  stateToString(state), fr_f_current_, fr_iteration_,
-                  support_force);
+          const char* ramp_sub = "";
+          if (state == GraspState::GRASPING) {
+            switch (fr_ramp_phase_) {
+              case RampPhase::COMMAND_SENT:       ramp_sub = "cmd_sent"; break;
+              case RampPhase::WAITING_EXECUTION:  ramp_sub = "executing"; break;
+              case RampPhase::SETTLING:           ramp_sub = "settling"; break;
+              case RampPhase::HOLDING:            ramp_sub = "holding"; break;
+              case RampPhase::STEP_COMPLETE:      ramp_sub = "step_done"; break;
+            }
+          }
+          ROS_INFO("  [SIGNAL]  GRASP_%d  |  F=%.1f  Fn=%.2f  phase=%s",
+                  fr_iteration_ + 1, fr_f_current_, support_force, ramp_sub);
         }
       }
 

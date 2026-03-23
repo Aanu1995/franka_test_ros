@@ -51,9 +51,7 @@ namespace franka_kitting_controller {
   /// Automatic:      CLOSING_COMMAND→CLOSING (gripper move confirmed)
   ///                 CLOSING→CONTACT_CONFIRMED (contact detected)
   ///                 CONTACT_CONFIRMED→CONTACT (gripper stopped)
-  /// Internal (realtime):  GRASPING→UPLIFT→EVALUATE→SUCCESS
-  ///                 On slip: EVALUATE→SLIP→DOWNLIFT→SETTLING→GRASPING (retry)
-  ///                 On F > f_max: SETTLING→FAILED
+  /// Internal (realtime):  GRASPING (force ramp f_min→f_max on table) → UPLIFT → EVALUATE → SUCCESS/FAILED
   enum class GraspState {
     START,           // Initial state: controller running, awaiting BASELINE command
     BASELINE,        // Collecting reference signals
@@ -61,14 +59,20 @@ namespace franka_kitting_controller {
     CLOSING,            // Gripper confirmed moving toward object
     CONTACT_CONFIRMED,  // Contact detected (SMS-CUSUM) — gripper stopping
     CONTACT,            // Gripper stopped — contact confirmed
-    GRASPING,     // Applying grasp force, waiting for completion + stabilization
-    UPLIFT,       // Cosine-smoothed micro-lift trajectory
-    EVALUATE,     // Hold + slip detection (hold for uplift_hold, then evaluate immediately)
-    SLIP,         // Slip detected — preparing DOWNLIFT
-    DOWNLIFT,     // Returning to z_initial before force increment
-    SETTLING,     // Post-downlift stabilization
+    GRASPING,     // Multi-step force ramp (f_min→f_max), object on table. Published as GRASP_1..GRASP_N
+    UPLIFT,       // Cosine-smoothed micro-lift trajectory (single pass after ramp)
+    EVALUATE,     // Hold + 3-gate slip evaluation
     SUCCESS,      // Stable grasp confirmed
-    FAILED        // Max force exceeded
+    FAILED        // Grasp failed (no contact, timeout, slip, or max force)
+  };
+
+  /// Sub-phases within GRASPING ramp (RT-thread owned, not published as states).
+  enum class RampPhase {
+    COMMAND_SENT,        // Grasp command dispatched, waiting for command thread pickup
+    WAITING_EXECUTION,   // cmd_executing_ seen true, waiting for completion
+    SETTLING,            // Post-grasp settle (grasp_settle_time)
+    HOLDING,             // Hold at force level (grasp_force_hold_time)
+    STEP_COMPLETE        // Ready to advance to next step or transition to UPLIFT
   };
 
   /// Command types for the gripper command thread.
@@ -99,15 +103,14 @@ namespace franka_kitting_controller {
   * detection, and executes an automated force ramp with micro-lift evaluation.
   *
   * Claims FrankaModelInterface, FrankaStateInterface, and FrankaPoseCartesianInterface.
-  * The Cartesian pose interface is used for UPLIFT/DOWNLIFT trajectories. In all other
-  * states, the controller operates in passthrough mode (holds current position).
+  * The Cartesian pose interface is used for UPLIFT trajectories and BASELINE prep lowering.
+  * In all other states, the controller operates in passthrough mode (holds current position).
   *
   * Grasp topics:
   *   /kitting_controller/state_cmd [subscribed]  KittingGripperCommand (BASELINE, CLOSING, GRASPING)
   *                                           with per-object parameters (0 = use YAML default)
-  *   /kitting_controller/state     [published]   State labels for all states (BASELINE, CLOSING,
-  *                                           CONTACT, GRASPING, UPLIFT, EVALUATE, DOWNLIFT,
-  *                                           SETTLING, SUCCESS, FAILED).
+  *   /kitting_controller/state     [published]   State labels: BASELINE, CLOSING, CONTACT,
+  *                                           GRASP_1..GRASP_N, UPLIFT, EVALUATE, SUCCESS, FAILED.
   *
   * Recording is controlled separately via /kitting_controller/record_control
   * (handled by the logger node, not the controller).
@@ -166,6 +169,7 @@ namespace franka_kitting_controller {
     GripperCommand pending_cmd_;       // protected by cmd_mutex_
     bool cmd_ready_{false};            // protected by cmd_mutex_
     std::atomic<bool> cmd_executing_{false};
+    std::atomic<bool> cmd_success_{false};  // Result of last completed command (valid when cmd_executing_ goes false)
     void gripperCommandLoop();
     void queueGripperCommand(const GripperCommand& cmd);
 
@@ -235,7 +239,9 @@ namespace franka_kitting_controller {
     double rt_uplift_distance_{0.010};
     double rt_uplift_duration_{1.0};
 
-    // --- DOWNLIFT trajectory state (Realtime-thread owned) ---
+    // --- BASELINE prep: arm lowering trajectory (Realtime-thread owned) ---
+    // Used only during BASELINE to reverse accumulated_uplift_ from previous SUCCESS.
+    // NOT used during the force ramp (object stays on table — no mid-trial lift/lower).
     std::atomic<bool> downlift_active_{false};
     double downlift_elapsed_{0.0};
     std::array<double, 16> downlift_start_pose_{};
@@ -255,6 +261,8 @@ namespace franka_kitting_controller {
     double fr_slip_drop_thresh_{0.15};       // DF_TH: max allowed relative support force drop (15% = fail)
     double fr_slip_width_thresh_{0.0005};    // [m] W_TH: max allowed jaw widening P95-P5 (0.5mm = fail)
     double fr_load_transfer_min_{1.5};       // [N] Min floor for load transfer threshold
+    double fr_grasp_force_hold_time_{1.0};   // [s] Hold at each force step before advancing
+    double fr_grasp_settle_time_{0.5};       // [s] Settle after each grasp command completes
 
     // RT-local copies of force ramp params (snapshotted at GRASPING entry)
     double rt_fr_f_min_{3.0};
@@ -268,6 +276,8 @@ namespace franka_kitting_controller {
     double rt_fr_slip_drop_thresh_{0.15};
     double rt_fr_slip_width_thresh_{0.0005};
     double rt_fr_load_transfer_min_{1.5};
+    double rt_fr_grasp_force_hold_time_{1.0};
+    double rt_fr_grasp_settle_time_{0.5};
 
     // Staging variables (subscriber → RT via state_changed_ release/acquire)
     double staging_fr_f_min_{3.0};
@@ -281,17 +291,20 @@ namespace franka_kitting_controller {
     double staging_fr_slip_drop_thresh_{0.15};
     double staging_fr_slip_width_thresh_{0.0005};
     double staging_fr_load_transfer_min_{1.5};
+    double staging_fr_grasp_force_hold_time_{1.0};
+    double staging_fr_grasp_settle_time_{0.5};
 
     // --- Force ramp: runtime state (Realtime-thread owned) ---
     double fr_f_current_{0.0};           // Current grasp force [N]
-    int fr_iteration_{0};                // Current iteration (0 = first attempt)
+    int fr_iteration_{0};                // Current iteration (0 = first attempt, published as GRASP_1)
     ros::Time fr_phase_start_time_;      // Phase timing via timestamps
     bool fr_grasping_phase_initialized_{false};  // First tick of GRASPING has set timer
     bool fr_grasp_cmd_seen_executing_{false};  // Has cmd_executing_ gone true yet?
-    ros::Time fr_grasp_stabilize_start_;       // Timer for post-grasp stabilization
-    bool fr_grasp_stabilizing_{false};         // In post-grasp stabilization phase
+    RampPhase fr_ramp_phase_{RampPhase::COMMAND_SENT};  // Sub-phase within current ramp step
+    ros::Time fr_ramp_step_start_time_;  // Timer for settle/hold sub-phases
 
-    // Slip detection: support force (Fn) accumulators
+    // Slip evaluation: support force (Fn) accumulators
+    // W_pre is populated during the HOLDING sub-phase of the last ramp step
     double fr_pre_sum_{0.0};              // W_pre: Σ Fn (support force)
     double fr_pre_sum_sq_{0.0};           // W_pre: Σ Fn² (for σ_pre)
     int    fr_pre_count_{0};              // W_pre: sample count
@@ -299,9 +312,8 @@ namespace franka_kitting_controller {
     int    fr_early_count_{0};            // W_hold_early: sample count
     double fr_late_sum_{0.0};             // W_hold_late: Σ Fn
     int    fr_late_count_{0};             // W_hold_late: sample count
-    double fr_grasp_width_snapshot_{0.0}; // Gripper width snapshot taken right before UPLIFT — used for retry grasp
     std::vector<double> fr_width_samples_;  // Width samples during EVALUATE for P5/P95 (pre-allocated in starting())
-    double accumulated_uplift_{0.0};       // Uncorrected uplift from SUCCESS [m]
+    double accumulated_uplift_{0.0};       // Uncorrected uplift from SUCCESS [m] — consumed by BASELINE prep
 
     // Deferred grasp (RT → read thread → command thread, via acquire/release on flag)
     std::atomic<bool> deferred_grasp_pending_{false};
@@ -351,7 +363,7 @@ namespace franka_kitting_controller {
                                const GripperData& gripper_snapshot,
                                double tau_ext_norm);
 
-    /// Run internal force ramp transitions (GRASPING→UPLIFT→EVALUATE→...).
+    /// Run internal force ramp transitions (GRASPING→UPLIFT→EVALUATE→SUCCESS/FAILED).
     /// Called at 250Hz from update(). Drives all internal state transitions.
     void runInternalTransitions(const ros::Time& time,
                                 double tau_ext_norm,
@@ -388,11 +400,10 @@ namespace franka_kitting_controller {
              s == GraspState::CONTACT_CONFIRMED;
     }
 
-    /// State predicate: GRASPING, UPLIFT, EVALUATE, DOWNLIFT, or SETTLING.
+    /// State predicate: GRASPING, UPLIFT, or EVALUATE.
     static bool isForceRampPhase(GraspState s) {
       return s == GraspState::GRASPING || s == GraspState::UPLIFT ||
-             s == GraspState::EVALUATE || s == GraspState::SLIP ||
-             s == GraspState::DOWNLIFT || s == GraspState::SETTLING;
+             s == GraspState::EVALUATE;
     }
 
     /// Resolve a per-command parameter: use msg_value if positive, else default_value.
@@ -476,15 +487,6 @@ namespace franka_kitting_controller {
                     double support_force,
                     const GripperData& gripper_snapshot);
     void tickEvaluate(const ros::Time& time, double tau_ext_norm,
-                      double support_force,
-                      const GripperData& gripper_snapshot);
-    void tickSlip(const ros::Time& time, double tau_ext_norm,
-                  double support_force,
-                  const GripperData& gripper_snapshot);
-    void tickDownlift(const ros::Time& time, double tau_ext_norm,
-                      double support_force,
-                      const GripperData& gripper_snapshot);
-    void tickSettling(const ros::Time& time, double tau_ext_norm,
                       double support_force,
                       const GripperData& gripper_snapshot);
 

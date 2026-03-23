@@ -34,4 +34,5 @@ bool gripper_is_grasped        # Firmware-level grasp detection flag
 
 # Force ramp state (from automated force ramp state machine)
 float64 grasp_force            # Current grasp force [N] (0 if not in force ramp)
-int32 grasp_iteration          # Force ramp iteration (0-based; 0 = first attempt)
+int32 grasp_iteration          # Force ramp step number (1-based; matches GRASP_N labels, 0 when not in ramp)
+string grasp_ramp_phase        # Sub-phase within current GRASP step ("settling", "holding", "")
