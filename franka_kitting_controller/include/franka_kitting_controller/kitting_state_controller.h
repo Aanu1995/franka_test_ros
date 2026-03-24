@@ -208,8 +208,8 @@ namespace franka_kitting_controller {
     sms_cusum::SMSCusum sms_detector_{sms_cusum::SMSCusumConfig{}};
     std::atomic<bool> gripper_stop_sent_{false};  // Written by realtime, read by command thread
     std::atomic<bool> gripper_stopped_{false};    // Read thread → realtime: stop() completed AND post-stop width captured
-    std::atomic<bool> width_capture_pending_{false};  // Read thread internal: capture contact_width_ on next readOnce()
-    std::atomic<double> contact_width_{0.0};  // [m] Width at contact — written by read thread after stop()
+    std::atomic<bool> width_capture_pending_{false};  // Read thread internal: signal gripper_stopped_ on next readOnce()
+    std::atomic<double> contact_width_{0.0};  // [m] Width at contact — written by read thread; deferred grasp uses gs.width directly
 
     // RT-local copies of CLOSING params (snapshotted at CLOSING_COMMAND entry)
     double closing_w_cmd_{0.001};    // Resolved target width for active MoveAction

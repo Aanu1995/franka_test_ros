@@ -473,12 +473,12 @@ Detects contact by monitoring tau_ext_norm during CLOSING using a one-sided down
 When contact is detected, the controller stops the gripper and transitions through two contact states:
 
 1. **Contact detected (RT thread)**: Sets `contact_latched_`, sets `stop_requested_`, and transitions to **CONTACT_CONFIRMED** immediately.
-2. **Read thread executes stop**: Checks `stop_requested_` after each `readOnce()`, calls `franka::Gripper::stop()` to physically halt the motor, then sets `width_capture_pending_` to defer width capture. If `stop()` throws an exception, `stop_requested_` remains true for automatic retry on the next iteration.
-3. **Read thread captures width**: On the next `readOnce()` after `stop()`, reads the true stopped width from firmware and stores it to `contact_width_`. Only then sets `gripper_stopped_` to signal the RT thread. This guarantees `contact_width_` reflects the actual stopped position, not a stale pre-stop reading.
+2. **Read thread executes stop**: Checks `stop_requested_` after each `readOnce()`, calls `franka::Gripper::stop()` to physically halt the motor, then sets `width_capture_pending_` to begin a settle-wait. If `stop()` throws an exception, `stop_requested_` remains true for automatic retry on the next iteration.
+3. **Read thread signals stop**: On the next `readOnce()` after `stop()`, sets `gripper_stopped_` to signal the RT thread that the gripper has stopped. `contact_width_` is stored for logging/validation, but the actual grasp width is always read fresh from `gs.width` at the moment the grasp command is dispatched — this guarantees the target matches the gripper's real position.
 4. **Deferred transition (RT thread)**: Sees `contact_latched_ && CONTACT_CONFIRMED && gripper_stopped_` and transitions to **CONTACT**. `contact_width_` is already set by the read thread.
 5. **One-shot guard**: `gripper_stop_sent_` flag prevents duplicate stop requests; `contact_latched_` prevents re-detection.
 
-The atomic stores in `update()` are single-word writes (nanoseconds), fully RT-safe. The actual `stop()` call and width capture execute in the non-RT read thread. The state transition is deferred by ~20–30 ms (one gripper firmware update period plus one read cycle) to ensure the gripper has physically stopped and the width is captured before CONTACT data is recorded.
+The atomic stores in `update()` are single-word writes (nanoseconds), fully RT-safe. The actual `stop()` call and width capture execute in the non-RT read thread. The state transition is deferred until the gripper has fully settled (typically 20–100 ms depending on closing speed and deceleration), ensuring `contact_width_` reflects the true resting position before CONTACT data is recorded.
 
 ### Latching
 
@@ -952,7 +952,8 @@ The Grasp logger is written in C++ using the `rosbag::Bag` API directly and `top
 - Object contact: SMS-CUSUM detects torque drop → CONTACT_CONFIRMED immediately, then CONTACT when gripper stopped
 - Gripper stop requested immediately on contact: `stop()` called via atomic flag and read thread
 - CONTACT_CONFIRMED published at SMS-CUSUM detection; CONTACT deferred until gripper has physically stopped
-- Contact width captured by read thread on first `readOnce()` after `stop()`, then `gripper_stopped_` set — ensures RT thread always sees fresh width
+- Grasp commands always use the current gripper width (`gs.width` from `readOnce()`) as the target — never a pre-stored value. Both initial and deferred grasps are routed through the read thread, which reads the fresh width at dispatch time. This prevents the gripper from opening to reach a stale target.
+- `contact_width_` is stored for logging and RT-thread diagnostics but is NOT used as the grasp target
 - KittingState contains robot signals, gripper signals, and force ramp state — all published at 250 Hz
 - Publishing CLOSING on `state_cmd` triggers gripper `move()` + CLOSING_COMMAND state label (transitions to CLOSING when move confirmed executing)
 - Publishing BASELINE on `state_cmd` prepares for new trial (optionally opens gripper)

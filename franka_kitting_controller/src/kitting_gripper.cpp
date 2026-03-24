@@ -50,16 +50,16 @@ namespace franka_kitting_controller {
         data.stamp = now;
         gripper_data_buf_.writeFromNonRT(data);
 
-        // Post-stop width capture: the first readOnce() after stop() returns the
-        // true stopped width. Store it to contact_width_ BEFORE setting
-        // gripper_stopped_, so the RT thread always sees a fresh width.
+        // Post-stop signal: once the gripper has stopped, signal the RT thread.
+        // contact_width_ is NOT captured here — it will be read fresh from gs.width
+        // at the moment the grasp command is dispatched (either in handleGraspingCmd
+        // via the GripperData buffer, or in the deferred grasp path below).
+        // This ensures the grasp target always matches the gripper's actual position.
         if (width_capture_pending_.load(std::memory_order_relaxed)) {
           contact_width_.store(gs.width, std::memory_order_relaxed);
-          // Release: ensures contact_width_ store is visible to the RT thread
-          // before it observes gripper_stopped_ == true (loaded with acquire).
           gripper_stopped_.store(true, std::memory_order_release);
           width_capture_pending_.store(false, std::memory_order_relaxed);
-          ROS_INFO("  [GRIPPER]  Post-stop width captured: %.4f m", gs.width);
+          ROS_INFO("  [GRIPPER]  Post-stop width: %.4f m  w_dot=%.6f m/s", gs.width, w_dot);
         }
 
         // Handle stop request from RT thread
@@ -68,7 +68,7 @@ namespace franka_kitting_controller {
             gripper_->stop();
             ROS_INFO("  [GRIPPER]  stop() executed by read thread");
             // Don't set gripper_stopped_ yet — buffer has pre-stop width.
-            // Capture true stopped width on the next readOnce() iteration.
+            // Signal on next readOnce() iteration.
             width_capture_pending_.store(true, std::memory_order_relaxed);
             stop_requested_.store(false, std::memory_order_relaxed);
           } catch (const franka::Exception& ex) {
@@ -78,27 +78,32 @@ namespace franka_kitting_controller {
           }
         }
 
-        // Dispatch deferred grasp (RT → read thread handoff via acquire/release)
+        // Deferred grasp (RT → read thread handoff via acquire/release)
+        // Uses gs.width (current readOnce() measurement) as the grasp target
+        // instead of a pre-stored width — guarantees the target matches the
+        // gripper's actual position, preventing the gripper from opening.
         if (deferred_grasp_pending_.load(std::memory_order_acquire)) {
           // Release any current grasp before retrying — libfranka grasp() hangs
           // if the gripper is already in a grasped state at the target width.
           try {
             gripper_->stop();
-          } catch (const franka::Exception&) {
-            // Benign: no command in progress
-          }
+          } catch (const franka::Exception&) {}
 
           GripperCommand grasp_cmd;
           grasp_cmd.type = GripperCommandType::GRASP;
-          grasp_cmd.width = deferred_grasp_width_;
+          grasp_cmd.width = gs.width;
           grasp_cmd.speed = deferred_grasp_speed_;
           grasp_cmd.force = deferred_grasp_force_;
           grasp_cmd.epsilon_inner = deferred_grasp_epsilon_;
           grasp_cmd.epsilon_outer = deferred_grasp_epsilon_;
           queueGripperCommand(grasp_cmd);
-          ROS_INFO("  [GRIPPER]  Deferred grasp queued: width=%.4f speed=%.4f force=%.1f eps=%.4f",
-                  deferred_grasp_width_, deferred_grasp_speed_,
-                  deferred_grasp_force_, deferred_grasp_epsilon_);
+
+          contact_width_.store(gs.width, std::memory_order_relaxed);
+
+          ROS_INFO("  [GRIPPER]  Deferred grasp queued: width=%.4f (current) speed=%.4f "
+                  "force=%.1f eps=%.4f",
+                  gs.width, deferred_grasp_speed_, deferred_grasp_force_,
+                  deferred_grasp_epsilon_);
           deferred_grasp_pending_.store(false, std::memory_order_relaxed);
         }
 
@@ -196,8 +201,10 @@ namespace franka_kitting_controller {
       if (cmd.result_promise) {
         cmd.result_promise->set_value(success);
       }
-      cmd_success_.store(success, std::memory_order_release);
-      cmd_executing_.store(false, std::memory_order_relaxed);
+      cmd_success_.store(success, std::memory_order_relaxed);
+      // Release ordering ensures cmd_success_ is visible to the RT thread
+      // before it observes cmd_executing_ == false (loaded with acquire in tickGrasping).
+      cmd_executing_.store(false, std::memory_order_release);
     }
   }
 

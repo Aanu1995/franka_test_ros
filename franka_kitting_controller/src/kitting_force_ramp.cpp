@@ -219,11 +219,9 @@ namespace franka_kitting_controller {
 
     switch (fr_ramp_phase_) {
       case RampPhase::COMMAND_SENT: {
-        // Wait for command thread to pick up the grasp command
         if (elapsed < kGraspSettleDelay) {
           return;
         }
-        // Wait for cmd_executing_ to go true
         if (!fr_grasp_cmd_seen_executing_) {
           if (cmd_executing_.load(std::memory_order_relaxed)) {
             fr_grasp_cmd_seen_executing_ = true;
@@ -235,7 +233,6 @@ namespace franka_kitting_controller {
       }
 
       case RampPhase::WAITING_EXECUTION: {
-        // Wait for grasp command to finish (cmd_executing_ → false)
         if (cmd_executing_.load(std::memory_order_relaxed)) {
           return;
         }
@@ -259,7 +256,6 @@ namespace franka_kitting_controller {
       }
 
       case RampPhase::SETTLING: {
-        // Wait grasp_settle_time for gripper to stabilize
         if ((time - fr_ramp_step_start_time_).toSec() < rt_fr_grasp_settle_time_) {
           return;
         }
@@ -283,7 +279,6 @@ namespace franka_kitting_controller {
       case RampPhase::HOLDING: {
         double hold_elapsed = (time - fr_ramp_step_start_time_).toSec();
 
-        // On the last ramp step, accumulate W_pre (support force) during hold
         bool is_last_step = (fr_f_current_ >= rt_fr_f_max_);
         if (is_last_step) {
           fr_pre_sum_ += support_force;
@@ -295,7 +290,6 @@ namespace franka_kitting_controller {
           return;
         }
 
-        // Hold complete — update contact_width from current gripper measurement
         contact_width_.store(gripper_snapshot.width, std::memory_order_relaxed);
 
         ROS_INFO("    GRASP_%d: hold complete  F=%.1f N  width=%.4f m (updated)",
@@ -310,7 +304,6 @@ namespace franka_kitting_controller {
         bool is_last_step = (fr_f_current_ >= rt_fr_f_max_);
 
         if (is_last_step) {
-          // All ramp steps done — transition to UPLIFT
           uplift_start_pose_ = cartesian_pose_handle_->getRobotState().O_T_EE_d;
           uplift_z_start_ = uplift_start_pose_[14];
           uplift_elapsed_ = 0.0;
@@ -330,17 +323,14 @@ namespace franka_kitting_controller {
           fr_f_current_ = std::min(fr_f_current_ + rt_fr_f_step_, rt_fr_f_max_);
           fr_iteration_++;
 
-          // Dispatch deferred grasp at new force with updated contact_width
           double w = contact_width_.load(std::memory_order_relaxed);
           requestDeferredGrasp(w, rt_fr_grasp_speed_, fr_f_current_, rt_fr_epsilon_);
 
-          // Reset for next step
           fr_phase_start_time_ = time;
           fr_grasping_phase_initialized_ = true;
           fr_grasp_cmd_seen_executing_ = false;
           fr_ramp_phase_ = RampPhase::COMMAND_SENT;
 
-          // Publish GRASP_N label for the new step
           char label[16];
           std::snprintf(label, sizeof(label), "GRASP_%d", fr_iteration_ + 1);
           publishStateLabel(label);
@@ -357,7 +347,7 @@ namespace franka_kitting_controller {
                                           double /* support_force */,
                                           const GripperData& /* gripper_snapshot */) {
     if (uplift_active_.load(std::memory_order_relaxed)) {
-      return;  // Trajectory still running
+      return;
     }
 
     fr_phase_start_time_ = time;

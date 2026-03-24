@@ -159,7 +159,6 @@ namespace franka_kitting_controller {
       return;
     }
 
-    // Resolve force ramp parameters
     staging_fr_f_min_             = resolveParam(msg->f_min, fr_f_min_);
     staging_fr_f_step_            = resolveParam(msg->f_step, fr_f_step_);
     staging_fr_f_max_             = resolveParam(msg->f_max, fr_f_max_);
@@ -195,16 +194,12 @@ namespace franka_kitting_controller {
       staging_fr_uplift_hold_ = kMaxUpliftHold;
     }
 
-    GripperCommand gripper_cmd;
-    gripper_cmd.type = GripperCommandType::GRASP;
-    gripper_cmd.width = width;
-    gripper_cmd.speed = staging_fr_grasp_speed_;
-    gripper_cmd.force = staging_fr_f_min_;
-    gripper_cmd.epsilon_inner = staging_fr_epsilon_;
-    gripper_cmd.epsilon_outer = staging_fr_epsilon_;
-    queueGripperCommand(gripper_cmd);
-    ROS_INFO("KittingStateController: Queued grasp(width=%.4f, eps=%.4f, "
-            "speed=%.4f, force=%.1f)",
+    // Route through deferred grasp so the read thread uses gs.width (the current
+    // gripper width from readOnce()) as the grasp target. This guarantees the
+    // target matches the gripper's actual position — prevents opening.
+    requestDeferredGrasp(width, staging_fr_grasp_speed_, staging_fr_f_min_, staging_fr_epsilon_);
+    ROS_INFO("KittingStateController: Deferred grasp(contact_width=%.4f, eps=%.4f, "
+            "speed=%.4f, force=%.1f) — read thread will use current width",
             width, staging_fr_epsilon_, staging_fr_grasp_speed_, staging_fr_f_min_);
 
     int total_steps = 1 + static_cast<int>(std::ceil((staging_fr_f_max_ - staging_fr_f_min_) / staging_fr_f_step_));
