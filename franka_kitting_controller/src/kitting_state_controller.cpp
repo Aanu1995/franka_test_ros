@@ -529,9 +529,10 @@ namespace franka_kitting_controller {
 
       fr_f_current_ = rt_fr_f_min_;
       fr_iteration_ = 0;
-      fr_grasping_phase_initialized_ = false;  // Set on first tickGrasping tick
+      fr_grasping_phase_initialized_ = false;
       fr_grasp_cmd_seen_executing_ = false;
       fr_ramp_phase_ = RampPhase::COMMAND_SENT;
+      cmd_success_.store(true, std::memory_order_relaxed);
 
       uplift_active_.store(false, std::memory_order_relaxed);
       deferred_grasp_pending_.store(false, std::memory_order_relaxed);
