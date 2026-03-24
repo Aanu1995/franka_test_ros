@@ -120,7 +120,7 @@ namespace franka_kitting_controller {
           queueGripperCommand(open_cmd);
           baseline_open_dispatched_.store(true, std::memory_order_relaxed);
           ROS_INFO("  [BASELINE]  Step 2: Gripper open queued (post-downlift): "
-                   "move(width=%.4f, speed=0.1)", baseline_open_width_);
+                   "move(width=%.4f, speed=0.1)", baseline_open_width_.load(std::memory_order_relaxed));
         }
 
         // Baseline prep complete: gripper open has finished → mark prep done.
