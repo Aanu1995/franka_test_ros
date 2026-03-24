@@ -8,6 +8,7 @@
 
 #include <franka_kitting_controller/kitting_state_controller.h>
 
+#include <cmath>
 #include <string>
 
 #include <boost/make_shared.hpp>
@@ -83,18 +84,20 @@ namespace franka_kitting_controller {
       const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg) {
     // Determine if gripper open is needed before baseline collection.
     // When require_logger_ (record:=true), always open to ensure clean baseline.
-    baseline_needs_open_ = msg->open_gripper || require_logger_;
+    bool needs_open = msg->open_gripper || require_logger_;
+    baseline_needs_open_.store(needs_open, std::memory_order_relaxed);
 
-    if (baseline_needs_open_) {
-      baseline_open_width_ = resolveParam(msg->open_width,
-                                          gripper_data_buf_.readFromNonRT()->max_width);
-      ROS_INFO("  [BASELINE]  Gripper open deferred: width=%.4f", baseline_open_width_);
+    if (needs_open) {
+      double open_w = resolveParam(msg->open_width,
+                                   gripper_data_buf_.readFromNonRT()->max_width);
+      baseline_open_width_.store(open_w, std::memory_order_relaxed);
+      ROS_INFO("  [BASELINE]  Gripper open deferred: width=%.4f", open_w);
     }
 
-    // baseline_prep_done_ is set FALSE here; it will be set TRUE by the RT thread
-    // only after downlift completes AND gripper open completes (if needed).
-    baseline_prep_done_.store(false, std::memory_order_release);
+    // baseline_prep_done_ release-store publishes baseline_needs_open_ and
+    // baseline_open_width_ to the read thread (which acquire-loads baseline_prep_done_).
     baseline_open_dispatched_.store(false, std::memory_order_relaxed);
+    baseline_prep_done_.store(false, std::memory_order_release);
 
     pending_state_.store(GraspState::BASELINE, std::memory_order_relaxed);
     state_changed_.store(true, std::memory_order_release);
@@ -204,7 +207,7 @@ namespace franka_kitting_controller {
             "speed=%.4f, force=%.1f)",
             width, staging_fr_epsilon_, staging_fr_grasp_speed_, staging_fr_f_min_);
 
-    int total_steps = 1 + static_cast<int>((staging_fr_f_max_ - staging_fr_f_min_) / staging_fr_f_step_);
+    int total_steps = 1 + static_cast<int>(std::ceil((staging_fr_f_max_ - staging_fr_f_min_) / staging_fr_f_step_));
 
     pending_state_.store(GraspState::GRASPING, std::memory_order_relaxed);
     state_changed_.store(true, std::memory_order_release);

@@ -705,7 +705,7 @@ The **velocity profile** (first derivative) is:
 | CLOSING timeout         | 30 s              | Transitions to FAILED if CLOSING phase exceeds duration without contact    |
 | GRASPING timeout        | 10 s              | Transitions to FAILED if gripper command does not complete; sends `stop_requested_` to cancel in-flight command |
 | Action server timeout   | 30 s              | Action server commands abort if gripper does not respond within timeout     |
-| Force ramp limit        | `F ≤ f_max`       | Ramp stops at f_max; slip at EVALUATE transitions to FAILED                |
+| Force ramp limit        | `F ≤ f_max`       | Ramp clamps to f_max (always reached); slip at EVALUATE transitions to FAILED |
 
 ## Configuration
 
@@ -721,7 +721,7 @@ The **velocity profile** (first derivative) is:
 | `epsilon`                  | double | `0.008` | Epsilon for GraspAction (inner and outer) [m]                       |
 | `f_min`                    | double | `3.0`   | Starting grasp force [N]                                            |
 | `f_step`                   | double | `3.0`   | Force increment per ramp step [N]                                   |
-| `f_max`                    | double | `70.0`  | Maximum force — FAILED if exceeded [N]                              |
+| `f_max`                    | double | `70.0`  | Maximum force for the final ramp step [N] (ramp clamps to this value) |
 | `uplift_distance`          | double | `0.010` | Micro-uplift distance after final ramp step [m] (max 0.3)           |
 | `lift_speed`               | double | `0.01`  | Lift speed for UPLIFT and BASELINE prep downlift [m/s] (min 0.001)  |
 | `uplift_hold`              | double | `1.0`   | Hold time at top for evaluation: early (first half) + late (second half) windows [s] (min 0.5, max 120.0) |

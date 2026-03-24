@@ -102,15 +102,17 @@ namespace franka_kitting_controller {
           deferred_grasp_pending_.store(false, std::memory_order_relaxed);
         }
 
-        // Baseline prep step 2: queue gripper open after downlift completes
-        if (baseline_needs_open_ &&
-            !baseline_prep_done_.load(std::memory_order_relaxed) &&
+        // Baseline prep step 2: queue gripper open after downlift completes.
+        // baseline_needs_open_ and baseline_open_width_ are synchronized via
+        // baseline_prep_done_ (release on subscriber, acquire here).
+        if (baseline_needs_open_.load(std::memory_order_relaxed) &&
+            !baseline_prep_done_.load(std::memory_order_acquire) &&
             !baseline_open_dispatched_.load(std::memory_order_relaxed) &&
             !downlift_active_.load(std::memory_order_relaxed) &&
             current_state_.load(std::memory_order_relaxed) == GraspState::BASELINE) {
           GripperCommand open_cmd;
           open_cmd.type = GripperCommandType::MOVE;
-          open_cmd.width = baseline_open_width_;
+          open_cmd.width = baseline_open_width_.load(std::memory_order_relaxed);
           open_cmd.speed = 0.1;
           // Set tracking state BEFORE queueing to avoid race where the command
           // completes before we initialize the tracking flag.

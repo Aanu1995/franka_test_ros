@@ -267,7 +267,7 @@ namespace franka_kitting_controller {
         fr_ramp_step_start_time_ = time;
 
         // On the last ramp step, initialize W_pre accumulators for EVALUATE
-        bool is_last_step = (fr_f_current_ + rt_fr_f_step_ > rt_fr_f_max_);
+        bool is_last_step = (fr_f_current_ >= rt_fr_f_max_);
         if (is_last_step) {
           fr_pre_sum_ = 0.0;
           fr_pre_sum_sq_ = 0.0;
@@ -284,7 +284,7 @@ namespace franka_kitting_controller {
         double hold_elapsed = (time - fr_ramp_step_start_time_).toSec();
 
         // On the last ramp step, accumulate W_pre (support force) during hold
-        bool is_last_step = (fr_f_current_ + rt_fr_f_step_ > rt_fr_f_max_);
+        bool is_last_step = (fr_f_current_ >= rt_fr_f_max_);
         if (is_last_step) {
           fr_pre_sum_ += support_force;
           fr_pre_sum_sq_ += support_force * support_force;
@@ -306,7 +306,8 @@ namespace franka_kitting_controller {
       }
 
       case RampPhase::STEP_COMPLETE: {
-        bool is_last_step = (fr_f_current_ + rt_fr_f_step_ > rt_fr_f_max_);
+        // Last step when we've already reached f_max (no more force to add)
+        bool is_last_step = (fr_f_current_ >= rt_fr_f_max_);
 
         if (is_last_step) {
           // All ramp steps done — transition to UPLIFT
@@ -325,8 +326,8 @@ namespace franka_kitting_controller {
                   fr_iteration_ + 1, fr_f_current_, gripper_snapshot.width,
                   rt_fr_uplift_distance_, rt_uplift_duration_);
         } else {
-          // Advance to next force step
-          fr_f_current_ += rt_fr_f_step_;
+          // Advance to next force step (clamp to f_max so we always attempt the max)
+          fr_f_current_ = std::min(fr_f_current_ + rt_fr_f_step_, rt_fr_f_max_);
           fr_iteration_++;
 
           // Dispatch deferred grasp at new force with updated contact_width

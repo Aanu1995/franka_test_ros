@@ -421,6 +421,47 @@ TEST_F(KittingControllerTestFixture, TickGrasping_ContactWidthUpdate) {
   EXPECT_NEAR(contactWidth(), 0.038, 1e-10);
 }
 
+TEST_F(KittingControllerTestFixture, TickGrasping_NonDivisibleRange_ReachesFMax) {
+  // f_min=3, f_step=4, f_max=10: should execute 3 → 7 → 10 (clamped), not stop at 7
+  setCurrentState(GraspState::GRASPING);
+  setForceCurrent(7.0);  // After first advance: 3+4=7
+  setIteration(1);
+  setGraspingInitialized(true);
+  setPhaseStartTime(ros::Time(100.0));
+  setRampPhase(RampPhase::STEP_COMPLETE);
+  setForceRampParams(3.0, 4.0, 10.0, 0.010, 0.01, 1.0);
+  setContactWidth(0.04);
+
+  auto g = makeDefaultGripper();
+  ros::Time t(101.0);
+  callTickGrasping(t, 0.0, 5.0, g);
+
+  // Should advance to 10 (clamped), NOT uplift
+  EXPECT_EQ(currentState(), GraspState::GRASPING);
+  EXPECT_EQ(rampPhase(), RampPhase::COMMAND_SENT);
+  EXPECT_DOUBLE_EQ(forceCurrent(), 10.0);  // Clamped to f_max
+  EXPECT_EQ(iteration(), 2);
+  EXPECT_TRUE(deferredGraspPending());
+}
+
+TEST_F(KittingControllerTestFixture, TickGrasping_AtFMax_IsLastStep) {
+  // When fr_f_current_ == f_max, STEP_COMPLETE should transition to UPLIFT
+  setCurrentState(GraspState::GRASPING);
+  setForceCurrent(10.0);  // Already at f_max
+  setIteration(2);
+  setGraspingInitialized(true);
+  setPhaseStartTime(ros::Time(100.0));
+  setRampPhase(RampPhase::STEP_COMPLETE);
+  setForceRampParams(3.0, 4.0, 10.0, 0.010, 0.01, 1.0);
+
+  auto g = makeDefaultGripper();
+  ros::Time t(101.0);
+  callTickGrasping(t, 0.0, 5.0, g);
+
+  EXPECT_EQ(currentState(), GraspState::UPLIFT);
+  EXPECT_TRUE(upliftActive());
+}
+
 // ============================================================================
 // Trajectory math tests
 // ============================================================================

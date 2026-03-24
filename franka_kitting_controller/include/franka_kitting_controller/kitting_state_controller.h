@@ -183,10 +183,10 @@ namespace franka_kitting_controller {
     //   2. Gripper open completes (if open_gripper or record:=true)
     // The RT thread sets it when no prep is needed or when all prep finishes.
     std::atomic<bool> baseline_prep_done_{true};         // FALSE = prep in progress, baseline gated
-    bool baseline_needs_open_{false};                    // Open requested (subscriber thread → RT thread)
+    std::atomic<bool> baseline_needs_open_{false};       // Open requested (subscriber → RT/read thread). Synchronized via baseline_prep_done_ release/acquire.
     std::atomic<bool> baseline_open_dispatched_{false};  // Open command queued by read thread
-    bool baseline_open_seen_executing_{false};           // cmd_executing_ went true after dispatch (read thread)
-    double baseline_open_width_{0.0};                    // Width to open to [m]
+    bool baseline_open_seen_executing_{false};           // cmd_executing_ went true after dispatch (read thread only)
+    std::atomic<double> baseline_open_width_{0.0};       // Width to open to [m]. Synchronized via baseline_prep_done_ release/acquire.
 
     // --- Grasp: Gripper default parameters (overridable per-command) ---
     double closing_width_{0.001};

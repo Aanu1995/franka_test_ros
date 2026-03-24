@@ -269,8 +269,9 @@ namespace franka_kitting_controller {
       ROS_ERROR_STREAM("KittingStateController: Failed to connect to gripper: " << ex.what());
       return false;
     }
-    gripper_read_thread_ = std::thread(&KittingStateController::gripperReadLoop, this);
-    gripper_cmd_thread_ = std::thread(&KittingStateController::gripperCommandLoop, this);
+    // NOTE: gripper worker threads are started AFTER all hardware interfaces
+    // are validated (see below). This prevents live threads running against a
+    // partially-initialized controller if a later init step fails.
 
     franka_state_interface_ = robot_hw->get<franka_hw::FrankaStateInterface>();
     if (franka_state_interface_ == nullptr) {
@@ -316,6 +317,10 @@ namespace franka_kitting_controller {
           "KittingStateController: Exception getting Cartesian pose handle: " << ex.what());
       return false;
     }
+
+    // All hardware interfaces validated — safe to start gripper worker threads.
+    gripper_read_thread_ = std::thread(&KittingStateController::gripperReadLoop, this);
+    gripper_cmd_thread_ = std::thread(&KittingStateController::gripperCommandLoop, this);
 
     kitting_publisher_.init(node_handle, "kitting_state_data", 1);
 
@@ -474,14 +479,15 @@ namespace franka_kitting_controller {
       //   - gripper needs opening (baseline_needs_open_)
       // It is set TRUE only when both are complete.
       // If neither is needed, mark prep done immediately.
-      if (!needs_downlift && !baseline_needs_open_) {
+      bool needs_open = baseline_needs_open_.load(std::memory_order_relaxed);
+      if (!needs_downlift && !needs_open) {
         baseline_prep_done_.store(true, std::memory_order_release);
         ROS_INFO("  [BASELINE]  No prep needed — baseline collection starting");
       } else {
         ROS_INFO("  [BASELINE]  Prep: %s%s%s — baseline collection gated",
                  needs_downlift ? "lowering" : "",
-                 (needs_downlift && baseline_needs_open_) ? " + " : "",
-                 baseline_needs_open_ ? "opening" : "");
+                 (needs_downlift && needs_open) ? " + " : "",
+                 needs_open ? "opening" : "");
       }
     }
 
@@ -561,7 +567,7 @@ namespace franka_kitting_controller {
         // Baseline prep: if we just finished the BASELINE downlift and no open needed,
         // mark prep done now so baseline collection can start.
         if (current_state_.load(std::memory_order_relaxed) == GraspState::BASELINE &&
-            !baseline_needs_open_) {
+            !baseline_needs_open_.load(std::memory_order_relaxed)) {
           baseline_prep_done_.store(true, std::memory_order_release);
           ROS_INFO("  [BASELINE]  Arm lowered — no open needed — baseline collection starting");
         }

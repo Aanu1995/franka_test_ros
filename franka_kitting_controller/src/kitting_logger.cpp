@@ -96,6 +96,21 @@ namespace franka_kitting_controller {
       topic_subs_.push_back(sub);
     }
 
+    // --- Auto-start recording on launch ---
+    // Recording begins immediately when the logger node starts.
+    // The ready signal is published AFTER recording starts, so the controller
+    // never accepts commands without an active recording session.
+    {
+      std::lock_guard<std::mutex> lock(trial_mutex_);
+      startTrial();
+    }
+
+    if (!is_recording_) {
+      ROS_ERROR("KittingLogger: Failed to start recording — logger_ready NOT published. "
+                "Controller will reject all commands until logger is relaunched.");
+      return;
+    }
+
     // --- Publish latched logger_ready signal ---
     // The controller gates Grasp commands behind this signal.
     // Latched = new subscribers immediately receive the last published message.
@@ -104,14 +119,6 @@ namespace franka_kitting_controller {
     std_msgs::Bool ready_msg;
     ready_msg.data = true;
     logger_ready_pub_.publish(ready_msg);
-
-    // --- Auto-start recording on launch ---
-    // Recording begins immediately when the logger node starts.
-    // No need to publish START on /kitting_controller/record_control.
-    {
-      std::lock_guard<std::mutex> lock(trial_mutex_);
-      startTrial();
-    }
 
     ROS_INFO("KittingLogger: Ready | base_dir=%s object=%s csv_export=%s",
             base_directory_.c_str(), object_name_.c_str(),
@@ -305,10 +312,12 @@ namespace franka_kitting_controller {
     ROS_INFO("KittingLogger: Recording stopped (trial %d) -> %s",
             trial_number_, trial_dir_.c_str());
 
-    // Launch CSV export in background thread (non-blocking, joined on shutdown)
+    // Launch CSV export in background thread.
+    // Detach any previous export so we never block the subscriber callback.
+    // The destructor joins or detaches the final thread to prevent termination.
     if (export_csv_on_stop_) {
       if (csv_export_thread_.joinable()) {
-        csv_export_thread_.join();
+        csv_export_thread_.detach();
       }
       std::string bag_path_copy = bag_path_;
       csv_export_thread_ = std::thread(&KittingLogger::exportCsv, this,
