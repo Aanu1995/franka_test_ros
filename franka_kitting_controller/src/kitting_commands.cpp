@@ -173,6 +173,8 @@ namespace franka_kitting_controller {
       staging_fr_uplift_hold_ = kMaxUpliftHold;
     }
 
+    staging_fr_expected_cmd_gen_ = cmd_gen_.load(std::memory_order_relaxed);
+
     double current_width = gripper_data_buf_.readFromNonRT()->width;
     GripperCommand gripper_cmd;
     gripper_cmd.type = GripperCommandType::GRASP;

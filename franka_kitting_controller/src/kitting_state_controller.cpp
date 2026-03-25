@@ -467,11 +467,12 @@ namespace franka_kitting_controller {
       fr_iteration_ = 0;
       fr_grasping_phase_initialized_ = false;
       fr_grasp_cmd_seen_executing_ = false;
-      fr_expected_cmd_gen_ = cmd_gen_.load(std::memory_order_relaxed);
+      fr_expected_cmd_gen_ = staging_fr_expected_cmd_gen_;
       fr_ramp_phase_ = RampPhase::COMMAND_SENT;
 
       uplift_active_.store(false, std::memory_order_relaxed);
       deferred_grasp_pending_.store(false, std::memory_order_relaxed);
+      gripper_stop_sent_.store(false, std::memory_order_relaxed);
     }
 
     current_state_.store(new_state, std::memory_order_relaxed);

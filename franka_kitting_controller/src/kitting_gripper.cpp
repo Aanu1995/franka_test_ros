@@ -71,17 +71,17 @@ namespace franka_kitting_controller {
         if (deferred_grasp_pending_.load(std::memory_order_acquire)) {
           GripperCommand grasp_cmd;
           grasp_cmd.type = GripperCommandType::GRASP;
-          grasp_cmd.width = deferred_grasp_width_;
+          grasp_cmd.width = std::min(deferred_grasp_width_, gs.width);
           grasp_cmd.speed = deferred_grasp_speed_;
           grasp_cmd.force = deferred_grasp_force_;
           grasp_cmd.epsilon_inner = deferred_grasp_epsilon_;
           grasp_cmd.epsilon_outer = deferred_grasp_epsilon_;
           queueGripperCommand(grasp_cmd);
 
-          ROS_INFO("  [GRIPPER]  Deferred grasp queued: width=%.4f (stored, live=%.4f) "
+          ROS_INFO("  [GRIPPER]  Deferred grasp queued: width=%.4f (min of stored=%.4f, live=%.4f) "
                   "speed=%.4f force=%.1f eps=%.4f",
-                  deferred_grasp_width_, gs.width, deferred_grasp_speed_,
-                  deferred_grasp_force_, deferred_grasp_epsilon_);
+                  grasp_cmd.width, deferred_grasp_width_, gs.width,
+                  deferred_grasp_speed_, deferred_grasp_force_, deferred_grasp_epsilon_);
           deferred_grasp_pending_.store(false, std::memory_order_relaxed);
         }
 

@@ -259,6 +259,7 @@ namespace franka_kitting_controller {
     double staging_fr_load_transfer_min_{1.5};
     double staging_fr_grasp_force_hold_time_{1.0};
     double staging_fr_grasp_settle_time_{0.5};
+    uint32_t staging_fr_expected_cmd_gen_{0};
 
     // Force ramp runtime state (RT-thread owned)
     double fr_f_current_{0.0};
