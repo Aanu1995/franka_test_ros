@@ -16,12 +16,7 @@
 
 namespace franka_kitting_controller {
 
-  // ============================================================================
-  // Logger readiness callback
-  // ============================================================================
-
   void KittingStateController::loggerReadyCallback(const std_msgs::Bool::ConstPtr& msg) {
-    // Ignore stale latched messages from dead publishers
     if (msg->data && logger_ready_sub_.getNumPublishers() > 0) {
       if (!logger_ready_.load(std::memory_order_relaxed)) {
         logger_ready_.store(true, std::memory_order_relaxed);
@@ -30,17 +25,10 @@ namespace franka_kitting_controller {
     }
   }
 
-  // ============================================================================
-  // State command callback + command handlers
-  // ============================================================================
-
   void KittingStateController::stateCmdCallback(
       const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg) {
-    // Routes BASELINE/CLOSING/GRASPING/AUTO commands. Non-realtime (subscriber thread).
-    // Parameter override: 0.0 fields fall back to YAML defaults.
     const std::string& cmd = msg->command;
 
-    // Logger gate (when require_logger is true)
     if (require_logger_) {
       if (!logger_ready_.load(std::memory_order_relaxed) ||
           logger_ready_sub_.getNumPublishers() == 0) {
@@ -52,7 +40,6 @@ namespace franka_kitting_controller {
       }
     }
 
-    // Guard: START state requires BASELINE/AUTO first
     if (current_state_.load(std::memory_order_relaxed) == GraspState::START &&
         cmd != "BASELINE" && cmd != "AUTO") {
       ROS_WARN("KittingStateController: Command '%s' rejected — controller is in START state. "
@@ -61,7 +48,6 @@ namespace franka_kitting_controller {
       return;
     }
 
-    // Cancel auto mode if a manual command is received
     if (auto_mode_.load(std::memory_order_relaxed) && cmd != "AUTO") {
       cancelAutoMode();
     }
@@ -82,8 +68,6 @@ namespace franka_kitting_controller {
 
   void KittingStateController::handleBaselineCmd(
       const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg) {
-    // Determine if gripper open is needed before baseline collection.
-    // When require_logger_ (record:=true), always open to ensure clean baseline.
     bool needs_open = msg->open_gripper || require_logger_;
     baseline_needs_open_.store(needs_open, std::memory_order_relaxed);
 
@@ -94,8 +78,6 @@ namespace franka_kitting_controller {
       ROS_INFO("  [BASELINE]  Gripper open deferred: width=%.4f", open_w);
     }
 
-    // baseline_prep_done_ release-store publishes baseline_needs_open_ and
-    // baseline_open_width_ to the read thread (which acquire-loads baseline_prep_done_).
     baseline_open_dispatched_.store(false, std::memory_order_relaxed);
     baseline_prep_done_.store(false, std::memory_order_release);
 
@@ -135,15 +117,12 @@ namespace franka_kitting_controller {
 
     pending_state_.store(GraspState::CLOSING_COMMAND, std::memory_order_relaxed);
     state_changed_.store(true, std::memory_order_release);
-    // Label published from RT thread in applyPendingStateTransition() to prevent
-    // RealtimePublisher race — timer thread publish can be overwritten before delivery.
     logStateTransition("CLOSING_COMMAND", "Gripper close queued — awaiting execution");
     ROS_INFO("    width=%.4f m  speed=%.4f m/s", width, speed);
   }
 
   void KittingStateController::handleGraspingCmd(
       const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg) {
-    // Guard: GRASPING requires CONTACT (ramp step advances bypass this via requestDeferredGrasp)
     auto cur = current_state_.load(std::memory_order_relaxed);
     if (cur != GraspState::CONTACT) {
       ROS_WARN("KittingStateController: GRASPING rejected — not in CONTACT state (current: %s)",
@@ -194,9 +173,6 @@ namespace franka_kitting_controller {
       staging_fr_uplift_hold_ = kMaxUpliftHold;
     }
 
-    // Use the current gripper width from the RealtimeBuffer (most recent readOnce())
-    // instead of the pre-stored contact_width_. This guarantees the grasp target
-    // matches the gripper's actual position — prevents opening.
     double current_width = gripper_data_buf_.readFromNonRT()->width;
     GripperCommand gripper_cmd;
     gripper_cmd.type = GripperCommandType::GRASP;
@@ -229,10 +205,6 @@ namespace franka_kitting_controller {
             staging_fr_load_transfer_min_);
   }
 
-  // ============================================================================
-  // Auto mode — single-command full grasp sequence
-  // ============================================================================
-
   void KittingStateController::handleAutoCmd(
       const KittingGripperCommand::ConstPtr& msg) {
     cancelAutoMode();
@@ -243,10 +215,6 @@ namespace franka_kitting_controller {
 
     handleBaselineCmd(msg);
 
-    // Poll for baseline readiness instead of using a fixed timer.
-    // The prep sequence (lower → open → collect) can take variable time,
-    // so we must wait until baseline_prep_done_ AND cd_baseline_ready_
-    // before advancing to CLOSING.
     auto_baseline_poll_timer_ = auto_nh_.createTimer(
         ros::Duration(0.1),
         &KittingStateController::autoBaselinePollCallback, this);
@@ -268,11 +236,9 @@ namespace franka_kitting_controller {
       return;
     }
 
-    // Wait for prep done AND baseline data collected
     if (baseline_prep_done_.load(std::memory_order_relaxed) &&
         cd_baseline_ready_.load(std::memory_order_relaxed)) {
       auto_baseline_poll_timer_.stop();
-      // Apply auto_delay AFTER baseline is ready
       auto_delay_timer_ = auto_nh_.createTimer(
           ros::Duration(auto_delay_),
           &KittingStateController::autoClosingCallback, this, /*oneshot=*/true);

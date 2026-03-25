@@ -16,10 +16,6 @@
 
 namespace franka_kitting_controller {
 
-  // ============================================================================
-  // Deferred grasp dispatch (realtime-safe → read thread)
-  // ============================================================================
-
   void KittingStateController::requestDeferredGrasp(double width, double speed,
                                                     double force, double epsilon) {
     deferred_grasp_width_ = width;
@@ -29,11 +25,6 @@ namespace franka_kitting_controller {
     deferred_grasp_pending_.store(true, std::memory_order_release);
   }
 
-  // ============================================================================
-  // Closing-phase transitions
-  // CLOSING_COMMAND → CLOSING → CONTACT_CONFIRMED → CONTACT  or  → FAILED
-  // ============================================================================
-
   void KittingStateController::runClosingTransitions(const ros::Time& time,
                                                       const GripperData& gripper_snapshot,
                                                       double tau_ext_norm) {
@@ -41,24 +32,20 @@ namespace franka_kitting_controller {
 
     if ((state == GraspState::CLOSING_COMMAND || state == GraspState::CLOSING) &&
         !contact_latched_) {
-      // Hold one tick so CLOSING_COMMAND label is published before transitioning
       if (closing_command_entered_) {
         closing_command_entered_ = false;
         return;
       }
 
-      // Defer contact detection until move is confirmed running
       if (!closing_cmd_seen_executing_) {
         if (cmd_executing_.load(std::memory_order_relaxed)) {
           closing_cmd_seen_executing_ = true;
-          // Transition CLOSING_COMMAND → CLOSING now that gripper is confirmed moving
           if (state == GraspState::CLOSING_COMMAND) {
             current_state_.store(GraspState::CLOSING, std::memory_order_relaxed);
             state = GraspState::CLOSING;
             publishStateLabel("CLOSING");
             logStateTransition("CLOSING", "Gripper move confirmed — closing");
 
-            // Activate SMS-CUSUM contact detection
             if (sms_detector_.baseline_ready()) {
               sms_detector_.enter_closing();
               ROS_INFO("  [CLOSING]  SMS-CUSUM activated: k_eff=%.4f  baseline=%.3f  sigma=%.4f",
@@ -69,7 +56,6 @@ namespace franka_kitting_controller {
           }
         } else if (state == GraspState::CLOSING_COMMAND &&
                    (time - fr_phase_start_time_).toSec() > kClosingCmdTimeout) {
-          // Move command never started — command thread may be stuck
           current_state_.store(GraspState::FAILED, std::memory_order_relaxed);
           publishStateLabel("FAILED");
           logStateTransition("FAILED", "CLOSING_COMMAND timeout — move never started");
@@ -80,7 +66,6 @@ namespace franka_kitting_controller {
       if (closing_cmd_seen_executing_) {
         detectContact(time, gripper_snapshot, tau_ext_norm);
 
-        // No-contact: move completed without triggering contact → FAILED
         if (!contact_latched_ && !cmd_executing_.load(std::memory_order_relaxed)) {
           current_state_.store(GraspState::FAILED, std::memory_order_relaxed);
           publishStateLabel("FAILED");
@@ -91,7 +76,6 @@ namespace franka_kitting_controller {
           return;
         }
 
-        // Timeout: CLOSING phase exceeded maximum duration without contact → FAILED
         if (!contact_latched_ &&
             (time - fr_phase_start_time_).toSec() > kClosingTimeout) {
           current_state_.store(GraspState::FAILED, std::memory_order_relaxed);
@@ -105,14 +89,10 @@ namespace franka_kitting_controller {
       }
     }
 
-    // Deferred CONTACT transition: wait for gripper to physically stop.
-    // contact_width_ is captured by the read thread (gripperReadLoop) on the
-    // first readOnce() after stop(). gripper_stopped_ is stored with release
-    // AFTER contact_width_, so acquire here guarantees fresh width visibility.
+    // Deferred CONTACT: gripper_stopped_ acquire guarantees contact_width_ visibility.
     if (contact_latched_ &&
         current_state_.load(std::memory_order_relaxed) == GraspState::CONTACT_CONFIRMED &&
         gripper_stopped_.load(std::memory_order_acquire)) {
-      // contact_width_ already set by read thread — do NOT capture from RT buffer
       current_state_.store(GraspState::CONTACT, std::memory_order_relaxed);
       publishStateLabel("CONTACT");
       logStateTransition("CONTACT", "Gripper stopped — contact confirmed");
@@ -129,8 +109,7 @@ namespace franka_kitting_controller {
       return;
     }
 
-    // Baseline should already be collected during BASELINE state.
-    // Fallback: if not ready (e.g., CLOSING sent without prior BASELINE), collect now.
+    // Fallback baseline collection if CLOSING sent without prior BASELINE.
     if (!sms_detector_.baseline_ready()) {
       sms_detector_.update(tau_ext_norm);
       if (sms_detector_.baseline_ready() && !cd_baseline_ready_.load(std::memory_order_relaxed)) {
@@ -143,16 +122,11 @@ namespace franka_kitting_controller {
       return;
     }
 
-    // --- SMS-CUSUM contact detection (replaces fixed threshold + debounce) ---
     auto result = sms_detector_.update(tau_ext_norm);
 
     if (result.detected &&
         result.event.new_state == sms_cusum::GraspState::CONTACT) {
       contact_latched_ = true;
-
-      // Publish CONTACT_CONFIRMED immediately at the point of detection.
-      // Note: contact_width_ is NOT stored here — the gripper is still decelerating.
-      // It will be captured at the deferred CONTACT transition once the gripper has stopped.
       current_state_.store(GraspState::CONTACT_CONFIRMED, std::memory_order_relaxed);
       publishStateLabel("CONTACT_CONFIRMED");
       logStateTransition("CONTACT_CONFIRMED", "SMS-CUSUM contact detected — gripper stopping");
@@ -169,16 +143,6 @@ namespace franka_kitting_controller {
               gripper_snapshot.width);
     }
   }
-
-  // ============================================================================
-  // Force ramp state machine (250Hz, realtime-safe)
-  // Called from update() when state is GRASPING, UPLIFT, or EVALUATE.
-  //
-  // GRASPING: ramp force from f_min to f_max in f_step increments while object
-  //           remains on table. Each step: grasp → settle → hold/log.
-  //           Published as GRASP_1, GRASP_2, ..., GRASP_N.
-  // After final step: → UPLIFT → EVALUATE → SUCCESS/FAILED.
-  // ============================================================================
 
   void KittingStateController::runInternalTransitions(const ros::Time& time,
                                                       double tau_ext_norm,
@@ -203,7 +167,6 @@ namespace franka_kitting_controller {
 
     double elapsed = (time - fr_phase_start_time_).toSec();
 
-    // Global timeout for the current ramp step
     if (elapsed > kGraspTimeout) {
       if (cmd_executing_.load(std::memory_order_relaxed)) {
         stop_requested_.store(true, std::memory_order_relaxed);
@@ -225,6 +188,8 @@ namespace franka_kitting_controller {
         if (!fr_grasp_cmd_seen_executing_) {
           if (cmd_executing_.load(std::memory_order_relaxed)) {
             fr_grasp_cmd_seen_executing_ = true;
+          } else if (cmd_gen_.load(std::memory_order_acquire) > fr_expected_cmd_gen_) {
+            fr_grasp_cmd_seen_executing_ = true;
           }
           return;
         }
@@ -233,14 +198,11 @@ namespace franka_kitting_controller {
       }
 
       case RampPhase::WAITING_EXECUTION: {
-        if (cmd_executing_.load(std::memory_order_relaxed)) {
+        // Acquire on cmd_executing_ pairs with release in command thread.
+        if (cmd_executing_.load(std::memory_order_acquire)) {
           return;
         }
-        // Check hardware result: grasp() returns false if the gripper could not
-        // grasp at the commanded width/force/epsilon (e.g., object not present,
-        // width outside tolerance). cmd_success_ is set by the command thread
-        // with release ordering before cmd_executing_ goes false.
-        if (!cmd_success_.load(std::memory_order_acquire)) {
+        if (!cmd_success_.load(std::memory_order_relaxed)) {
           current_state_.store(GraspState::FAILED, std::memory_order_relaxed);
           publishStateLabel("FAILED");
           logStateTransition("FAILED", "Grasp command failed (hardware rejected)");
@@ -262,7 +224,6 @@ namespace franka_kitting_controller {
         fr_ramp_phase_ = RampPhase::HOLDING;
         fr_ramp_step_start_time_ = time;
 
-        // On the last ramp step, initialize W_pre accumulators for EVALUATE
         bool is_last_step = (fr_f_current_ >= rt_fr_f_max_);
         if (is_last_step) {
           fr_pre_sum_ = 0.0;
@@ -300,7 +261,6 @@ namespace franka_kitting_controller {
       }
 
       case RampPhase::STEP_COMPLETE: {
-        // Last step when we've already reached f_max (no more force to add)
         bool is_last_step = (fr_f_current_ >= rt_fr_f_max_);
 
         if (is_last_step) {
@@ -319,7 +279,6 @@ namespace franka_kitting_controller {
                   fr_iteration_ + 1, fr_f_current_, gripper_snapshot.width,
                   rt_fr_uplift_distance_, rt_uplift_duration_);
         } else {
-          // Advance to next force step (clamp to f_max so we always attempt the max)
           fr_f_current_ = std::min(fr_f_current_ + rt_fr_f_step_, rt_fr_f_max_);
           fr_iteration_++;
 
@@ -329,6 +288,7 @@ namespace franka_kitting_controller {
           fr_phase_start_time_ = time;
           fr_grasping_phase_initialized_ = true;
           fr_grasp_cmd_seen_executing_ = false;
+          fr_expected_cmd_gen_ = cmd_gen_.load(std::memory_order_relaxed);
           fr_ramp_phase_ = RampPhase::COMMAND_SENT;
 
           char label[16];
@@ -355,7 +315,7 @@ namespace franka_kitting_controller {
     fr_early_count_ = 0;
     fr_late_sum_ = 0.0;
     fr_late_count_ = 0;
-    fr_width_samples_.clear();  // Capacity preserved from starting() pre-allocation
+    fr_width_samples_.clear();
 
     current_state_.store(GraspState::EVALUATE, std::memory_order_relaxed);
     publishStateLabel("EVALUATE");
@@ -403,17 +363,16 @@ namespace franka_kitting_controller {
     double Fn_early = (fr_early_count_ > 0) ? fr_early_sum_ / fr_early_count_ : 0.0;
     double Fn_late  = (fr_late_count_ > 0)  ? fr_late_sum_ / fr_late_count_   : 0.0;
 
-    // --- Gate 1: Load Transfer (mandatory) ---
+    // Gate 1: Load Transfer
     double deltaF = Fn_early - Fn_pre;
     double load_thresh = std::max(3.0 * sigma_pre, rt_fr_load_transfer_min_);
     bool load_transferred = deltaF > load_thresh;
 
-    // --- Gate 2: Support drop check ---
-    double dF = (Fn_early - Fn_late) / std::max(Fn_early, kEpsilon);  // relative decay
+    // Gate 2: Support drop
+    double dF = (Fn_early - Fn_late) / std::max(Fn_early, kEpsilon);
     bool drop_ok = (dF <= rt_fr_slip_drop_thresh_);
 
-    // --- Gate 3: Jaw widening (P95 - P5) ---
-    // Note: nth_element is O(n) average — ~2-5μs for 250 samples, within 4ms RT budget.
+    // Gate 3: Jaw widening (P95 - P5)
     double p5 = 0.0, p95 = 0.0, dw = 0.0;
     int n = static_cast<int>(fr_width_samples_.size());
     if (n >= 20) {
@@ -429,7 +388,6 @@ namespace franka_kitting_controller {
     }
     bool width_ok = (dw <= rt_fr_slip_width_thresh_);
 
-    // --- Verdict: secure = Gate1 AND Gate2 AND Gate3 ---
     bool is_slipping = !(load_transferred && drop_ok && width_ok);
 
     ROS_INFO("  [EVAL] Gate 1 — Load Transfer:  deltaF=%.3f N  threshold=%.3f N  "
@@ -446,7 +404,7 @@ namespace franka_kitting_controller {
     ROS_INFO("  [EVAL] Verdict: %s", is_slipping ? "SLIPPING" : "SECURE");
 
     if (!is_slipping) {
-      accumulated_uplift_ += rt_fr_uplift_distance_;  // Track for BASELINE prep lowering
+      accumulated_uplift_ += rt_fr_uplift_distance_;
       current_state_.store(GraspState::SUCCESS, std::memory_order_relaxed);
       publishStateLabel("SUCCESS");
       logStateTransition("SUCCESS", "Secure grasp confirmed");

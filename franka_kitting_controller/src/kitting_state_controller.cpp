@@ -36,10 +36,6 @@ namespace franka_kitting_controller {
   constexpr double KittingStateController::kClosingCmdTimeout;
   constexpr double KittingStateController::kClosingTimeout;
 
-  // ============================================================================
-  // Utilities (used by all translation units)
-  // ============================================================================
-
   const char* KittingStateController::stateToString(GraspState state) {
     switch (state) {
       case GraspState::START:
@@ -94,10 +90,6 @@ namespace franka_kitting_controller {
     }
   }
 
-  // ============================================================================
-  // Trajectory math
-  // ============================================================================
-
   std::array<double, 16> KittingStateController::computeUpliftPose(double elapsed) const {
     std::array<double, 16> pose = uplift_start_pose_;
     double s_raw = std::min(elapsed / rt_uplift_duration_, 1.0);
@@ -114,14 +106,9 @@ namespace franka_kitting_controller {
     return pose;
   }
 
-  // ============================================================================
-  // Destructor
-  // ============================================================================
-
   KittingStateController::~KittingStateController() {
     cancelAutoMode();
 
-    // Shutdown action servers before stopping gripper threads
     if (move_action_server_) move_action_server_->shutdown();
     if (grasp_action_server_) grasp_action_server_->shutdown();
     if (homing_action_server_) homing_action_server_->shutdown();
@@ -144,10 +131,6 @@ namespace franka_kitting_controller {
     }
   }
 
-  // ============================================================================
-  // init() — Controller lifecycle initialization
-  // ============================================================================
-
   bool KittingStateController::init(hardware_interface::RobotHW* robot_hw,
                                     ros::NodeHandle& node_handle) {
     std::string arm_id;
@@ -163,14 +146,12 @@ namespace franka_kitting_controller {
     }
     rate_trigger_ = franka_hw::TriggerRate(publish_rate);
 
-    // --- SMS-CUSUM contact detection (noise-adaptive, no manual threshold tuning) ---
     ROS_INFO_STREAM("KittingStateController: Contact detection (SMS-CUSUM)"
                     << " | k_min=" << sms_detector_.config().contact_stage.k_min
                     << " | h=" << sms_detector_.config().contact_stage.h
                     << " | debounce=" << sms_detector_.config().contact_stage.debounce_count << " samples"
                     << " | noise_mult=" << sms_detector_.config().contact_stage.noise_multiplier);
 
-    // --- Grasp: Gripper default parameters (overridable per-command via KittingGripperCommand) ---
     node_handle.param("closing_width", closing_width_, 0.001);
     node_handle.param("closing_speed", closing_speed_, 0.05);
     if (closing_speed_ > kMaxClosingSpeed) {
@@ -182,7 +163,6 @@ namespace franka_kitting_controller {
                     << " | closing: width=" << closing_width_ << " speed=" << closing_speed_
                     << " | grasp width: from contact_width (auto)");
 
-    // --- GRASPING: Force ramp parameters (overridable per-command via KittingGripperCommand) ---
     node_handle.param("f_min", fr_f_min_, 3.0);
     node_handle.param("f_step", fr_f_step_, 3.0);
     node_handle.param("f_max", fr_f_max_, 70.0);
@@ -197,7 +177,6 @@ namespace franka_kitting_controller {
     node_handle.param("grasp_force_hold_time", fr_grasp_force_hold_time_, 1.0);
     node_handle.param("grasp_settle_time", fr_grasp_settle_time_, 0.5);
 
-    // Validate force ramp parameters
     if (fr_f_min_ <= 0.0) {
       ROS_ERROR("KittingStateController: f_min must be positive (got %.2f)", fr_f_min_);
       return false;
@@ -254,7 +233,6 @@ namespace franka_kitting_controller {
                     << " W_TH=" << fr_slip_width_thresh_
                     << " load_min=" << fr_load_transfer_min_);
 
-    // --- Direct gripper connection via libfranka ---
     if (!node_handle.getParam("robot_ip", robot_ip_)) {
       ros::NodeHandle root_nh_ip;
       if (!root_nh_ip.getParam("/franka_control/robot_ip", robot_ip_)) {
@@ -269,10 +247,6 @@ namespace franka_kitting_controller {
       ROS_ERROR_STREAM("KittingStateController: Failed to connect to gripper: " << ex.what());
       return false;
     }
-    // NOTE: gripper worker threads are started AFTER all hardware interfaces
-    // are validated (see below). This prevents live threads running against a
-    // partially-initialized controller if a later init step fails.
-
     franka_state_interface_ = robot_hw->get<franka_hw::FrankaStateInterface>();
     if (franka_state_interface_ == nullptr) {
       ROS_ERROR("KittingStateController: Could not get Franka state interface from hardware");
@@ -318,20 +292,15 @@ namespace franka_kitting_controller {
       return false;
     }
 
-    // All hardware interfaces validated — safe to start gripper worker threads.
     gripper_read_thread_ = std::thread(&KittingStateController::gripperReadLoop, this);
     gripper_cmd_thread_ = std::thread(&KittingStateController::gripperCommandLoop, this);
 
     kitting_publisher_.init(node_handle, "kitting_state_data", 1);
 
-    // Grasp: State label publisher
     ros::NodeHandle root_nh;
     auto_nh_ = root_nh;
     state_publisher_.init(root_nh, "/kitting_controller/state", 1);
 
-    // Grasp: Logger readiness gate.
-    // When require_logger is true, commands are rejected until the logger publishes ready.
-    // When false, commands are accepted immediately (no recording).
     node_handle.param("require_logger", require_logger_, false);
     if (require_logger_) {
       logger_ready_sub_ = root_nh.subscribe("/kitting_controller/logger_ready", 1,
@@ -341,12 +310,9 @@ namespace franka_kitting_controller {
       ROS_INFO("KittingStateController: Recording disabled — commands accepted immediately");
     }
 
-    // Grasp: Command subscriber — user publishes KittingGripperCommand here
-    // with command (BASELINE/CLOSING/GRASPING) + optional per-object parameters.
     state_cmd_sub_ = root_nh.subscribe("/kitting_controller/state_cmd", 10,
                                         &KittingStateController::stateCmdCallback, this);
 
-    // --- Gripper action servers (franka_gripper-compatible API) ---
     move_action_server_ = std::make_unique<MoveActionServer>(
         root_nh, "/franka_gripper/move",
         boost::bind(&KittingStateController::executeMoveAction, this, _1), false);
@@ -366,7 +332,6 @@ namespace franka_kitting_controller {
     stop_action_server_->start();
     ROS_INFO("KittingStateController: Gripper action servers started (move, grasp, homing, stop)");
 
-    // Initialize gripper data buffer with safe defaults (fully open, no motion)
     GripperData initial_gripper_data;
     initial_gripper_data.width = 0.08;
     initial_gripper_data.max_width = 0.08;
@@ -378,26 +343,18 @@ namespace franka_kitting_controller {
     return true;
   }
 
-  // ============================================================================
-  // starting() — Called once when the controller is activated
-  // ============================================================================
-
   void KittingStateController::starting(const ros::Time& /* time */) {
-    // Capture the current desired pose and send it as the first command.
-    // O_T_EE_d is the robot's last commanded pose — using this avoids any step discontinuity.
     uplift_start_pose_ = cartesian_pose_handle_->getRobotState().O_T_EE_d;
-    cartesian_pose_handle_->setCommand(uplift_start_pose_);  // Defensive: no uninitialized gap
+    cartesian_pose_handle_->setCommand(uplift_start_pose_);
     uplift_active_.store(false, std::memory_order_relaxed);
     uplift_elapsed_ = 0.0;
 
-    // Reset BASELINE prep lowering and deferred grasp state
     downlift_active_.store(false, std::memory_order_relaxed);
     downlift_elapsed_ = 0.0;
     deferred_grasp_pending_.store(false, std::memory_order_relaxed);
 
-    // Reset force ramp state
     resetForceRampState();
-    fr_width_samples_.reserve(kMaxWidthSamples + 1);  // +1: edge case where push_back fires on the same tick as evaluation
+    fr_width_samples_.reserve(kMaxWidthSamples + 1);
     accumulated_uplift_ = 0.0;
 
     logStateTransition("START", "Controller running");
@@ -408,10 +365,6 @@ namespace franka_kitting_controller {
       ROS_INFO("    Recording disabled — publish BASELINE on /kitting_controller/state_cmd");
     }
   }
-
-  // ============================================================================
-  // Realtime-safe helpers for update() (no locks, no allocation)
-  // ============================================================================
 
   void KittingStateController::resetForceRampState() {
     fr_f_current_ = 0.0;
@@ -426,12 +379,8 @@ namespace franka_kitting_controller {
     if (!state_changed_.load(std::memory_order_acquire)) {
       return;
     }
-    // acquire: guarantees visibility of all stores preceding the subscriber's
-    // release-store of state_changed_ (including staging_fr_* parameters and pending_state_).
     GraspState new_state = pending_state_.load(std::memory_order_relaxed);
 
-    // Handle BASELINE start: reset all state-machine variables for a fresh grasp cycle.
-    // This enables multi-trial operation without restarting the controller.
     if (new_state == GraspState::BASELINE) {
       uplift_active_.store(false, std::memory_order_relaxed);
       uplift_elapsed_ = 0.0;
@@ -456,10 +405,7 @@ namespace franka_kitting_controller {
 
       ROS_INFO("  [BASELINE]  State machine reset for new trial");
 
-      // --- Sequential baseline preparation: lower → open → collect ---
       bool needs_downlift = (accumulated_uplift_ > 0.001);
-
-      // Step 1: Lower arm if elevated from previous SUCCESS
       if (needs_downlift) {
         downlift_start_pose_ = cartesian_pose_handle_->getRobotState().O_T_EE_d;
         downlift_z_start_ = downlift_start_pose_[14];
@@ -469,16 +415,8 @@ namespace franka_kitting_controller {
         downlift_active_.store(true, std::memory_order_relaxed);
         ROS_INFO("  [BASELINE]  Step 1: Lowering arm (%.4f m, %.2f s)",
                  accumulated_uplift_, rt_downlift_duration_);
-        // Do NOT zero accumulated_uplift_ here — wait until downlift completes.
-        // If BASELINE is interrupted mid-downlift, the remaining uplift is preserved
-        // so the next BASELINE will continue lowering from the correct height.
       }
 
-      // baseline_prep_done_ stays FALSE (set by handleBaselineCmd) if:
-      //   - arm needs lowering (downlift active), OR
-      //   - gripper needs opening (baseline_needs_open_)
-      // It is set TRUE only when both are complete.
-      // If neither is needed, mark prep done immediately.
       bool needs_open = baseline_needs_open_.load(std::memory_order_relaxed);
       if (!needs_downlift && !needs_open) {
         baseline_prep_done_.store(true, std::memory_order_release);
@@ -491,7 +429,6 @@ namespace franka_kitting_controller {
       }
     }
 
-    // Handle CLOSING_COMMAND start: snapshot command parameters for realtime closing transitions
     if (new_state == GraspState::CLOSING_COMMAND) {
       rt_closing_w_cmd_ = closing_w_cmd_;
       rt_closing_v_cmd_ = closing_v_cmd_;
@@ -511,7 +448,6 @@ namespace franka_kitting_controller {
               cd_baseline_ready_.load(std::memory_order_relaxed) ? "" : " (NOT READY)");
     }
 
-    // Handle GRASPING start: snapshot force ramp parameters, initialize ramp state
     if (new_state == GraspState::GRASPING) {
       rt_fr_f_min_ = staging_fr_f_min_;
       rt_fr_f_step_ = staging_fr_f_step_;
@@ -531,8 +467,8 @@ namespace franka_kitting_controller {
       fr_iteration_ = 0;
       fr_grasping_phase_initialized_ = false;
       fr_grasp_cmd_seen_executing_ = false;
+      fr_expected_cmd_gen_ = cmd_gen_.load(std::memory_order_relaxed);
       fr_ramp_phase_ = RampPhase::COMMAND_SENT;
-      cmd_success_.store(true, std::memory_order_relaxed);
 
       uplift_active_.store(false, std::memory_order_relaxed);
       deferred_grasp_pending_.store(false, std::memory_order_relaxed);
@@ -559,14 +495,10 @@ namespace franka_kitting_controller {
         ROS_INFO("KittingStateController: DOWNLIFT trajectory complete (%.3fs, %.4fm)",
                 rt_downlift_duration_, rt_downlift_distance_);
 
-        // Zero accumulated uplift now that the downlift has actually completed.
-        // This ensures interrupted BASELINE commands don't lose the uplift record.
         if (current_state_.load(std::memory_order_relaxed) == GraspState::BASELINE) {
           accumulated_uplift_ = 0.0;
         }
 
-        // Baseline prep: if we just finished the BASELINE downlift and no open needed,
-        // mark prep done now so baseline collection can start.
         if (current_state_.load(std::memory_order_relaxed) == GraspState::BASELINE &&
             !baseline_needs_open_.load(std::memory_order_relaxed)) {
           baseline_prep_done_.store(true, std::memory_order_release);
@@ -574,7 +506,6 @@ namespace franka_kitting_controller {
         }
       }
     } else {
-      // Passthrough: send current desired pose back as command (hold position).
       cartesian_pose_handle_->setCommand(cartesian_pose_handle_->getRobotState().O_T_EE_d);
     }
   }
@@ -616,7 +547,6 @@ namespace franka_kitting_controller {
     kitting_publisher_.msg_.support_force = support_force;
     kitting_publisher_.msg_.tangential_force = tangential_force;
 
-    // Gripper signals
     kitting_publisher_.msg_.gripper_width = gripper_snapshot.width;
     kitting_publisher_.msg_.gripper_width_dot = gripper_snapshot.width_dot;
     {
@@ -627,11 +557,9 @@ namespace franka_kitting_controller {
     kitting_publisher_.msg_.gripper_max_width = gripper_snapshot.max_width;
     kitting_publisher_.msg_.gripper_is_grasped = gripper_snapshot.is_grasped;
 
-    // Force ramp state (grasp_iteration is 1-based to match GRASP_N labels)
     kitting_publisher_.msg_.grasp_force = fr_f_current_;
     kitting_publisher_.msg_.grasp_iteration = fr_iteration_ + 1;
 
-    // Ramp sub-phase label (helps analysis distinguish settle vs hold in rosbag data)
     if (current_state_.load(std::memory_order_relaxed) == GraspState::GRASPING) {
       switch (fr_ramp_phase_) {
         case RampPhase::SETTLING:  kitting_publisher_.msg_.grasp_ramp_phase = "settling"; break;
@@ -642,11 +570,6 @@ namespace franka_kitting_controller {
       kitting_publisher_.msg_.grasp_ramp_phase = "";
     }
   }
-
-  // ============================================================================
-  // update() — 1kHz realtime loop (state transitions + Cartesian command every tick,
-  //            contact detection + state publishing at 250Hz)
-  // ============================================================================
 
   void KittingStateController::update(const ros::Time& time, const ros::Duration& period) {
     applyPendingStateTransition();
@@ -676,9 +599,6 @@ namespace franka_kitting_controller {
 
       const GripperData gripper_snapshot = *gripper_data_buf_.readFromRT();
 
-      // SMS-CUSUM baseline collection (BASELINE state only, gated on baseline_prep_done_).
-      // baseline_prep_done_ is FALSE until: arm lowered AND gripper opened (if applicable).
-      // This ensures clean baseline with arm at rest and gripper fully open.
       {
         GraspState bl_state = current_state_.load(std::memory_order_relaxed);
         if (bl_state == GraspState::BASELINE &&
@@ -708,7 +628,6 @@ namespace franka_kitting_controller {
         }
       }
 
-      // Re-read: runInternalTransitions may have changed state
       const GraspState state = current_state_.load(std::memory_order_relaxed);
       if (signal_log_trigger_()) {
         if (state == GraspState::BASELINE) {
@@ -750,7 +669,6 @@ namespace franka_kitting_controller {
         }
       }
 
-      // Gripper velocity — 10 Hz during closing phase (DEBUG level to minimize realtime allocation)
       if (isClosingPhase(state) && gripper_log_trigger_()) {
         ROS_DEBUG("  [GRIP]  w=%.5f  w_dot=%.6f m/s  gap=%.5f",
                   gripper_snapshot.width,
