@@ -402,7 +402,7 @@ The controller exposes four `franka_gripper`-compatible action servers under the
 
 ### State Guard
 
-Action server requests are only accepted when the internal state machine is **idle**: `START`, `SUCCESS`, or `FAILED`. During any other state (BASELINE through EVALUATE), the state machine owns the gripper and external actions are rejected with an error describing the current state.
+Action server requests are only accepted when the internal state machine is **idle**: `START`, `SUCCESS`, or `FAILED`. During any other state (UNKNOWN through EVALUATE), the state machine owns the gripper and external actions are rejected with an error describing the current state.
 
 ### Available Actions
 
@@ -689,11 +689,11 @@ The **velocity profile** (first derivative) is:
 
 ### Execution Details
 
-1. **Start**: When the force ramp triggers UPLIFT (after the final ramp step completes), the controller captures the current `O_T_EE_d` as the start pose and records `z₀ = O_T_EE_d[14]`. Distance `d` and speed `v_lift` are taken from RT-local copies; duration is computed as `T = d / v_lift`. BASELINE prep downlift uses the same mechanism but descends.
+1. **Start**: When the force ramp triggers UPLIFT (after the final ramp step completes), the controller captures the current `O_T_EE_d` as the start pose and records `z₀ = O_T_EE_d[14]`. Distance `d` and speed `v_lift` are taken from RT-local copies; duration is computed as `T = d / v_lift`. UNKNOWN prep downlift uses the same mechanism but descends.
 
 2. **Per-tick** (1 kHz): The controller increments `t ← t + Δt`, computes `s_raw`, `s`, and `z(t)`, then calls `setCommand(pose)`. Only the z-translation (index [14]) is modified — orientation and x/y position remain unchanged from the start pose.
 
-3. **Completion**: When `t ≥ T`, the trajectory is done. The active flag is cleared and the controller transitions to the next state (EVALUATE after UPLIFT; BASELINE prep continues after downlift).
+3. **Completion**: When `t ≥ T`, the trajectory is done. The active flag is cleared and the controller transitions to the next state (EVALUATE after UPLIFT; UNKNOWN prep continues after downlift).
 
 4. **Passthrough mode**: When not executing any trajectory, the controller reads `O_T_EE_d` and writes it back as the command every tick. This produces zero tracking error — the robot holds position with no drift or jerk.
 
@@ -707,7 +707,7 @@ The **velocity profile** (first derivative) is:
 | Minimum uplift hold     | `t ≥ 0.5 s`       | Hard clamp — ensures W_pre ≥ 0.25 s for reliable pre-lift baseline         |
 | Maximum uplift hold     | `t ≤ 120.0 s`     | Hard clamp — prevents width sample vector from exceeding pre-allocated capacity |
 | Precondition            | —                 | GRASPING requires CONTACT state                                           |
-| BASELINE interruption   | —                 | BASELINE clears active trajectories, returns to passthrough (with warning) |
+| BASELINE interruption   | —                 | New BASELINE command restarts the full UNKNOWN → BASELINE cycle            |
 | CLOSING_COMMAND timeout | 10 s              | Transitions to FAILED if move command never starts executing               |
 | CLOSING timeout         | 30 s              | Transitions to FAILED if CLOSING phase exceeds duration without contact    |
 | GRASPING timeout        | 10 s              | Transitions to FAILED if gripper command does not complete; sends `stop_requested_` to cancel in-flight command |
