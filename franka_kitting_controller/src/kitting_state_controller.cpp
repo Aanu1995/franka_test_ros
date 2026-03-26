@@ -180,6 +180,10 @@ namespace franka_kitting_controller {
     node_handle.param("grasp_force_hold_time", fr_grasp_force_hold_time_, 1.0);
     node_handle.param("grasp_settle_time", fr_grasp_settle_time_, 0.5);
 
+    // Secure grasp detection uses built-in optimized parameters from SecureGraspConfig
+    // (mean_converge=0.03 Nm, std=0.08 Nm, min_steps=1, n_confirm=2).
+    // Already configured via SMSCusumConfig defaults in sms_detector_ initialization.
+
     if (fr_f_min_ <= 0.0) {
       ROS_ERROR("KittingStateController: f_min must be positive (got %.2f)", fr_f_min_);
       return false;
@@ -377,6 +381,8 @@ namespace franka_kitting_controller {
     fr_grasping_phase_initialized_ = false;
     fr_ramp_phase_ = RampPhase::COMMAND_SENT;
     fr_width_samples_.clear();
+    fr_holding_sample_count_ = 0;
+    fr_holding_late_start_ = 0;
   }
 
   void KittingStateController::applyPendingStateTransition() {

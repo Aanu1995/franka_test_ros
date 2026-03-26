@@ -157,12 +157,13 @@ namespace franka_kitting_controller {
   }
 
   void KittingStateController::tickGrasping(const ros::Time& time,
-                                            double /* tau_ext_norm */,
+                                            double tau_ext_norm,
                                             double support_force,
                                             const GripperData& gripper_snapshot) {
     if (!fr_grasping_phase_initialized_) {
       fr_phase_start_time_ = time;
       fr_grasping_phase_initialized_ = true;
+      sms_detector_.enter_grasping();
     }
 
     double elapsed = (time - fr_phase_start_time_).toSec();
@@ -224,14 +225,18 @@ namespace franka_kitting_controller {
         fr_ramp_phase_ = RampPhase::HOLDING;
         fr_ramp_step_start_time_ = time;
 
-        bool is_last_step = (fr_f_current_ >= rt_fr_f_max_);
-        if (is_last_step) {
-          fr_pre_sum_ = 0.0;
-          fr_pre_sum_sq_ = 0.0;
-          fr_pre_count_ = 0;
-          ROS_INFO("    GRASP_%d: last step — accumulating W_pre during hold",
-                  fr_iteration_ + 1);
+        // Always accumulate W_pre (needed regardless of which step triggers UPLIFT)
+        fr_pre_sum_ = 0.0;
+        fr_pre_sum_sq_ = 0.0;
+        fr_pre_count_ = 0;
+
+        // Init late-segment counter for secure grasp detection
+        {
+          int total = static_cast<int>(rt_fr_grasp_force_hold_time_ * 250.0);
+          fr_holding_sample_count_ = 0;
+          fr_holding_late_start_ = total - static_cast<int>(total * sg_late_fraction_);
         }
+
         ROS_INFO("    GRASP_%d: holding at F=%.1f N for %.2fs",
                 fr_iteration_ + 1, fr_f_current_, rt_fr_grasp_force_hold_time_);
         break;
@@ -240,11 +245,15 @@ namespace franka_kitting_controller {
       case RampPhase::HOLDING: {
         double hold_elapsed = (time - fr_ramp_step_start_time_).toSec();
 
-        bool is_last_step = (fr_f_current_ >= rt_fr_f_max_);
-        if (is_last_step) {
-          fr_pre_sum_ += support_force;
-          fr_pre_sum_sq_ += support_force * support_force;
-          fr_pre_count_++;
+        // Always accumulate W_pre (support force stats for slip evaluation)
+        fr_pre_sum_ += support_force;
+        fr_pre_sum_sq_ += support_force * support_force;
+        fr_pre_count_++;
+
+        // Feed tau_ext_norm to secure grasp detector during late segment
+        fr_holding_sample_count_++;
+        if (fr_holding_sample_count_ >= fr_holding_late_start_) {
+          sms_detector_.update(tau_ext_norm);
         }
 
         if (hold_elapsed < rt_fr_grasp_force_hold_time_) {
@@ -261,7 +270,14 @@ namespace franka_kitting_controller {
       }
 
       case RampPhase::STEP_COMPLETE: {
-        bool is_last_step = (fr_f_current_ >= rt_fr_f_max_);
+        auto sg_result = sms_detector_.finalize_grasp_step();
+        if (sg_result.detected) {
+          ROS_INFO("    GRASP_%d: SECURE_GRASP detected: d_mu=%.4f std=%.4f",
+                  fr_iteration_ + 1,
+                  sg_result.event.baseline_mean,
+                  sg_result.event.baseline_sigma);
+        }
+        bool is_last_step = (fr_f_current_ >= rt_fr_f_max_) || sg_result.detected;
 
         if (is_last_step) {
           uplift_start_pose_ = cartesian_pose_handle_->getRobotState().O_T_EE_d;
@@ -290,6 +306,9 @@ namespace franka_kitting_controller {
           fr_grasp_cmd_seen_executing_ = false;
           fr_expected_cmd_gen_ = cmd_gen_.load(std::memory_order_relaxed);
           fr_ramp_phase_ = RampPhase::COMMAND_SENT;
+
+          // Begin next secure grasp step
+          sms_detector_.begin_grasp_step(fr_iteration_);
 
           char label[16];
           std::snprintf(label, sizeof(label), "GRASP_%d", fr_iteration_ + 1);

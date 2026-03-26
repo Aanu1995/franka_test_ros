@@ -1,17 +1,22 @@
-# SMS-CUSUM: Sequential Multi-State CUSUM for Contact Detection
+# SMS-CUSUM: Sequential Multi-State CUSUM for Contact and Secure Grasp Detection
 
-A novel change-point detection algorithm for real-time contact detection in
-robotic manipulation, extending the classical CUSUM (Cumulative Sum) framework
-with noise-adaptive sensitivity and lifecycle-managed baseline estimation.
+A novel change-point detection algorithm for real-time contact detection and
+secure grasp convergence detection in robotic manipulation, extending the
+classical CUSUM (Cumulative Sum) framework with noise-adaptive sensitivity
+and lifecycle-managed baseline estimation.
 
 ## Algorithm Overview
 
-SMS-CUSUM detects contact events from a continuous force/torque signal stream
-during gripper closure:
+SMS-CUSUM detects contact events and secure grasp convergence from a continuous
+force/torque signal stream during robotic grasping:
 
 ```
-FREE_MOTION -> CLOSING -> CONTACT
+FREE_MOTION -> CLOSING -> CONTACT -> GRASPING -> SECURE_GRASP
 ```
+
+Contact detection (CLOSING → CONTACT) uses a one-sided downward CUSUM.
+Secure grasp detection (GRASPING → SECURE_GRASP) uses inter-step mean
+convergence of tau_ext_norm during the force ramp.
 
 The core detection is based on the one-sided downward CUSUM statistic
 (Page, 1954):
@@ -272,15 +277,75 @@ python3 -m unittest discover -s tests -v
 - **SMS-CUSUM** achieves O(1), minimax optimal detection with noise-adaptive
   sensitivity for unknown shift magnitudes
 
+## Secure Grasp Detection
+
+After contact is confirmed and the force ramp begins, SMS-CUSUM detects
+when the grasp has become secure — i.e., when increasing grip force no
+longer changes the steady-state tau_ext_norm, indicating the object is
+fully compressed and additional force is unnecessary.
+
+### Algorithm
+
+During each force ramp step's HOLDING phase, the detector accumulates
+tau_ext_norm samples in the **late segment** (last half, after settling):
+
+```
+mu_late[N] = mean(tau_ext_norm samples in late HOLDING of GRASP_N)
+sigma_late[N] = std(tau_ext_norm samples in late HOLDING of GRASP_N)
+```
+
+At step completion, two AND-gated criteria are checked:
+
+1. **Mean convergence**: `|mu_late[N] - mu_late[N-1]| < mean_converge_threshold`
+2. **Signal stability**: `sigma_late[N] < std_threshold`
+
+Both must hold for `n_confirm` consecutive steps. Step 0 is always skipped
+(no previous mean to compare).
+
+### Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `mean_converge_threshold` | 0.03 Nm | Max inter-step mean difference for convergence |
+| `std_threshold` | 0.08 Nm | Max late-segment std for stability |
+| `min_grasp_steps` | 1 | Minimum step index before detection can trigger |
+| `n_confirm` | 2 | Consecutive converged steps required |
+
+### Lifecycle
+
+```python
+detector = SMSCusum(config)
+
+# Phase 1: Baseline + Contact (as before)
+...
+
+# Phase 3: Secure grasp detection
+detector.enter_grasping()           # Resets detector, begins step 0
+for step in range(num_steps):
+    # Feed late-segment samples
+    for sample in late_holding:
+        detector.update(sample)
+    result = detector.finalize_grasp_step()
+    if result.detected:
+        break                       # Secure grasp — skip to UPLIFT
+    detector.begin_grasp_step(step + 1)
+```
+
+### Validation
+
+Validated against 4 trials (triangle1 x2, thyme x2):
+- Triangle1 trial 1: Secure at GRASP_5 (18N), saving steps 6-7 (23-28N)
+- Thyme trials: Secure at GRASP_5 (10N), confirming convergence
+- Triangle1 trial 2 (oscillatory): Correctly never triggers
+
 ## Extensibility
 
-The architecture is designed for extension. When additional grasp signal data
-(e.g., slip vs. secure grasp force profiles across multiple objects) becomes
-available, additional CUSUM stages can be added with **context inheritance**:
-post-contact statistics automatically become the reference baseline for the
-next detection stage, enabling multi-state sequential detection
-(FREE_MOTION -> CLOSING -> CONTACT -> GRASPING -> LOADED) without manual
-parameter transfer between stages.
+The architecture is designed for further extension. Additional detection
+stages can be added following the same pattern: implement a detector class
+(like `CUSUMDetector` or `SecureGraspDetector`), add lifecycle methods to
+`SMSCusum`, and extend the `GraspState` enum. Post-contact statistics
+automatically become the reference for subsequent stages via context
+inheritance.
 
 ## References
 

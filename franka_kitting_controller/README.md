@@ -16,7 +16,8 @@ This controller runs inside the `ros_control` real-time loop provided by `franka
 - 12-state grasp machine with multi-step force ramp: `START` → `UNKNOWN` → `BASELINE` → `CLOSING_COMMAND` → `CLOSING` → `CONTACT_CONFIRMED` → `CONTACT` → `GRASPING` (GRASP_1..GRASP_N) → `UPLIFT` → `EVALUATE` → `SUCCESS`/`FAILED`
 - SMS-CUSUM contact detection during CLOSING (noise-adaptive CUSUM change-point detection on tau_ext_norm — automatically scales sensitivity to measured noise level, no per-object threshold tuning)
 - Immediate gripper stop on contact: calls `franka::Gripper::stop()` to physically halt the motor
-- Multi-step force ramp on table: grasps at f_min, f_min+f_step, ..., up to f_max — each step settles, holds, then advances. After the final step, a single UPLIFT + EVALUATE determines SUCCESS or FAILED
+- Multi-step force ramp on table: grasps at f_min, f_min+f_step, ..., up to f_max — each step settles, holds, then advances. Secure grasp detection can terminate the ramp early when further force increase is unnecessary. After the final step (or secure grasp), a single UPLIFT + EVALUATE determines SUCCESS or FAILED
+- Secure grasp convergence detection: SMS-CUSUM monitors tau_ext_norm mean convergence across consecutive force ramp steps — detects when the object is fully compressed and grip force increase is no longer needed
 - Three-gate AND slip detection: load transfer + support drop + jaw widening (directional force decomposition, Fn = |Fz|) during EVALUATE hold
 - One rosbag per trial with all state transitions (recording starts automatically on launch)
 - Automatic CSV export on stop for analysis-ready datasets
@@ -203,15 +204,15 @@ Gripper stopped — contact confirmed. Published **automatically** by the contro
 
 Initiate automated multi-step force ramp. Published via `/kitting_controller/state_cmd` with `command: "GRASPING"`. This is the **last user command** — all subsequent states are driven internally by the force ramp. **Requires CONTACT state** — rejected otherwise to prevent use of stale width from a previous trial.
 
-The force ramp runs entirely on the table (no mid-trial lift/lower). The controller grasps at increasing force levels from `f_min` to `f_max` in `f_step` increments. Each step is published as a distinct state label: `GRASP_1`, `GRASP_2`, ..., `GRASP_N`.
+The force ramp runs entirely on the table (no mid-trial lift/lower). The controller grasps at increasing force levels from `f_min` to `f_max` in `f_step` increments. Each step is published as a distinct state label: `GRASP_1`, `GRASP_2`, ..., `GRASP_N`. The ramp terminates either when `f_max` is reached or when **secure grasp** is detected (see [Secure Grasp Detection](#grasp-secure-grasp-detection)).
 
 **Each ramp step (GRASP_k):**
 1. **Grasp command**: Dispatches a deferred grasp at force `f_current` to the `contact_width` (updated after each step)
 2. **Settle** (`grasp_settle_time`, default 0.5 s): Wait for the grasp command to complete and signals to stabilize. Published `grasp_ramp_phase = "settling"`
-3. **Hold** (`grasp_force_hold_time`, default 1.0 s): Hold at force level for data logging and analysis. Published `grasp_ramp_phase = "holding"`. W_pre (support force baseline for slip evaluation) is accumulated during the HOLDING sub-phase of the **last** ramp step only
-4. **Advance**: Update `contact_width` from the current gripper width, increment force by `f_step`, advance to next step (or UPLIFT if this was the final step)
+3. **Hold** (`grasp_force_hold_time`, default 1.0 s): Hold at force level for data logging and analysis. Published `grasp_ramp_phase = "holding"`. During the late segment (last half), tau_ext_norm samples are fed to the SMS-CUSUM secure grasp detector. W_pre (support force baseline for slip evaluation) is accumulated during every step's HOLDING sub-phase
+4. **Advance**: Update `contact_width` from the current gripper width. If secure grasp was detected or `f_current >= f_max`, transition to UPLIFT. Otherwise increment force by `f_step` and advance to next step
 
-After the final ramp step (where `f_current + f_step > f_max`), the controller transitions to UPLIFT.
+After the final ramp step (by `f_max` or secure grasp detection), the controller transitions to UPLIFT.
 
 - Grasp width starts as the `contact_width` captured at CONTACT; updated after each ramp step
 - **Grasp failure**: After each ramp step's grasp command completes, the RT thread checks `cmd_success_` (the `grasp()` return value stored by the command thread). If `false`, transitions to FAILED immediately
@@ -490,6 +491,51 @@ The atomic stores in `update()` are single-word writes (nanoseconds), fully RT-s
 ### Latching
 
 Once CONTACT is declared, it is **latched** — the detector stops evaluating. This prevents oscillation at the contact boundary. A new BASELINE command resets the latch for the next trial.
+
+## Grasp: Secure Grasp Detection
+
+After contact is confirmed and the force ramp begins, the SMS-CUSUM secure grasp detector monitors tau_ext_norm during each step's HOLDING phase to detect when the grasp has become secure — i.e., when increasing grip force no longer changes the steady-state torque, indicating the object is fully compressed.
+
+### Algorithm
+
+During each GRASP_k step, the HOLDING phase is split into two segments:
+- **Early segment** (first half): Transient settling after force increment (ignored by the detector)
+- **Late segment** (last half): Steady-state samples fed to `sms_detector_.update(tau_ext_norm)`
+
+At each step's completion (`STEP_COMPLETE`), `sms_detector_.finalize_grasp_step()` computes:
+
+1. **Mean convergence** (primary): `|mu_late[N] - mu_late[N-1]| < mean_converge_threshold` — has the steady-state torque plateaued?
+2. **Signal stability** (secondary): `sigma_late[N] < std_threshold` — is the signal stable (not oscillating)?
+
+Both criteria must hold for `n_confirm` (default 2) consecutive steps. Step 0 is skipped (no previous mean to compare).
+
+When secure grasp is detected, the force ramp terminates early and transitions directly to UPLIFT, skipping remaining force increments. This avoids unnecessary force on the object while maintaining grasp quality (validated by the subsequent UPLIFT + EVALUATE phase).
+
+### Parameters
+
+| Parameter | YAML key | Default | Description |
+|-----------|----------|---------|-------------|
+| Mean convergence threshold | `secure_grasp/mean_converge_threshold` | 0.03 Nm | Max `\|d_mu\|` between consecutive settled steps |
+| Std threshold | `secure_grasp/std_threshold` | 0.08 Nm | Max sigma_late for signal stability |
+| Min grasp steps | `secure_grasp/min_grasp_steps` | 1 | Minimum step index before detection (step 0 has no previous mu) |
+| N confirm | `secure_grasp/n_confirm` | 2 | Consecutive converged steps required |
+| Late fraction | `secure_grasp/late_fraction` | 0.5 | Fraction of HOLDING phase used for late-segment statistics |
+
+### Integration
+
+The secure grasp detector is integrated inside the SMS-CUSUM state machine (`sms_cusum::SMSCusum`), extending the state graph:
+
+```
+FREE_MOTION -> CLOSING -> CONTACT -> GRASPING -> SECURE_GRASP
+```
+
+The controller calls:
+- `sms_detector_.enter_grasping()` when the force ramp begins
+- `sms_detector_.update(tau_ext_norm)` during the late segment of each HOLDING phase
+- `sms_detector_.finalize_grasp_step()` at each STEP_COMPLETE to check for convergence
+- `sms_detector_.begin_grasp_step(iteration)` when advancing to the next step
+
+All operations are O(1) per sample with zero dynamic allocation, safe for the 250 Hz real-time loop.
 
 ## Grasp: Slip Detection (Directional Force Decomposition + AND-Gating)
 

@@ -1,14 +1,16 @@
 """
-SMS-CUSUM: Sequential Multi-State CUSUM for Contact Detection.
+SMS-CUSUM: Sequential Multi-State CUSUM for Contact and Secure Grasp Detection.
 
 A novel extension of the classical CUSUM change-point detector that detects
-contact state transitions from a continuous force/torque signal stream, with
-noise-adaptive sensitivity and lifecycle-managed baseline estimation.
+contact state transitions and secure grasp convergence from a continuous
+force/torque signal stream, with noise-adaptive sensitivity and
+lifecycle-managed baseline estimation.
 
 Novel contributions over standard CUSUM (Page, 1954):
     1. Noise-adaptive allowance (k_eff = max(k_min, alpha * sigma))
     2. Lifecycle-managed baseline (collect -> freeze -> detect -> recover)
     3. Automatic sensitivity scaling across objects of varying properties
+    4. Secure grasp convergence detection via inter-step mean comparison
 
 Fills the gap between standard CUSUM (single change-point, known shift) and
 GLR-CUSUM (unknown shift, but O(n) per sample). SMS-CUSUM handles unknown
@@ -33,23 +35,28 @@ from typing import Optional
 from .adaptive_baseline import AdaptiveBaseline
 from .config import SMSCusumConfig
 from .cusum import CUSUMDetector
+from .secure_grasp import SecureGraspDetector, SecureGraspResult
 
 
 class GraspState(IntEnum):
     """Detected states in the SMS-CUSUM state machine.
 
     State graph:
-      FREE_MOTION -> CLOSING -> CONTACT
+      FREE_MOTION -> CLOSING -> CONTACT -> GRASPING -> SECURE_GRASP
     """
     FREE_MOTION = 0
     CLOSING = 1
     CONTACT = 2
+    GRASPING = 3
+    SECURE_GRASP = 4
 
 
 _STATE_NAMES = {
     GraspState.FREE_MOTION: "FREE_MOTION",
     GraspState.CLOSING: "CLOSING",
     GraspState.CONTACT: "CONTACT",
+    GraspState.GRASPING: "GRASPING",
+    GraspState.SECURE_GRASP: "SECURE_GRASP",
 }
 
 
@@ -86,15 +93,35 @@ class DetectionEvent:
     detail: str = ""
 
 
-class SMSCusum:
-    """SMS-CUSUM detector for contact detection from force/torque feedback.
+class UpdateResult:
+    """Return type from finalize_grasp_step().
 
-    Orchestrates an adaptive baseline and a CUSUM detector to identify
-    contact events (torque drops) during gripper closure.
+    Attributes
+    ----------
+    detected : bool
+        True if a state transition was detected.
+    event : DetectionEvent or None
+        The detection event, valid only when detected is True.
+    """
+
+    __slots__ = ("detected", "event")
+
+    def __init__(self, detected: bool = False, event: Optional[DetectionEvent] = None) -> None:
+        self.detected = detected
+        self.event = event
+
+
+class SMSCusum:
+    """SMS-CUSUM detector for contact and secure grasp detection.
+
+    Orchestrates an adaptive baseline, a CUSUM detector for contact, and
+    a convergence detector for secure grasp, to identify state transitions
+    from force/torque feedback during robotic grasping.
 
     Architecture:
       - One AdaptiveBaseline for signal characterization (mean + noise sigma)
       - One CUSUMDetector for contact detection with noise-adaptive allowance
+      - One SecureGraspDetector for secure grasp convergence detection
 
     Usage (real-time, one sample at a time)::
 
@@ -110,6 +137,17 @@ class SMSCusum:
             event = detector.update(sample.tau_ext_norm)
             if event and event.new_state == GraspState.CONTACT:
                 print("Contact detected!")
+
+        # Phase 3: Secure grasp detection during force ramp
+        detector.enter_grasping()
+        for step in range(num_steps):
+            detector.begin_grasp_step(step)
+            for sample in late_holding_samples:
+                detector.update(sample.tau_ext_norm)
+            result = detector.finalize_grasp_step()
+            if result.detected:
+                print("Secure grasp detected!")
+                break
 
         # Reset for next grasp (soft reset preserves baseline)
         detector.soft_reset()
@@ -134,6 +172,9 @@ class SMSCusum:
 
         # Contact CUSUM (CLOSING -> CONTACT)
         self._contact_cusum = CUSUMDetector(self._config.contact_stage)
+
+        # Secure grasp detector (GRASPING -> SECURE_GRASP)
+        self._secure_grasp = SecureGraspDetector(self._config.secure_grasp_stage)
 
         # Transition history
         self._events: list[DetectionEvent] = []
@@ -169,6 +210,11 @@ class SMSCusum:
         return self._contact_cusum
 
     @property
+    def secure_grasp_detector(self) -> SecureGraspDetector:
+        """Access the secure grasp detector (for diagnostics)."""
+        return self._secure_grasp
+
+    @property
     def events(self) -> list[DetectionEvent]:
         """History of all detected state transitions."""
         return self._events
@@ -187,6 +233,64 @@ class SMSCusum:
         self._contact_cusum.reset()
         self._contact_cusum.adapt(self._baseline.sigma)
         self._state = GraspState.CLOSING
+
+    def enter_grasping(self) -> None:
+        """Signal that the force ramp is starting.
+
+        Call after CONTACT is confirmed and the first grasp command
+        is about to be sent. Resets the secure grasp detector and
+        begins step 0.
+        """
+        self._secure_grasp.reset()
+        self._secure_grasp.begin_step(0)
+        self._state = GraspState.GRASPING
+
+    def begin_grasp_step(self, step_index: int) -> None:
+        """Signal the start of a new GRASP_N HOLDING phase.
+
+        Call when entering the late segment of each force ramp step's
+        HOLDING phase. Resets the running accumulators.
+
+        Parameters
+        ----------
+        step_index : int
+            Zero-based step index (0 = GRASP_1, 1 = GRASP_2, ...).
+        """
+        self._secure_grasp.begin_step(step_index)
+
+    def finalize_grasp_step(self) -> UpdateResult:
+        """Signal end of GRASP_N HOLDING phase. Check for secure grasp.
+
+        Computes the inter-step mean comparison and returns whether
+        secure grasp has been detected.
+
+        Returns
+        -------
+        UpdateResult
+            Contains detected=True and a DetectionEvent if secure grasp
+            was detected, otherwise detected=False.
+        """
+        result = self._secure_grasp.finalize_step()
+
+        if result.secure and self._state == GraspState.GRASPING:
+            event = DetectionEvent(
+                prev_state=GraspState.GRASPING,
+                new_state=GraspState.SECURE_GRASP,
+                sample_index=self._sample_idx,
+                cusum_statistic=float(result.converge_streak),
+                baseline_mean=result.d_mu,
+                baseline_sigma=result.std_late,
+                detail=(
+                    f"Secure grasp: d_mu={result.d_mu:.4f}, "
+                    f"std={result.std_late:.4f}, "
+                    f"streak={result.converge_streak}"
+                ),
+            )
+            self._state = GraspState.SECURE_GRASP
+            self._events.append(event)
+            return UpdateResult(detected=True, event=event)
+
+        return UpdateResult(detected=False)
 
     # ------------------------------------------------------------------
     # Core update loop: O(1) per sample
@@ -216,7 +320,9 @@ class SMSCusum:
             return self._update_free_motion(tau_ext_norm)
         elif self._state == GraspState.CLOSING:
             return self._update_closing(tau_ext_norm)
-        # CONTACT: terminal state, no further transitions
+        elif self._state == GraspState.GRASPING:
+            return self._update_grasping(tau_ext_norm)
+        # CONTACT, SECURE_GRASP: waiting for lifecycle calls, no per-sample transitions
         return None
 
     # ------------------------------------------------------------------
@@ -255,6 +361,15 @@ class SMSCusum:
             return event
         return None
 
+    def _update_grasping(self, tau_ext_norm: float) -> None:
+        """GRASPING: accumulate samples for secure grasp detection.
+
+        Per-sample accumulation only. Detection happens in
+        finalize_grasp_step(), not here.
+        """
+        self._secure_grasp.update(tau_ext_norm)
+        return None
+
     # ------------------------------------------------------------------
     # Reset / lifecycle
     # ------------------------------------------------------------------
@@ -269,6 +384,7 @@ class SMSCusum:
         self._sample_idx = 0
         self._baseline.reset()
         self._contact_cusum.reset()
+        self._secure_grasp.reset()
         self._events.clear()
 
     def soft_reset(self) -> None:
@@ -281,3 +397,4 @@ class SMSCusum:
         self._state = GraspState.FREE_MOTION
         self._baseline.unfreeze()
         self._contact_cusum.reset()
+        self._secure_grasp.reset()

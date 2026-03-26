@@ -237,5 +237,142 @@ class TestSMSCusumReset(unittest.TestCase):
         self.assertIsNotNone(event2, "Second contact should be detected after soft reset")
 
 
+class TestSMSCusumSecureGrasp(unittest.TestCase):
+    """Tests for secure grasp: CONTACT -> GRASPING -> SECURE_GRASP."""
+
+    def _make_detector(self) -> SMSCusum:
+        from python.config import SecureGraspConfig
+        config = SMSCusumConfig(
+            contact_stage=CusumStageConfig(k_min=0.05, h=0.8, debounce_count=5),
+            secure_grasp_stage=SecureGraspConfig(
+                mean_converge_threshold=0.03,
+                std_threshold=0.08,
+                min_grasp_steps=1,
+                n_confirm=2,
+            ),
+            baseline_init_samples=20,
+        )
+        return SMSCusum(config)
+
+    def _drive_to_contact(self, det: SMSCusum) -> None:
+        """Drive detector through FREE_MOTION -> CLOSING -> CONTACT."""
+        for _ in range(20):
+            det.update(1.8)
+        det.enter_closing()
+        for _ in range(100):
+            e = det.update(1.5)
+            if e is not None:
+                break
+        self.assertEqual(det.state, GraspState.CONTACT)
+
+    def test_enter_grasping_transitions_state(self):
+        """enter_grasping() transitions from CONTACT to GRASPING."""
+        det = self._make_detector()
+        self._drive_to_contact(det)
+
+        det.enter_grasping()
+        self.assertEqual(det.state, GraspState.GRASPING)
+
+    def test_full_lifecycle_to_secure_grasp(self):
+        """Full lifecycle: FREE_MOTION -> ... -> SECURE_GRASP."""
+        det = self._make_detector()
+        self._drive_to_contact(det)
+        det.enter_grasping()
+
+        # Step 0: initial
+        for _ in range(100):
+            det.update(1.0)
+        r0 = det.finalize_grasp_step()
+        self.assertFalse(r0.detected)
+
+        # Step 1: large shift
+        det.begin_grasp_step(1)
+        for _ in range(100):
+            det.update(1.2)
+        r1 = det.finalize_grasp_step()
+        self.assertFalse(r1.detected)
+
+        # Step 2: converge (streak=1)
+        det.begin_grasp_step(2)
+        for _ in range(100):
+            det.update(1.21)
+        r2 = det.finalize_grasp_step()
+        self.assertFalse(r2.detected)
+
+        # Step 3: converge (streak=2 -> SECURE)
+        det.begin_grasp_step(3)
+        for _ in range(100):
+            det.update(1.215)
+        r3 = det.finalize_grasp_step()
+        self.assertTrue(r3.detected)
+        self.assertEqual(r3.event.new_state, GraspState.SECURE_GRASP)
+        self.assertEqual(det.state, GraspState.SECURE_GRASP)
+
+    def test_grasping_accumulates_on_update(self):
+        """update() in GRASPING state should accumulate samples."""
+        det = self._make_detector()
+        self._drive_to_contact(det)
+        det.enter_grasping()
+
+        # Feed samples via update()
+        for _ in range(50):
+            result = det.update(1.0)
+            self.assertIsNone(result)  # No per-sample detection
+
+    def test_secure_grasp_event_in_history(self):
+        """Secure grasp event should be recorded in events list."""
+        det = self._make_detector()
+        self._drive_to_contact(det)
+        det.enter_grasping()
+
+        contact_events = len(det.events)
+
+        # Drive to secure grasp
+        for _ in range(100):
+            det.update(1.0)
+        det.finalize_grasp_step()
+
+        det.begin_grasp_step(1)
+        for _ in range(100):
+            det.update(1.01)
+        det.finalize_grasp_step()
+
+        det.begin_grasp_step(2)
+        for _ in range(100):
+            det.update(1.015)
+        det.finalize_grasp_step()
+
+        self.assertEqual(len(det.events), contact_events + 1)
+        last_event = det.events[-1]
+        self.assertEqual(last_event.new_state, GraspState.SECURE_GRASP)
+
+    def test_reset_clears_secure_grasp_state(self):
+        """Full reset should clear secure grasp detector state."""
+        det = self._make_detector()
+        self._drive_to_contact(det)
+        det.enter_grasping()
+
+        det.reset()
+        self.assertEqual(det.state, GraspState.FREE_MOTION)
+        self.assertFalse(det.secure_grasp_detector.secure)
+
+    def test_no_secure_grasp_with_diverging_force_ramp(self):
+        """Diverging means across steps should not trigger secure grasp."""
+        det = self._make_detector()
+        self._drive_to_contact(det)
+        det.enter_grasping()
+
+        means = [1.0, 1.2, 1.5, 1.1, 0.8]
+        for i, mu in enumerate(means):
+            if i > 0:
+                det.begin_grasp_step(i)
+            for _ in range(100):
+                det.update(mu)
+            r = det.finalize_grasp_step()
+            self.assertFalse(r.detected)
+
+        self.assertEqual(det.state, GraspState.GRASPING)
+
+
 if __name__ == "__main__":
     unittest.main()

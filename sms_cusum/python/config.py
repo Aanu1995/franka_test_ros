@@ -1,10 +1,13 @@
 """
-SMS-CUSUM configuration: parameter dataclasses for contact detection.
+SMS-CUSUM configuration: parameter dataclasses for contact and secure grasp detection.
 
 All parameters have defaults derived from empirical analysis of Franka Panda
 grasping trials across 6 object types (circle4, circle6, rectangle6,
 triangle, triangle4, triangle6) with baseline noise sigma 0.031-0.067 Nm
 and contact drop magnitudes 0.13-0.75 Nm.
+
+Secure grasp parameters derived from kitting_bags 3 trials (triangle1, thyme)
+with 4 trials showing convergence at GRASP_4-5 (9-18N).
 """
 
 from dataclasses import dataclass, field
@@ -40,14 +43,49 @@ class CusumStageConfig:
 
 
 @dataclass
-class SMSCusumConfig:
-    """Configuration for the SMS-CUSUM contact detector.
+class SecureGraspConfig:
+    """Configuration for secure grasp convergence detection.
 
-    The detector identifies contact events during gripper closure by
-    monitoring tau_ext_norm for negative mean shifts (drops).
+    Detects when increasing grip force no longer changes the steady-state
+    tau_ext_norm, indicating the object is fully compressed and the grasp
+    is secure.
+
+    Detection is AND-gated: mean convergence AND signal stability must both
+    hold for n_confirm consecutive force ramp steps.
+
+    Parameters
+    ----------
+    mean_converge_threshold : float
+        Maximum |μ_late[N] - μ_late[N-1]| (Nm) for convergence.
+        Converged steps typically show |d_mu| < 0.016 Nm.
+        Non-converged steps show |d_mu| > 0.065 Nm.
+    std_threshold : float
+        Maximum σ_late (Nm) for signal stability.
+        Stable equilibrium: σ < 0.073 Nm. Guards against cases where
+        means coincidentally match but the system is still oscillating.
+    min_grasp_steps : int
+        Minimum step index before detection can trigger (0-based).
+        Step 0 has no previous μ to compare, so min is 1.
+    n_confirm : int
+        Number of consecutive converged steps required before declaring
+        secure grasp. Prevents false triggers on oscillatory signals.
+    """
+
+    mean_converge_threshold: float = 0.03
+    std_threshold: float = 0.08
+    min_grasp_steps: int = 1
+    n_confirm: int = 2
+
+
+@dataclass
+class SMSCusumConfig:
+    """Configuration for the SMS-CUSUM detector.
+
+    The detector identifies contact events during gripper closure and
+    secure grasp convergence during force ramp, by monitoring tau_ext_norm.
 
     State graph:
-      FREE_MOTION -> CLOSING -> CONTACT
+      FREE_MOTION -> CLOSING -> CONTACT -> GRASPING -> SECURE_GRASP
 
     Parameters
     ----------
@@ -55,6 +93,9 @@ class SMSCusumConfig:
         CUSUM parameters for detecting initial contact (CLOSING -> CONTACT).
         Tuned for detecting negative mean shifts in tau_ext_norm during
         gripper closure.
+    secure_grasp_stage : SecureGraspConfig
+        Parameters for detecting secure grasp convergence (GRASPING -> SECURE_GRASP).
+        Monitors tau_ext_norm mean convergence across consecutive force ramp steps.
     baseline_init_samples : int
         Number of samples to collect for initial baseline mean and sigma.
         At 250 Hz, 50 samples = 0.2 s.
@@ -69,6 +110,7 @@ class SMSCusumConfig:
     contact_stage: CusumStageConfig = field(default_factory=lambda: CusumStageConfig(
         k_min=0.02, h=0.3, debounce_count=5, noise_multiplier=2.0
     ))
+    secure_grasp_stage: SecureGraspConfig = field(default_factory=SecureGraspConfig)
     baseline_init_samples: int = 50
     baseline_alpha: float = 0.01
     sample_rate: float = 250.0

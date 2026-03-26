@@ -1,6 +1,6 @@
 /**
  * @file sms_cusum.hpp
- * @brief SMS-CUSUM: Sequential Multi-State CUSUM for Contact Detection.
+ * @brief SMS-CUSUM: Sequential Multi-State CUSUM for Contact and Secure Grasp Detection.
  *
  * A novel extension of the classical CUSUM change-point detector that detects
  * contact events from a continuous force/torque signal stream, with
@@ -29,6 +29,7 @@
 
 #include "adaptive_baseline.hpp"
 #include "cusum.hpp"
+#include "secure_grasp.hpp"
 
 namespace sms_cusum {
 
@@ -40,12 +41,14 @@ namespace sms_cusum {
  * @brief Detected states in the SMS-CUSUM state machine.
  *
  * State graph:
- *   FREE_MOTION -> CLOSING -> CONTACT
+ *   FREE_MOTION -> CLOSING -> CONTACT -> GRASPING -> SECURE_GRASP
  */
 enum class GraspState : uint8_t {
-    FREE_MOTION = 0,
-    CLOSING     = 1,
-    CONTACT     = 2
+    FREE_MOTION  = 0,
+    CLOSING      = 1,
+    CONTACT      = 2,
+    GRASPING     = 3,
+    SECURE_GRASP = 4
 };
 
 /**
@@ -53,10 +56,12 @@ enum class GraspState : uint8_t {
  */
 inline const char* grasp_state_name(GraspState s) noexcept {
     switch (s) {
-        case GraspState::FREE_MOTION: return "FREE_MOTION";
-        case GraspState::CLOSING:     return "CLOSING";
-        case GraspState::CONTACT:     return "CONTACT";
-        default:                      return "UNKNOWN";
+        case GraspState::FREE_MOTION:  return "FREE_MOTION";
+        case GraspState::CLOSING:      return "CLOSING";
+        case GraspState::CONTACT:      return "CONTACT";
+        case GraspState::GRASPING:     return "GRASPING";
+        case GraspState::SECURE_GRASP: return "SECURE_GRASP";
+        default:                       return "UNKNOWN";
     }
 }
 
@@ -102,16 +107,17 @@ struct UpdateResult {
 // ============================================================================
 
 /**
- * @brief Configuration for the SMS-CUSUM contact detector.
+ * @brief Configuration for the SMS-CUSUM detector.
  *
  * State graph:
- *   FREE_MOTION -> CLOSING -> CONTACT
+ *   FREE_MOTION -> CLOSING -> CONTACT -> GRASPING -> SECURE_GRASP
  */
 struct SMSCusumConfig {
-    CusumStageConfig contact_stage   = {0.02, 0.3, 5, 2.0};
-    int32_t baseline_init_samples    = 50;
-    double  baseline_alpha           = 0.01;
-    double  sample_rate              = 250.0;
+    CusumStageConfig  contact_stage       = {0.02, 0.3, 5, 2.0};
+    SecureGraspConfig secure_grasp_stage  = {};
+    int32_t baseline_init_samples         = 50;
+    double  baseline_alpha                = 0.01;
+    double  sample_rate                   = 250.0;
 };
 
 // ============================================================================
@@ -152,6 +158,7 @@ public:
         , sample_idx_{0}
         , baseline_{config.baseline_init_samples, config.baseline_alpha}
         , contact_cusum_{config.contact_stage}
+        , secure_grasp_{config.secure_grasp_stage}
         , event_count_{0}
     {}
 
@@ -166,6 +173,7 @@ public:
     const AdaptiveBaseline& baseline() const noexcept { return baseline_; }
     AdaptiveBaseline& baseline() noexcept { return baseline_; }
     const CUSUMDetector& contact_cusum() const noexcept { return contact_cusum_; }
+    const SecureGraspDetector& secure_grasp_detector() const noexcept { return secure_grasp_; }
     int32_t event_count() const noexcept { return event_count_; }
     const DetectionEvent& event(int32_t i) const noexcept { return events_[i]; }
     const SMSCusumConfig& config() const noexcept { return config_; }
@@ -186,6 +194,57 @@ public:
         state_ = GraspState::CLOSING;
     }
 
+    /**
+     * @brief Signal that the force ramp is starting.
+     *
+     * Call after CONTACT is confirmed and the first grasp command
+     * is about to be sent.
+     */
+    void enter_grasping() noexcept {
+        secure_grasp_.reset();
+        secure_grasp_.begin_step(0);
+        state_ = GraspState::GRASPING;
+    }
+
+    /**
+     * @brief Signal start of a new GRASP_N HOLDING phase.
+     * @param step_index Zero-based step index.
+     */
+    void begin_grasp_step(int32_t step_index) noexcept {
+        secure_grasp_.begin_step(step_index);
+    }
+
+    /**
+     * @brief Signal end of GRASP_N HOLDING phase. Check for secure grasp.
+     * @return UpdateResult with detected=true if secure grasp was detected.
+     */
+    UpdateResult finalize_grasp_step() noexcept {
+        auto sg = secure_grasp_.finalize_step();
+
+        UpdateResult result = {};
+        result.detected = false;
+
+        if (sg.secure && state_ == GraspState::GRASPING) {
+            result.detected = true;
+            result.event.prev_state      = GraspState::GRASPING;
+            result.event.new_state       = GraspState::SECURE_GRASP;
+            result.event.sample_index    = sample_idx_;
+            result.event.cusum_statistic = static_cast<double>(sg.converge_streak);
+            result.event.baseline_mean   = sg.d_mu;
+            result.event.baseline_sigma  = sg.std_late;
+            result.event.k_effective     = 0.0;
+
+            std::snprintf(result.event.detail, sizeof(result.event.detail),
+                "Secure grasp: d_mu=%.4f, std=%.4f, streak=%d",
+                sg.d_mu, sg.std_late, sg.converge_streak);
+
+            state_ = GraspState::SECURE_GRASP;
+            record_event(result.event);
+        }
+
+        return result;
+    }
+
     // ------------------------------------------------------------------
     // Core update loop: O(1) per sample
     // ------------------------------------------------------------------
@@ -199,7 +258,7 @@ public:
     UpdateResult update(double tau_ext_norm) noexcept {
         ++sample_idx_;
 
-        UpdateResult result;
+        UpdateResult result = {};
         result.detected = false;
 
         switch (state_) {
@@ -236,8 +295,15 @@ public:
                 break;
             }
 
+            case GraspState::GRASPING:
+                // Accumulate samples for secure grasp detection.
+                // Detection happens via finalize_grasp_step().
+                secure_grasp_.update(tau_ext_norm);
+                break;
+
             case GraspState::CONTACT:
-                // Terminal state
+            case GraspState::SECURE_GRASP:
+                // Waiting for lifecycle calls, no per-sample transitions
                 break;
 
             default:
@@ -256,6 +322,7 @@ public:
         sample_idx_ = 0;
         baseline_.reset();
         contact_cusum_.reset();
+        secure_grasp_.reset();
         event_count_ = 0;
     }
 
@@ -263,6 +330,7 @@ public:
         state_ = GraspState::FREE_MOTION;
         baseline_.unfreeze();
         contact_cusum_.reset();
+        secure_grasp_.reset();
     }
 
 private:
@@ -275,13 +343,14 @@ private:
 
     static const int32_t kMaxEvents = 16;
 
-    SMSCusumConfig   config_;
-    GraspState       state_;
-    int32_t          sample_idx_;
-    AdaptiveBaseline baseline_;
-    CUSUMDetector    contact_cusum_;
-    DetectionEvent   events_[kMaxEvents];
-    int32_t          event_count_;
+    SMSCusumConfig       config_;
+    GraspState           state_;
+    int32_t              sample_idx_;
+    AdaptiveBaseline     baseline_;
+    CUSUMDetector        contact_cusum_;
+    SecureGraspDetector  secure_grasp_;
+    DetectionEvent       events_[kMaxEvents];
+    int32_t              event_count_;
 };
 
 }  // namespace sms_cusum
