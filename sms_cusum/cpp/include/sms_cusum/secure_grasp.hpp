@@ -32,13 +32,11 @@ namespace sms_cusum {
  *
  * @param mean_converge_threshold  Max |d_mu| (Nm) for convergence.
  * @param std_threshold            Max sigma_late (Nm) for stability.
- * @param min_grasp_steps          Minimum step index before detection (0-based).
  * @param n_confirm                Consecutive converged steps required.
  */
 struct SecureGraspConfig {
     double  mean_converge_threshold = 0.03;
     double  std_threshold           = 0.08;
-    int32_t min_grasp_steps         = 1;
     int32_t n_confirm               = 2;
 };
 
@@ -141,7 +139,7 @@ public:
         double std_late = std::sqrt(std::max(0.0, variance));
 
         double d_mu = 0.0;
-        if (step_index_ >= config_.min_grasp_steps) {
+        if (step_index_ > 0) {  // step 0 has no previous mu to compare
             d_mu = std::fabs(mu_late - prev_mu_late_);
 
             bool primary_ok = d_mu < config_.mean_converge_threshold;

@@ -13,10 +13,10 @@ This controller runs inside the `ros_control` real-time loop provided by `franka
 
 **Grasp** adds:
 
-- 12-state grasp machine with multi-step force ramp: `START` → `UNKNOWN` → `BASELINE` → `CLOSING_COMMAND` → `CLOSING` → `CONTACT_CONFIRMED` → `CONTACT` → `GRASPING` (GRASP_1..GRASP_N) → `UPLIFT` → `EVALUATE` → `SUCCESS`/`FAILED`
+- 12-state grasp machine with multi-step force ramp: `START` → `UNKNOWN` → `BASELINE` → `CLOSING_COMMAND` → `CLOSING` → `CONTACT_CONFIRMED` → `CONTACT` → `GRASPING` (GRASP_1..GRASP_N) → `UPLIFT` → `EVALUATE` → `SUCCESS`/`FAILED`. Secure grasp must be confirmed before UPLIFT; reaching f_max without it → `FAILED`
 - SMS-CUSUM contact detection during CLOSING (noise-adaptive CUSUM change-point detection on tau_ext_norm — automatically scales sensitivity to measured noise level, no per-object threshold tuning)
 - Immediate gripper stop on contact: calls `franka::Gripper::stop()` to physically halt the motor
-- Multi-step force ramp on table: grasps at f_min, f_min+f_step, ..., up to f_max — each step settles, holds, then advances. Secure grasp detection can terminate the ramp early when further force increase is unnecessary. After the final step (or secure grasp), a single UPLIFT + EVALUATE determines SUCCESS or FAILED
+- Multi-step force ramp on table: grasps at f_min, f_min+f_step, ..., up to f_max — each step settles, holds, then advances. Secure grasp detection must confirm grip before proceeding to UPLIFT + EVALUATE. If f_max is reached without secure grasp, the attempt fails immediately
 - Secure grasp convergence detection: SMS-CUSUM monitors tau_ext_norm mean convergence across consecutive force ramp steps — detects when the object is fully compressed and grip force increase is no longer needed
 - Three-gate AND slip detection: load transfer + support drop + jaw widening (directional force decomposition, Fn = |Fz|) during EVALUATE hold
 - One rosbag per trial with all state transitions (recording starts automatically on launch)
@@ -209,10 +209,10 @@ The force ramp runs entirely on the table (no mid-trial lift/lower). The control
 **Each ramp step (GRASP_k):**
 1. **Grasp command**: Dispatches a deferred grasp at force `f_current` to the `contact_width` (updated after each step)
 2. **Settle** (`grasp_settle_time`, default 0.5 s): Wait for the grasp command to complete and signals to stabilize. Published `grasp_ramp_phase = "settling"`
-3. **Hold** (`grasp_force_hold_time`, default 1.0 s): Hold at force level for data logging and analysis. Published `grasp_ramp_phase = "holding"`. During the late segment (last half), tau_ext_norm samples are fed to the SMS-CUSUM secure grasp detector. W_pre (support force baseline for slip evaluation) is accumulated during every step's HOLDING sub-phase
-4. **Advance**: Update `contact_width` from the current gripper width. If secure grasp was detected or `f_current >= f_max`, transition to UPLIFT. Otherwise increment force by `f_step` and advance to next step
+3. **Hold** (`grasp_force_hold_time`, default 2.0 s): Hold at force level for data logging and analysis. Published `grasp_ramp_phase = "holding"`. During the late segment (last half), tau_ext_norm samples are fed to the SMS-CUSUM secure grasp detector. W_pre (support force baseline for slip evaluation) is accumulated during every step's HOLDING sub-phase
+4. **Advance**: Update `contact_width` from the current gripper width. If secure grasp was detected, transition to UPLIFT. If `f_current >= f_max` without secure grasp, transition to FAILED. Otherwise increment force by `f_step` and advance to next step
 
-After the final ramp step (by `f_max` or secure grasp detection), the controller transitions to UPLIFT.
+After secure grasp is confirmed, the controller transitions to UPLIFT. If `f_max` is reached without secure grasp, the controller transitions directly to FAILED.
 
 - Grasp width starts as the `contact_width` captured at CONTACT; updated after each ramp step
 - **Grasp failure**: After each ramp step's grasp command completes, the RT thread checks `cmd_success_` (the `grasp()` return value stored by the command thread). If `false`, transitions to FAILED immediately
@@ -276,7 +276,7 @@ A single command that runs the full grasp sequence automatically. Published via 
 - **Baseline-ready polling**: AUTO polls every 100 ms for `baseline_prep_done` AND `cd_baseline_ready` before starting the `auto_delay` countdown
 - `auto_delay` parameter controls the wait time between transitions (default 5.0 seconds), applied *after* baseline is ready
 - All BASELINE, CLOSING, and GRASPING parameters are accepted and forwarded to each stage
-- The force ramp runs autonomously after GRASPING (same as manual mode): GRASP_1 → GRASP_2 → ... → GRASP_N → UPLIFT → EVALUATE → SUCCESS/FAILED
+- The force ramp runs autonomously after GRASPING (same as manual mode): GRASP_1 → ... → GRASP_N → UPLIFT → EVALUATE → SUCCESS/FAILED (secure grasp required; f_max without it → FAILED)
 - If BASELINE prep results in FAILED, auto mode ends at FAILED
 - If CLOSING results in FAILED (no contact), auto mode ends at FAILED
 - Any manual command (`BASELINE`, `CLOSING`, `GRASPING`) published during auto mode cancels auto mode
@@ -349,7 +349,7 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
 
 # GRASPING — use YAML defaults (f_min=3N, f_max=70N, f_step=3N)
 # Uses contact_width from CONTACT as grasp width. After this command, the force ramp
-# runs autonomously: GRASP_1 → GRASP_2 → ... → GRASP_N → UPLIFT → EVALUATE → SUCCESS/FAILED
+# runs autonomously: GRASP_1 → ... → GRASP_N → UPLIFT → EVALUATE → SUCCESS/FAILED (or FAILED if f_max reached without secure grasp)
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
   "{command: 'GRASPING'}" --once
 
@@ -361,7 +361,7 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
   "{command: 'GRASPING', \
     f_min: 3.0, f_step: 3.0, f_max: 70.0, \
-    grasp_force_hold_time: 1.0, grasp_settle_time: 0.5, \
+    grasp_force_hold_time: 2.0, grasp_settle_time: 0.5, \
     fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
     fr_uplift_distance: 0.010, fr_lift_speed: 0.01, fr_uplift_hold: 1.0, \
     fr_slip_drop_thresh: 0.15, fr_slip_width_thresh: 0.0005, \
@@ -390,7 +390,7 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
   "{command: 'AUTO', open_gripper: true, auto_delay: 3.0, \
     closing_width: 0.001, closing_speed: 0.05, \
     f_min: 3.0, f_step: 3.0, f_max: 70.0, \
-    grasp_force_hold_time: 1.0, grasp_settle_time: 0.5, \
+    grasp_force_hold_time: 2.0, grasp_settle_time: 0.5, \
     fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
     fr_uplift_distance: 0.010, fr_lift_speed: 0.01, fr_uplift_hold: 1.0, \
     fr_slip_drop_thresh: 0.15, fr_slip_width_thresh: 0.0005, \
@@ -513,13 +513,11 @@ When secure grasp is detected, the force ramp terminates early and transitions d
 
 ### Parameters
 
-| Parameter | YAML key | Default | Description |
-|-----------|----------|---------|-------------|
-| Mean convergence threshold | `secure_grasp/mean_converge_threshold` | 0.03 Nm | Max `\|d_mu\|` between consecutive settled steps |
-| Std threshold | `secure_grasp/std_threshold` | 0.08 Nm | Max sigma_late for signal stability |
-| Min grasp steps | `secure_grasp/min_grasp_steps` | 1 | Minimum step index before detection (step 0 has no previous mu) |
-| N confirm | `secure_grasp/n_confirm` | 2 | Consecutive converged steps required |
-| Late fraction | `secure_grasp/late_fraction` | 0.5 | Fraction of HOLDING phase used for late-segment statistics |
+| Parameter | Built-in default | Description |
+|-----------|-----------------|-------------|
+| Mean convergence threshold | 0.03 Nm | Max `\|d_mu\|` between consecutive settled steps |
+| Std threshold | 0.08 Nm | Max sigma_late for signal stability |
+| N confirm | 2 | Consecutive converged steps required |
 
 ### Integration
 
@@ -778,7 +776,7 @@ The **velocity profile** (first derivative) is:
 | `uplift_distance`          | double | `0.010` | Micro-uplift distance after final ramp step [m] (max 0.3)           |
 | `lift_speed`               | double | `0.01`  | Lift speed for UPLIFT and BASELINE prep downlift [m/s] (min 0.001)  |
 | `uplift_hold`              | double | `1.0`   | Hold time at top for evaluation: early (first half) + late (second half) windows [s] (min 0.5, max 120.0) |
-| `grasp_force_hold_time`    | double | `1.0`   | Hold at each force ramp step before advancing [s] (min 0.25). W_pre accumulated during HOLDING of last step |
+| `grasp_force_hold_time`    | double | `2.0`   | Hold at each force ramp step before advancing [s] (min 0.25). W_pre accumulated during HOLDING of last step |
 | `grasp_settle_time`        | double | `0.5`   | Settle time after each grasp command completes [s]                  |
 | `slip_drop_thresh`         | double | `0.15`   | DF_TH: max allowed relative support force drop (15% = fail)         |
 | `slip_width_thresh`        | double | `0.0005` | W_TH: max allowed jaw widening P95-P5 [m] (0.5 mm = fail)          |
@@ -880,7 +878,7 @@ Per-object command published on `/kitting_controller/state_cmd`. Any float64 par
 | `f_min`                | float64 | Starting grasp force [N] (0 = use default 3.0)                                     |
 | `f_step`               | float64 | Force increment per ramp step [N] (0 = use default 3.0)                            |
 | `f_max`                | float64 | Maximum force for the final ramp step [N] (0 = use default 70.0)                   |
-| `grasp_force_hold_time` | float64 | Hold at each force ramp step before advancing [s] (0 = use default 1.0)            |
+| `grasp_force_hold_time` | float64 | Hold at each force ramp step before advancing [s] (0 = use default 2.0)            |
 | `grasp_settle_time`    | float64 | Settle after each grasp command completes [s] (0 = use default 0.5)                |
 | `fr_uplift_distance`   | float64 | Micro-uplift distance after final ramp step [m] (0 = use default 0.010, max 0.3)   |
 | `fr_lift_speed`        | float64 | Lift speed for final UPLIFT [m/s] (0 = use default 0.01, min 0.001)                |
@@ -1012,7 +1010,7 @@ The Grasp logger is written in C++ using the `rosbag::Bag` API directly and `top
 - Publishing BASELINE on `state_cmd` prepares for new trial (optionally opens gripper)
 - Publishing GRASPING on `state_cmd` starts the automated force ramp (uses contact_width from CONTACT)
 - GRASPING timeout: 10 seconds maximum for any ramp step's gripper command completion, then FAILED
-- Force ramp runs autonomously after GRASPING: GRASP_1 → GRASP_2 → ... → GRASP_N → UPLIFT → EVALUATE → SUCCESS/FAILED
+- Force ramp runs autonomously after GRASPING: GRASP_1 → ... → GRASP_N → UPLIFT → EVALUATE → SUCCESS/FAILED (secure grasp required; f_max without it → FAILED)
 - Each ramp step: grasp at force → settle (grasp_settle_time) → hold/log (grasp_force_hold_time) → update contact_width → advance
 - W_pre accumulated during HOLDING sub-phase of the last ramp step only
 - Slip detected during EVALUATE transitions to FAILED (no retry loop)
@@ -1046,7 +1044,7 @@ The Grasp logger is written in C++ using the `rosbag::Bag` API directly and `top
 - AUTO mode forwards all BASELINE, CLOSING, and GRASPING parameters from the single message to each stage
 - AUTO mode cancelled by any manual command (BASELINE, CLOSING, GRASPING) — allows user override at any point
 - `auto_mode_` flag is `std::atomic<bool>` — safe with `ros::AsyncSpinner` concurrent timer/subscriber callbacks
-- AUTO mode ends automatically on FAILED during BASELINE prep or CLOSING (no contact detected), or after GRASPING starts (force ramp runs autonomously: GRASP_1 → ... → GRASP_N → UPLIFT → EVALUATE → SUCCESS/FAILED)
+- AUTO mode ends automatically on FAILED during BASELINE prep, CLOSING (no contact detected), or GRASPING (f_max without secure grasp). On secure grasp: UPLIFT → EVALUATE → SUCCESS/FAILED
 - Auto mode timers run on ROS spinner thread (non-RT); reuse existing handle functions — no duplicated logic
 
 ## License

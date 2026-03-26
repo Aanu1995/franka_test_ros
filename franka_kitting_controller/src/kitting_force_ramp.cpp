@@ -234,7 +234,7 @@ namespace franka_kitting_controller {
         {
           int total = static_cast<int>(rt_fr_grasp_force_hold_time_ * 250.0);
           fr_holding_sample_count_ = 0;
-          fr_holding_late_start_ = total - static_cast<int>(total * sg_late_fraction_);
+          fr_holding_late_start_ = total / 2;  // late segment = last half of HOLDING
         }
 
         ROS_INFO("    GRASP_%d: holding at F=%.1f N for %.2fs",
@@ -277,9 +277,17 @@ namespace franka_kitting_controller {
                   sg_result.event.baseline_mean,
                   sg_result.event.baseline_sigma);
         }
-        bool is_last_step = (fr_f_current_ >= rt_fr_f_max_) || sg_result.detected;
+        bool reached_f_max = fr_f_current_ >= rt_fr_f_max_;
 
-        if (is_last_step) {
+        if (reached_f_max && !sg_result.detected) {
+          // Maximum force reached without secure grasp — fail
+          current_state_.store(GraspState::FAILED, std::memory_order_relaxed);
+          publishStateLabel("FAILED");
+          logStateTransition("FAILED", "f_max reached without secure grasp");
+          ROS_WARN("    GRASP_%d: FAILED — f_max=%.1f N reached without secure grasp",
+                  fr_iteration_ + 1, rt_fr_f_max_);
+        } else if (sg_result.detected) {
+          // Secure grasp confirmed — proceed to uplift
           uplift_start_pose_ = cartesian_pose_handle_->getRobotState().O_T_EE_d;
           uplift_z_start_ = uplift_start_pose_[14];
           uplift_elapsed_ = 0.0;
@@ -289,7 +297,7 @@ namespace franka_kitting_controller {
 
           current_state_.store(GraspState::UPLIFT, std::memory_order_relaxed);
           publishStateLabel("UPLIFT");
-          logStateTransition("UPLIFT", "Ramp complete — micro-lift starting");
+          logStateTransition("UPLIFT", "Secure grasp confirmed — micro-lift starting");
           ROS_INFO("    final_iter=%d  F=%.1f N  width=%.4f m  "
                   "distance=%.4f m  duration=%.2f s",
                   fr_iteration_ + 1, fr_f_current_, gripper_snapshot.width,

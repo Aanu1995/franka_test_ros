@@ -44,7 +44,7 @@ class TestSecureGraspDetector(unittest.TestCase):
         det = self._make_detector(
             mean_converge_threshold=0.03,
             std_threshold=0.08,
-            min_grasp_steps=1,
+
             n_confirm=2,
         )
         det.reset()
@@ -80,12 +80,11 @@ class TestSecureGraspDetector(unittest.TestCase):
         self.assertTrue(r3.secure)
         self.assertEqual(r3.converge_streak, 2)
 
-    def test_min_grasp_steps_guard(self):
-        """Detection should not trigger before min_grasp_steps."""
-        det = self._make_detector(min_grasp_steps=1, n_confirm=2)
+    def test_step_zero_skips_comparison(self):
+        """Step 0 has no previous mu — comparison is skipped, no trigger."""
+        det = self._make_detector(n_confirm=2)
         det.reset()
 
-        # Step 0: no previous mean, so comparison skipped
         det.begin_step(0)
         for _ in range(100):
             det.update(1.0)
@@ -218,7 +217,7 @@ class TestSecureGraspDetector(unittest.TestCase):
 
     def test_secure_is_latched(self):
         """Once secure, subsequent finalize_step should still return secure."""
-        det = self._make_detector(n_confirm=1, min_grasp_steps=1)
+        det = self._make_detector(n_confirm=1)
         det.reset()
 
         det.begin_step(0)
@@ -241,7 +240,7 @@ class TestSecureGraspDetector(unittest.TestCase):
         det = self._make_detector(
             mean_converge_threshold=0.03,
             std_threshold=0.08,
-            min_grasp_steps=1,
+
             n_confirm=2,
         )
         det.reset()

@@ -13,14 +13,14 @@ kitting_state_controller:
 
   # Secure grasp detection: convergence detector on tau_ext_norm during force ramp
   # Uses built-in optimized parameters: mean_converge=0.03 Nm, std=0.08 Nm,
-  # min_steps=1, n_confirm=2, late_fraction=0.5
+  # n_confirm=2
   # Detects when increasing grip force no longer changes steady-state tau_ext_norm,
   # enabling early termination of the force ramp before reaching f_max.
 
   # Grasping parameters (overridable per-command via KittingGripperCommand)
   # After GRASPING command, controller runs a contact-only force ramp:
-  #   GRASP_1 → GRASP_2 → ... → GRASP_N → UPLIFT → EVALUATE → SUCCESS/FAILED
-  #   (may terminate early at any GRASP step if secure grasp is detected)
+  #   GRASP_1 → ... → GRASP_N → UPLIFT → EVALUATE → SUCCESS/FAILED (secure grasp confirmed)
+  #   GRASP_1 → ... → GRASP_N → FAILED (f_max reached without secure grasp)
   # Each ramp step: grasp at force → settle → hold/log → update contact_width
   # grasp_width is always the contact_width captured at CONTACT (not configurable)
   grasp_speed: 0.02 # [m/s] Gripper speed for GraspAction
@@ -28,7 +28,7 @@ kitting_state_controller:
   f_min: 3.0 # [N] Starting grasp force
   f_step: 3.0 # [N] Force increment per step
   f_max: 70.0 # [N] Maximum force for the final ramp step
-  grasp_force_hold_time: 1.0  # [s] Hold at each force step before advancing (clamped to min 0.25)
+  grasp_force_hold_time: 2.0  # [s] Hold at each force step before advancing (clamped to min 0.25)
   grasp_settle_time: 0.5      # [s] Wait after each grasp command completes for gripper to stabilize
   uplift_distance: 0.010 # [m] Micro-uplift distance after final ramp step
   lift_speed: 0.01 # [m/s] Lift speed for final UPLIFT (clamped to min 0.001)

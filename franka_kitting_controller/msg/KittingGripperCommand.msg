@@ -39,12 +39,12 @@ float64 contact_debounce_time    # [s] Sustained drop duration before triggering
 # grasp_width is always the contact_width captured at CONTACT (not configurable).
 # All parameters are per-command overridable. 0 = use YAML default.
 # The controller runs a contact-only force ramp:
-#   GRASP_1 → GRASP_2 → ... → GRASP_N → UPLIFT → EVALUATE → SUCCESS/FAILED
+#   GRASP_1 → ... → GRASP_N → UPLIFT → EVALUATE → SUCCESS/FAILED (secure grasp required; f_max without it → FAILED)
 # Each ramp step: grasp at force → settle → hold/log → update contact_width
 float64 f_min                # [N]   Starting grasp force (0 = use default 3.0)
 float64 f_step               # [N]   Force increment per step (0 = use default 3.0)
 float64 f_max                # [N]   Maximum force for the final step (0 = use default 70.0)
-float64 grasp_force_hold_time   # [s] Hold at each force step before advancing (0 = use default 1.0)
+float64 grasp_force_hold_time   # [s] Hold at each force step before advancing (0 = use default 2.0)
 float64 grasp_settle_time       # [s] Settle after each grasp completes (0 = use default 0.5)
 float64 fr_uplift_distance   # [m]   Micro-uplift distance after final ramp step (0 = use default 0.010)
 float64 fr_lift_speed        # [m/s] Lift speed for final UPLIFT (0 = use default 0.01)

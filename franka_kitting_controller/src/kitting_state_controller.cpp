@@ -177,11 +177,11 @@ namespace franka_kitting_controller {
     node_handle.param("slip_drop_thresh", fr_slip_drop_thresh_, 0.15);
     node_handle.param("slip_width_thresh", fr_slip_width_thresh_, 0.0005);
     node_handle.param("load_transfer_min", fr_load_transfer_min_, 1.5);
-    node_handle.param("grasp_force_hold_time", fr_grasp_force_hold_time_, 1.0);
+    node_handle.param("grasp_force_hold_time", fr_grasp_force_hold_time_, 2.0);
     node_handle.param("grasp_settle_time", fr_grasp_settle_time_, 0.5);
 
     // Secure grasp detection uses built-in optimized parameters from SecureGraspConfig
-    // (mean_converge=0.03 Nm, std=0.08 Nm, min_steps=1, n_confirm=2).
+    // (mean_converge=0.03 Nm, std=0.08 Nm, n_confirm=2).
     // Already configured via SMSCusumConfig defaults in sms_detector_ initialization.
 
     if (fr_f_min_ <= 0.0) {
@@ -383,6 +383,14 @@ namespace franka_kitting_controller {
     fr_width_samples_.clear();
     fr_holding_sample_count_ = 0;
     fr_holding_late_start_ = 0;
+    // Clear slip evaluation accumulators (defensive — re-initialized before use)
+    fr_pre_sum_ = 0.0;
+    fr_pre_sum_sq_ = 0.0;
+    fr_pre_count_ = 0;
+    fr_early_sum_ = 0.0;
+    fr_early_count_ = 0;
+    fr_late_sum_ = 0.0;
+    fr_late_count_ = 0;
   }
 
   void KittingStateController::applyPendingStateTransition() {

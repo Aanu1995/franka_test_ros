@@ -308,7 +308,6 @@ Both must hold for `n_confirm` consecutive steps. Step 0 is always skipped
 |-----------|---------|-------------|
 | `mean_converge_threshold` | 0.03 Nm | Max inter-step mean difference for convergence |
 | `std_threshold` | 0.08 Nm | Max late-segment std for stability |
-| `min_grasp_steps` | 1 | Minimum step index before detection can trigger |
 | `n_confirm` | 2 | Consecutive converged steps required |
 
 ### Lifecycle

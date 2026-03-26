@@ -63,9 +63,6 @@ class SecureGraspConfig:
         Maximum σ_late (Nm) for signal stability.
         Stable equilibrium: σ < 0.073 Nm. Guards against cases where
         means coincidentally match but the system is still oscillating.
-    min_grasp_steps : int
-        Minimum step index before detection can trigger (0-based).
-        Step 0 has no previous μ to compare, so min is 1.
     n_confirm : int
         Number of consecutive converged steps required before declaring
         secure grasp. Prevents false triggers on oscillatory signals.
@@ -73,7 +70,6 @@ class SecureGraspConfig:
 
     mean_converge_threshold: float = 0.03
     std_threshold: float = 0.08
-    min_grasp_steps: int = 1
     n_confirm: int = 2
 
 

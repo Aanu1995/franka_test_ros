@@ -169,7 +169,7 @@ class KittingControllerTestFixture : public ::testing::Test {
     controller_.rt_fr_slip_drop_thresh_ = 0.15;
     controller_.rt_fr_slip_width_thresh_ = 0.0005;
     controller_.rt_fr_load_transfer_min_ = 1.5;
-    controller_.rt_fr_grasp_force_hold_time_ = 1.0;
+    controller_.rt_fr_grasp_force_hold_time_ = 2.0;
     controller_.rt_fr_grasp_settle_time_ = 0.5;
 
     // Pre-allocate width samples vector (mimics starting())

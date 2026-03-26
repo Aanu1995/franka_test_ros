@@ -139,9 +139,10 @@ class SMSCusum:
                 print("Contact detected!")
 
         # Phase 3: Secure grasp detection during force ramp
-        detector.enter_grasping()
+        detector.enter_grasping()  # implicitly calls begin_step(0)
         for step in range(num_steps):
-            detector.begin_grasp_step(step)
+            if step > 0:
+                detector.begin_grasp_step(step)
             for sample in late_holding_samples:
                 detector.update(sample.tau_ext_norm)
             result = detector.finalize_grasp_step()

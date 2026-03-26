@@ -231,7 +231,7 @@ namespace franka_kitting_controller {
     double fr_slip_drop_thresh_{0.15};
     double fr_slip_width_thresh_{0.0005};
     double fr_load_transfer_min_{1.5};
-    double fr_grasp_force_hold_time_{1.0};
+    double fr_grasp_force_hold_time_{2.0};
     double fr_grasp_settle_time_{0.5};
 
     // RT-local copies (snapshotted at GRASPING entry)
@@ -246,7 +246,7 @@ namespace franka_kitting_controller {
     double rt_fr_slip_drop_thresh_{0.15};
     double rt_fr_slip_width_thresh_{0.0005};
     double rt_fr_load_transfer_min_{1.5};
-    double rt_fr_grasp_force_hold_time_{1.0};
+    double rt_fr_grasp_force_hold_time_{2.0};
     double rt_fr_grasp_settle_time_{0.5};
 
     // Staging variables (subscriber → RT via state_changed_)
@@ -261,7 +261,7 @@ namespace franka_kitting_controller {
     double staging_fr_slip_drop_thresh_{0.15};
     double staging_fr_slip_width_thresh_{0.0005};
     double staging_fr_load_transfer_min_{1.5};
-    double staging_fr_grasp_force_hold_time_{1.0};
+    double staging_fr_grasp_force_hold_time_{2.0};
     double staging_fr_grasp_settle_time_{0.5};
     uint32_t staging_fr_expected_cmd_gen_{0};
 
@@ -275,8 +275,6 @@ namespace franka_kitting_controller {
     RampPhase fr_ramp_phase_{RampPhase::COMMAND_SENT};
     ros::Time fr_ramp_step_start_time_;
 
-    // Secure grasp: fraction of HOLDING phase used for late-segment statistics
-    double sg_late_fraction_{0.5};
 
     // HOLDING sample tracking for secure grasp late-segment feeding
     int fr_holding_sample_count_{0};

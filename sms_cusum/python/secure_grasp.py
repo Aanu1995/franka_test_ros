@@ -180,7 +180,7 @@ class SecureGraspDetector:
         std_late = math.sqrt(max(0.0, variance))
 
         d_mu = 0.0
-        if self._step_index >= self._config.min_grasp_steps:
+        if self._step_index > 0:  # step 0 has no previous mu to compare
             d_mu = abs(mu_late - self._prev_mu_late)
 
             primary_ok = d_mu < self._config.mean_converge_threshold

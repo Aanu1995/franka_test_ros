@@ -247,7 +247,6 @@ class TestSMSCusumSecureGrasp(unittest.TestCase):
             secure_grasp_stage=SecureGraspConfig(
                 mean_converge_threshold=0.03,
                 std_threshold=0.08,
-                min_grasp_steps=1,
                 n_confirm=2,
             ),
             baseline_init_samples=20,
