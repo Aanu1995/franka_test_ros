@@ -447,7 +447,7 @@ Detects contact by monitoring tau_ext_norm during CLOSING using a one-sided down
 
 #### Algorithm
 
-1. **Baseline collection**: During BASELINE state (after any accumulated-uplift correction completes), feed tau_ext_norm samples to `sms_detector_.update()`. The `AdaptiveBaseline` collects 50 samples (0.2 s at 250 Hz) to compute both the **mean** (μ) and **noise sigma** (σ). After 50 samples, the baseline transitions to EMA tracking. This captures the at-rest external torque norm and its variability before any gripper motion.
+1. **Baseline collection**: During BASELINE state (entered after UNKNOWN completes all preparation and settling), feed tau_ext_norm samples to `sms_detector_.update()`. The `AdaptiveBaseline` collects 50 samples (0.2 s at 250 Hz) to compute both the **mean** (μ) and **noise sigma** (σ). After 50 samples, the baseline transitions to EMA tracking.
 2. **Baseline freeze**: At the CLOSING_COMMAND → CLOSING transition, `sms_detector_.enter_closing()` freezes the baseline (preventing corruption during detection) and adapts the CUSUM allowance: `k_eff = max(k_min, noise_multiplier × σ)`.
 3. **CUSUM detection**: Each tick during CLOSING, the CUSUM statistic accumulates evidence of a torque drop: `S = max(0, S + (μ − tau_ext_norm) − k_eff)`. The allowance `k_eff` absorbs noise-level fluctuations; only genuine drops accumulate S.
 4. **Debounce**: The alarm condition `S ≥ h` must persist for `debounce_count` (5) consecutive samples before triggering contact. This replaces time-based debounce with sample-based debounce.
@@ -481,7 +481,7 @@ When contact is detected, the controller stops the gripper and transitions throu
 
 1. **Contact detected (RT thread)**: Sets `contact_latched_`, sets `stop_requested_`, and transitions to **CONTACT_CONFIRMED** immediately.
 2. **Read thread executes stop**: Checks `stop_requested_` after each `readOnce()`, calls `franka::Gripper::stop()` to physically halt the motor, then sets `width_capture_pending_` to begin a settle-wait. If `stop()` throws an exception, `stop_requested_` remains true for automatic retry on the next iteration.
-3. **Read thread signals stop**: On the next `readOnce()` after `stop()`, sets `gripper_stopped_` to signal the RT thread that the gripper has stopped. `contact_width_` is stored for logging/validation, but the actual grasp width is always read fresh from `gs.width` at the moment the grasp command is dispatched — this guarantees the target matches the gripper's real position.
+3. **Read thread signals stop**: On the next `readOnce()` after `stop()`, captures `contact_width_` and sets `gripper_stopped_` to signal the RT thread that the gripper has stopped.
 4. **Deferred transition (RT thread)**: Sees `contact_latched_ && CONTACT_CONFIRMED && gripper_stopped_` and transitions to **CONTACT**. `contact_width_` is already set by the read thread.
 5. **One-shot guard**: `gripper_stop_sent_` flag prevents duplicate stop requests; `contact_latched_` prevents re-detection.
 
@@ -634,7 +634,7 @@ Failed load transfer (object not lifted):
 
 ## Grasp: UPLIFT / DOWNLIFT Trajectory Mathematics
 
-The UPLIFT trajectory executes a smooth Cartesian micro-lift internally using cosine-smoothed time-based trajectory interpolation. DOWNLIFT uses the same math but is used **only** during BASELINE preparation to reverse accumulated uplift from a previous SUCCESS (between-trial arm lowering) — it is **not** used during the force ramp. Both trajectories run at the control loop rate (1 kHz) and command the end-effector pose via `FrankaPoseCartesianInterface`.
+The UPLIFT trajectory executes a smooth Cartesian micro-lift internally using cosine-smoothed time-based trajectory interpolation. DOWNLIFT uses the same math but is used **only** during UNKNOWN preparation to reverse accumulated uplift from a previous SUCCESS (between-trial arm lowering) — it is **not** used during the force ramp. Both trajectories run at the control loop rate (1 kHz) and command the end-effector pose via `FrankaPoseCartesianInterface`.
 
 ### Symbols
 
