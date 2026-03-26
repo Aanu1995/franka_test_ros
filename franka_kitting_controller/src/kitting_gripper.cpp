@@ -90,7 +90,7 @@ namespace franka_kitting_controller {
             !baseline_prep_done_.load(std::memory_order_acquire) &&
             !baseline_open_dispatched_.load(std::memory_order_relaxed) &&
             !downlift_active_.load(std::memory_order_relaxed) &&
-            current_state_.load(std::memory_order_relaxed) == GraspState::BASELINE) {
+            current_state_.load(std::memory_order_relaxed) == GraspState::UNKNOWN) {
           GripperCommand open_cmd;
           open_cmd.type = GripperCommandType::MOVE;
           open_cmd.width = baseline_open_width_.load(std::memory_order_relaxed);

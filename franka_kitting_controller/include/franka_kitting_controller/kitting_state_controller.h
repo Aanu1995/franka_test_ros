@@ -54,6 +54,7 @@ namespace franka_kitting_controller {
   /// Internal (realtime):  GRASPING (force ramp f_min→f_max on table) → UPLIFT → EVALUATE → SUCCESS/FAILED
   enum class GraspState {
     START,           // Initial state: controller running, awaiting BASELINE command
+    UNKNOWN,         // Preparing for baseline (downlift, open, settle) — data not used for baseline
     BASELINE,        // Collecting reference signals
     CLOSING_COMMAND, // Gripper close queued — awaiting execution confirmation
     CLOSING,            // Gripper confirmed moving toward object
@@ -172,6 +173,9 @@ namespace franka_kitting_controller {
     std::atomic<bool> baseline_open_dispatched_{false};
     bool baseline_open_seen_executing_{false};
     std::atomic<double> baseline_open_width_{0.0};
+
+    bool unknown_settle_started_{false};
+    ros::Time unknown_settle_start_;
 
     double closing_width_{0.001};
     double closing_speed_{0.05};
@@ -298,6 +302,7 @@ namespace franka_kitting_controller {
     static constexpr int kWidthSamplesPerSec{250};
     static constexpr int kMaxWidthSamples{30000};
     static constexpr int kActionTimeoutSec{30};
+    static constexpr double kBaselineSettleTime{2.0};
     static constexpr double kClosingCmdTimeout{10.0};
     static constexpr double kClosingTimeout{30.0};
     static constexpr double kGraspSettleDelay{0.1};

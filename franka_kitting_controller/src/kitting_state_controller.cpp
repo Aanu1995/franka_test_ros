@@ -33,6 +33,7 @@ namespace franka_kitting_controller {
   constexpr double KittingStateController::kMinLiftSpeed;
   constexpr int    KittingStateController::kMaxWidthSamples;
   constexpr int    KittingStateController::kActionTimeoutSec;
+  constexpr double KittingStateController::kBaselineSettleTime;
   constexpr double KittingStateController::kClosingCmdTimeout;
   constexpr double KittingStateController::kClosingTimeout;
 
@@ -40,6 +41,8 @@ namespace franka_kitting_controller {
     switch (state) {
       case GraspState::START:
         return "START";
+      case GraspState::UNKNOWN:
+        return "UNKNOWN";
       case GraspState::BASELINE:
         return "BASELINE";
       case GraspState::CLOSING_COMMAND:
@@ -352,6 +355,7 @@ namespace franka_kitting_controller {
     downlift_active_.store(false, std::memory_order_relaxed);
     downlift_elapsed_ = 0.0;
     deferred_grasp_pending_.store(false, std::memory_order_relaxed);
+    unknown_settle_started_ = false;
 
     resetForceRampState();
     fr_width_samples_.reserve(kMaxWidthSamples + 1);
@@ -381,7 +385,11 @@ namespace franka_kitting_controller {
     }
     GraspState new_state = pending_state_.load(std::memory_order_relaxed);
 
+    // BASELINE command → enter UNKNOWN first (prep + settle), then BASELINE.
+    // Data published during UNKNOWN is not used for baseline collection.
     if (new_state == GraspState::BASELINE) {
+      new_state = GraspState::UNKNOWN;
+
       uplift_active_.store(false, std::memory_order_relaxed);
       uplift_elapsed_ = 0.0;
       downlift_active_.store(false, std::memory_order_relaxed);
@@ -401,9 +409,11 @@ namespace franka_kitting_controller {
       resetForceRampState();
 
       cd_baseline_count_ = 0;
-      cd_baseline_ = 0.0;      cd_baseline_ready_.store(false, std::memory_order_relaxed);
+      cd_baseline_ = 0.0;
+      cd_baseline_ready_.store(false, std::memory_order_relaxed);
+      unknown_settle_started_ = false;
 
-      ROS_INFO("  [BASELINE]  State machine reset for new trial");
+      ROS_INFO("  [UNKNOWN]  State machine reset for new trial");
 
       bool needs_downlift = (accumulated_uplift_ > 0.001);
       if (needs_downlift) {
@@ -413,20 +423,23 @@ namespace franka_kitting_controller {
         rt_downlift_distance_ = accumulated_uplift_;
         rt_downlift_duration_ = accumulated_uplift_ / fr_lift_speed_;
         downlift_active_.store(true, std::memory_order_relaxed);
-        ROS_INFO("  [BASELINE]  Step 1: Lowering arm (%.4f m, %.2f s)",
+        ROS_INFO("  [UNKNOWN]  Step 1: Lowering arm (%.4f m, %.2f s)",
                  accumulated_uplift_, rt_downlift_duration_);
       }
 
       bool needs_open = baseline_needs_open_.load(std::memory_order_relaxed);
       if (!needs_downlift && !needs_open) {
         baseline_prep_done_.store(true, std::memory_order_release);
-        ROS_INFO("  [BASELINE]  No prep needed — baseline collection starting");
+        ROS_INFO("  [UNKNOWN]  No prep needed — settling before baseline");
       } else {
-        ROS_INFO("  [BASELINE]  Prep: %s%s%s — baseline collection gated",
+        ROS_INFO("  [UNKNOWN]  Prep: %s%s%s — settling gated on completion",
                  needs_downlift ? "lowering" : "",
                  (needs_downlift && needs_open) ? " + " : "",
                  needs_open ? "opening" : "");
       }
+
+      publishStateLabel("UNKNOWN");
+      logStateTransition("UNKNOWN", "Preparing for baseline — data not collected");
     }
 
     if (new_state == GraspState::CLOSING_COMMAND) {
@@ -496,14 +509,14 @@ namespace franka_kitting_controller {
         ROS_INFO("KittingStateController: DOWNLIFT trajectory complete (%.3fs, %.4fm)",
                 rt_downlift_duration_, rt_downlift_distance_);
 
-        if (current_state_.load(std::memory_order_relaxed) == GraspState::BASELINE) {
+        if (current_state_.load(std::memory_order_relaxed) == GraspState::UNKNOWN) {
           accumulated_uplift_ = 0.0;
         }
 
-        if (current_state_.load(std::memory_order_relaxed) == GraspState::BASELINE &&
+        if (current_state_.load(std::memory_order_relaxed) == GraspState::UNKNOWN &&
             !baseline_needs_open_.load(std::memory_order_relaxed)) {
           baseline_prep_done_.store(true, std::memory_order_release);
-          ROS_INFO("  [BASELINE]  Arm lowered — no open needed — baseline collection starting");
+          ROS_INFO("  [UNKNOWN]  Arm lowered — no open needed — settling");
         }
       }
     } else {
@@ -600,10 +613,26 @@ namespace franka_kitting_controller {
 
       const GripperData gripper_snapshot = *gripper_data_buf_.readFromRT();
 
+      // UNKNOWN → BASELINE transition: settle after prep, then settle again in BASELINE.
       {
         GraspState bl_state = current_state_.load(std::memory_order_relaxed);
-        if (bl_state == GraspState::BASELINE &&
+
+        // UNKNOWN: wait for prep done, then settle before entering BASELINE.
+        if (bl_state == GraspState::UNKNOWN &&
             baseline_prep_done_.load(std::memory_order_acquire)) {
+          if (!unknown_settle_started_) {
+            unknown_settle_start_ = time;
+            unknown_settle_started_ = true;
+            ROS_INFO("  [UNKNOWN]  Prep complete — settling for %.1fs", kBaselineSettleTime);
+          }
+          if ((time - unknown_settle_start_).toSec() >= kBaselineSettleTime) {
+            current_state_.store(GraspState::BASELINE, std::memory_order_relaxed);
+            publishStateLabel("BASELINE");
+            logStateTransition("BASELINE", "Collecting reference signals");
+          }
+        }
+
+        if (bl_state == GraspState::BASELINE) {
           sms_detector_.update(tau_ext_norm);
 
           if (!cd_baseline_ready_.load(std::memory_order_relaxed) && sms_detector_.baseline_ready()) {
@@ -631,18 +660,23 @@ namespace franka_kitting_controller {
 
       const GraspState state = current_state_.load(std::memory_order_relaxed);
       if (signal_log_trigger_()) {
-        if (state == GraspState::BASELINE) {
+        if (state == GraspState::UNKNOWN) {
+          if (!baseline_prep_done_.load(std::memory_order_relaxed)) {
+            if (downlift_active_.load(std::memory_order_relaxed)) {
+              ROS_INFO("  [SIGNAL]  UNKNOWN  |  prep: lowering arm");
+            } else if (!baseline_open_dispatched_.load(std::memory_order_relaxed)) {
+              ROS_INFO("  [SIGNAL]  UNKNOWN  |  prep: queuing gripper open");
+            } else {
+              ROS_INFO("  [SIGNAL]  UNKNOWN  |  prep: gripper opening");
+            }
+          } else {
+            ROS_INFO("  [SIGNAL]  UNKNOWN  |  settling (%.1fs / %.1fs)",
+                    unknown_settle_started_ ? (time - unknown_settle_start_).toSec() : 0.0,
+                    kBaselineSettleTime);
+          }
+        } else if (state == GraspState::BASELINE) {
           if (cd_baseline_ready_.load(std::memory_order_relaxed)) {
             ROS_INFO("  [SIGNAL]  BASELINE  |  tau_baseline=%.3f Nm  (ready)", cd_baseline_);
-          } else if (!baseline_prep_done_.load(std::memory_order_relaxed)) {
-            // Prep still in progress — show which step
-            if (downlift_active_.load(std::memory_order_relaxed)) {
-              ROS_INFO("  [SIGNAL]  BASELINE  |  prep: lowering arm");
-            } else if (!baseline_open_dispatched_.load(std::memory_order_relaxed)) {
-              ROS_INFO("  [SIGNAL]  BASELINE  |  prep: queuing gripper open");
-            } else {
-              ROS_INFO("  [SIGNAL]  BASELINE  |  prep: gripper opening");
-            }
           } else {
             ROS_INFO("  [SIGNAL]  BASELINE  |  collecting: %d/%d samples  tau_ext_norm=%.3f",
                     sms_detector_.baseline().count(), sms_detector_.config().baseline_init_samples, tau_ext_norm);
