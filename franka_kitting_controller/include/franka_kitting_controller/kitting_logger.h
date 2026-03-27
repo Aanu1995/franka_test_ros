@@ -3,6 +3,7 @@
 // Use of this source code is governed by the Apache-2.0 license, see LICENSE
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -54,8 +55,15 @@ namespace franka_kitting_controller {
     bool export_csv_on_stop_;
     std::vector<std::string> topics_to_record_;
 
-    // CSV export thread (joinable, not detached)
-    std::thread csv_export_thread_;
+    // CSV export threads — fire-and-forget with safe lifetime management.
+    // Each export sets its `done` flag on completion. The vector is guarded
+    // by export_mutex_; finished threads are reaped lazily or at shutdown.
+    struct ExportTask {
+      std::thread thread;
+      std::atomic<bool> done{false};
+    };
+    std::mutex export_mutex_;
+    std::vector<std::unique_ptr<ExportTask>> export_tasks_;
 
     // --- Trial state ---
     std::mutex trial_mutex_;  // Protects all trial state below
@@ -89,7 +97,11 @@ namespace franka_kitting_controller {
     void onShutdown();
 
     // --- CSV export (runs in background thread, does not require trial_mutex_) ---
-    void exportCsv(const std::string& bag_path, const std::string& csv_path);
+    void launchExport(const std::string& bag_path, const std::string& csv_path);
+    void reapFinishedExports();   // Non-blocking: joins completed threads, removes them
+    void joinAllExports();        // Blocking: joins all threads (shutdown only)
+    void exportCsv(const std::string& bag_path, const std::string& csv_path,
+                   std::atomic<bool>& done);
   };
 
 }  // namespace franka_kitting_controller

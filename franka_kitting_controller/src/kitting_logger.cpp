@@ -134,6 +134,8 @@ namespace franka_kitting_controller {
     cmd.erase(0, cmd.find_first_not_of(" \t\n\r"));
     cmd.erase(cmd.find_last_not_of(" \t\n\r") + 1);
 
+    // Reap completed exports (non-blocking) to keep the task list short.
+    reapFinishedExports();
     std::lock_guard<std::mutex> lock(trial_mutex_);
 
     if (cmd == "STOP") {
@@ -161,6 +163,14 @@ namespace franka_kitting_controller {
       const std::string& topic) {
     ros::Time now = ros::Time::now();
 
+    bool is_state_topic = (topic == "/kitting_controller/state");
+
+    // Reap completed exports on state transitions (non-blocking).
+    // Skipped on the 250 Hz data path — only state topic triggers this.
+    if (is_state_topic) {
+      reapFinishedExports();
+    }
+
     std::lock_guard<std::mutex> lock(trial_mutex_);
     if (is_recording_ && bag_) {
       try {
@@ -174,7 +184,7 @@ namespace franka_kitting_controller {
 
       // Auto-stop on terminal state: the message is already in the bag,
       // so stopTrial() can safely close it.
-      if (topic == "/kitting_controller/state") {
+      if (is_state_topic) {
         auto str_msg = msg->instantiate<std_msgs::String>();
         if (str_msg &&
             (str_msg->data == "SUCCESS" || str_msg->data == "FAILED")) {
@@ -188,7 +198,7 @@ namespace franka_kitting_controller {
     // Auto-start new trial on BASELINE: enables multi-trial recording
     // without relaunching the logger. The BASELINE message is written
     // to the new bag as the first message.
-    if (!is_recording_ && topic == "/kitting_controller/state") {
+    if (!is_recording_ && is_state_topic) {
       auto str_msg = msg->instantiate<std_msgs::String>();
       if (str_msg && str_msg->data == "BASELINE") {
         ROS_INFO("KittingLogger: BASELINE detected — starting new trial");
@@ -312,16 +322,9 @@ namespace franka_kitting_controller {
     ROS_INFO("KittingLogger: Recording stopped (trial %d) -> %s",
             trial_number_, trial_dir_.c_str());
 
-    // Launch CSV export in background thread.
-    // Detach any previous export so we never block the subscriber callback.
-    // The destructor joins or detaches the final thread to prevent termination.
+    // Launch CSV export in background — never blocks the callback thread.
     if (export_csv_on_stop_) {
-      if (csv_export_thread_.joinable()) {
-        csv_export_thread_.detach();
-      }
-      std::string bag_path_copy = bag_path_;
-      csv_export_thread_ = std::thread(&KittingLogger::exportCsv, this,
-                                        bag_path_copy, csv_path);
+      launchExport(bag_path_, csv_path);
     }
   }
 
@@ -387,8 +390,44 @@ namespace franka_kitting_controller {
   // CSV export (runs in background thread)
   // ============================================================================
 
+  void KittingLogger::launchExport(const std::string& bag_path,
+                                   const std::string& csv_path) {
+    std::lock_guard<std::mutex> lock(export_mutex_);
+    auto task = std::make_unique<ExportTask>();
+    auto* done_ptr = &task->done;
+    task->thread = std::thread(&KittingLogger::exportCsv, this,
+                               bag_path, csv_path, std::ref(*done_ptr));
+    export_tasks_.push_back(std::move(task));
+  }
+
+  void KittingLogger::reapFinishedExports() {
+    // Non-blocking: join and remove completed export threads.
+    std::lock_guard<std::mutex> lock(export_mutex_);
+    auto it = export_tasks_.begin();
+    while (it != export_tasks_.end()) {
+      if ((*it)->done.load(std::memory_order_acquire)) {
+        (*it)->thread.join();
+        it = export_tasks_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+
+  void KittingLogger::joinAllExports() {
+    // Blocking: join all threads (shutdown only).
+    std::lock_guard<std::mutex> lock(export_mutex_);
+    for (auto& task : export_tasks_) {
+      if (task->thread.joinable()) {
+        task->thread.join();
+      }
+    }
+    export_tasks_.clear();
+  }
+
   void KittingLogger::exportCsv(const std::string& bag_path,
-                                      const std::string& csv_path) {
+                                const std::string& csv_path,
+                                std::atomic<bool>& done) {
     ROS_INFO("KittingLogger: CSV export starting -> %s", csv_path.c_str());
 
     try {
@@ -407,6 +446,7 @@ namespace franka_kitting_controller {
       if (!csv.is_open()) {
         ROS_ERROR("KittingLogger: Failed to open CSV: %s", csv_path.c_str());
         bag.close();
+        done.store(true, std::memory_order_release);
         return;
       }
 
@@ -506,6 +546,7 @@ namespace franka_kitting_controller {
     } catch (const std::exception& e) {
       ROS_ERROR("KittingLogger: CSV export failed: %s", e.what());
     }
+    done.store(true, std::memory_order_release);
   }
 
   void KittingLogger::onShutdown() {
@@ -516,10 +557,8 @@ namespace franka_kitting_controller {
         stopTrial();
       }
     }
-    // Join outside mutex — exportCsv doesn't need trial_mutex_
-    if (csv_export_thread_.joinable()) {
-      csv_export_thread_.join();
-    }
+    // Join all exports (including the one just launched by stopTrial)
+    joinAllExports();
   }
 
   void KittingLogger::run() {

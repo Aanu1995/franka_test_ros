@@ -605,10 +605,6 @@ namespace franka_kitting_controller {
 
     if (rate_trigger_()) {
       franka::RobotState robot_state = franka_state_handle_->getRobotState();
-      std::array<double, 42> jacobian =
-          model_handle_->getZeroJacobian(franka::Frame::kEndEffector);
-      std::array<double, 7> gravity = model_handle_->getGravity();
-      std::array<double, 7> coriolis = model_handle_->getCoriolis();
 
       double tau_ext_norm = arrayNorm(robot_state.tau_ext_hat_filtered);
       double wrench_norm = arrayNorm(robot_state.O_F_ext_hat_K);
@@ -617,13 +613,6 @@ namespace franka_kitting_controller {
       double tangential_force = std::sqrt(
           robot_state.O_F_ext_hat_K[0] * robot_state.O_F_ext_hat_K[0] +
           robot_state.O_F_ext_hat_K[1] * robot_state.O_F_ext_hat_K[1]);   // Ft
-
-      std::array<double, 6> ee_velocity{};
-      for (size_t row = 0; row < 6; ++row) {
-        for (size_t col = 0; col < 7; ++col) {
-          ee_velocity[row] += jacobian[col * 6 + row] * robot_state.dq[col];
-        }
-      }
 
       const GripperData gripper_snapshot = *gripper_data_buf_.readFromRT();
 
@@ -726,6 +715,19 @@ namespace franka_kitting_controller {
       }
 
       if (kitting_publisher_.trylock()) {
+        // Compute model quantities only when we can actually publish
+        std::array<double, 42> jacobian =
+            model_handle_->getZeroJacobian(franka::Frame::kEndEffector);
+        std::array<double, 7> gravity = model_handle_->getGravity();
+        std::array<double, 7> coriolis = model_handle_->getCoriolis();
+
+        std::array<double, 6> ee_velocity{};
+        for (size_t row = 0; row < 6; ++row) {
+          for (size_t col = 0; col < 7; ++col) {
+            ee_velocity[row] += jacobian[col * 6 + row] * robot_state.dq[col];
+          }
+        }
+
         fillKittingStateMsg(time, robot_state, jacobian, gravity, coriolis,
                             ee_velocity, tau_ext_norm, wrench_norm,
                             support_force, tangential_force,

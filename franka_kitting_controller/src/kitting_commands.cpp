@@ -83,8 +83,7 @@ namespace franka_kitting_controller {
 
     pending_state_.store(GraspState::BASELINE, std::memory_order_relaxed);
     state_changed_.store(true, std::memory_order_release);
-    publishStateLabel("BASELINE");
-    logStateTransition("BASELINE", "Collecting reference signals");
+    // State label published by RT loop: UNKNOWN first (prep/settle), then BASELINE.
   }
 
   void KittingStateController::handleClosingCmd(
