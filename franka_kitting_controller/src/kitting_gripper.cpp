@@ -66,21 +66,32 @@ namespace franka_kitting_controller {
           }
         }
 
-        // Deferred grasp: previous grasp already completed; issue next at higher force.
+        // Deferred grasp: previous grasp completed; clear grasped state then re-grasp at higher force.
         // Acquire pairs with release in requestDeferredGrasp, guaranteeing param visibility.
         if (deferred_grasp_pending_.load(std::memory_order_acquire)) {
+          // stop() clears libfranka's "grasped" internal state. Without this,
+          // grasp() on an already-grasped gripper releases to open position first,
+          // causing the object to shift and the re-close to fail/hang.
+          try {
+            gripper_->stop();
+          } catch (const franka::Exception& ex) {
+            ROS_WARN_STREAM("Deferred grasp: stop() failed: " << ex.what());
+          }
+          franka::GripperState post_stop = gripper_->readOnce();
+
           GripperCommand grasp_cmd;
           grasp_cmd.type = GripperCommandType::GRASP;
-          grasp_cmd.width = std::min(deferred_grasp_width_, gs.width);
+          grasp_cmd.width = std::min(deferred_grasp_width_, post_stop.width);
           grasp_cmd.speed = deferred_grasp_speed_;
           grasp_cmd.force = deferred_grasp_force_;
           grasp_cmd.epsilon_inner = deferred_grasp_epsilon_;
           grasp_cmd.epsilon_outer = deferred_grasp_epsilon_;
           queueGripperCommand(grasp_cmd);
 
-          ROS_INFO("  [GRIPPER]  Deferred grasp queued: width=%.4f (min of stored=%.4f, live=%.4f) "
+          ROS_INFO("  [GRIPPER]  Deferred grasp: stop() + grasp queued: "
+                  "width=%.4f (min of stored=%.4f, post_stop=%.4f) "
                   "speed=%.4f force=%.1f eps=%.4f",
-                  grasp_cmd.width, deferred_grasp_width_, gs.width,
+                  grasp_cmd.width, deferred_grasp_width_, post_stop.width,
                   deferred_grasp_speed_, deferred_grasp_force_, deferred_grasp_epsilon_);
           deferred_grasp_pending_.store(false, std::memory_order_relaxed);
         }
