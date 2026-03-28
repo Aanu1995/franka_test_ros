@@ -299,7 +299,7 @@ Recording and state labeling are independent concerns.
 | `/franka_gripper/stop`               | franka_gripper/StopAction   | ActionServer | Emergency gripper stop (always allowed) |
 
 - `/kitting_controller/state_cmd` — The **user** publishes a `KittingGripperCommand` with `command` field set to `BASELINE`, `CLOSING`, `GRASPING`, or `AUTO`, plus optional per-object parameters. Any float64 parameter left at `0.0` falls back to the YAML config default. The **controller** executes the corresponding action, publishes the state label on `/kitting_controller/state`, and drives the force ramp internally. `AUTO` runs the full sequence automatically with configurable delays.
-- `/kitting_controller/state` — The **controller** publishes state labels: START, UNKNOWN, BASELINE, CLOSING_COMMAND, CLOSING, CONTACT_CONFIRMED, CONTACT, GRASP_1..GRASP_N, UPLIFT, EVALUATE, SUCCESS, FAILED. During the force ramp, each step is published as GRASP_1, GRASP_2, etc. (not "GRASPING"). UNKNOWN covers all preparation (downlift, gripper open, settle) before BASELINE collection. Terminal states (SUCCESS, FAILED) trigger automatic recording stop when the logger is running.
+- `/kitting_controller/state` — The **controller** publishes state labels: START, UNKNOWN, BASELINE, CLOSING_COMMAND, CLOSING, CONTACT_CONFIRMED, CONTACT, GRASP_1..GRASP_N, UPLIFT, EVALUATE, SUCCESS, FAILED. During the force ramp, each step is published as GRASP_1, GRASP_2, etc. (not "GRASPING"). UNKNOWN covers all preparation (downlift, gripper open, settle) before BASELINE collection. Labels are published after `current_state_` is committed, so external consumers never observe a label while the controller is still in the previous state. Terminal states (SUCCESS, FAILED) trigger automatic recording stop when the logger is running.
 - `/kitting_controller/record_control` — The **user** publishes STOP or ABORT to end recording. Recording starts automatically when the logger launches — no START command is needed. The **logger** subscribes to this topic.
 - `/kitting_controller/logger_ready` — The **logger** publishes `true` (latched) on startup. When `record:=true`, the **controller** subscribes and gates Grasp commands behind this signal. When `record:=false`, this topic is not used.
 
@@ -1007,13 +1007,15 @@ The `franka_gripper` package is used only for action type definitions — `frank
 
 ## Recording Performance
 
-The Grasp logger is written in C++ using the `rosbag::Bag` API directly and `topic_tools::ShapeShifter` for generic topic subscription. This eliminates:
+The Grasp logger is written in C++ using the `rosbag::Bag` API directly and `topic_tools::ShapeShifter` for generic topic subscription:
 
 - **No subprocess spawn** — bag is opened via API, not `rosbag record` subprocess
 - **No Python GIL** — pure C++ callbacks, no interpreter overhead
-- **No subscription handshake delay** — topics are already subscribed and recording starts automatically on launch; the bag file is opened immediately
-- **Multi-threaded** — uses `ros::AsyncSpinner(4)` so data callbacks and command callbacks run concurrently
-- **Single mutex** — one lock protects all trial state, minimal contention
+- **No subscription handshake delay** — topics are already subscribed and recording starts automatically on launch
+- **Async write queue** — subscriber callbacks enqueue messages without disk I/O; a dedicated writer thread drains the queue and writes to the bag, decoupling callback throughput from disk latency
+- **Bounded queue** — the write queue is capped at 10,000 messages (~40 s at 250 Hz); under disk stalls, the oldest data messages are dropped while state-topic labels (BASELINE, SUCCESS, FAILED) are preserved for trial segmentation
+- **Generation fence** — a trial generation counter prevents stale messages from a completed trial from triggering unintended new recordings
+- **Multi-threaded** — uses `ros::AsyncSpinner(4)` so deserialization and command callbacks run concurrently
 
 ## Grasp Acceptance Checks
 
@@ -1065,6 +1067,7 @@ The Grasp logger is written in C++ using the `rosbag::Bag` API directly and `top
 - BASELINE during active force ramp clears trajectories and returns to passthrough
 - Per-command force ramp parameters override YAML defaults when non-zero
 - Parameters left at 0.0 fall back to YAML config values
+- Non-BASELINE commands are rejected while a previous state transition is still pending (prevents staging payload overwrite)
 - Duplicate CLOSING commands are ignored (rejected during CLOSING_COMMAND or CLOSING)
 - CLOSING_COMMAND times out after `kClosingCmdTimeout` (10 s) if the move command never starts executing — prevents indefinite stall if the command thread is blocked
 - CLOSING phase times out after `kClosingTimeout` (30 s) if contact is not detected — prevents indefinite stall if the gripper gets stuck or the action never completes

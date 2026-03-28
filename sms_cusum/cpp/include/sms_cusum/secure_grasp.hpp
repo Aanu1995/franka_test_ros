@@ -102,15 +102,9 @@ public:
 
     /**
      * @brief Replace configuration and reset all state.
-     *
-     * Call before starting a new grasp cycle when config may have
-     * changed (e.g., per-trial mode override). This is the only
-     * safe way to propagate config changes from the parent
-     * SMSCusum to the detector.
      */
     void set_config(const SecureGraspConfig& config) noexcept {
         config_ = config;
-        // Clamp to safe bounds (matching Python validation).
         if (config_.slope_window_size < 2) config_.slope_window_size = 2;
         if (config_.slope_window_size > kMaxSlopeWindow) config_.slope_window_size = kMaxSlopeWindow;
         if (config_.n_confirm < 1) config_.n_confirm = 1;
@@ -127,16 +121,13 @@ public:
         sum_ = 0.0;
         sum_sq_ = 0.0;
         count_ = 0;
-        // EWMA
         ewma_ = 0.0;
         ewma_streak_ = 0;
         ewma_secure_ = false;
-        // Slope
         mu_buffer_.fill(0.0);
         buf_head_ = 0;
         buf_count_ = 0;
         slope_secure_ = false;
-        // Combined
         secure_ = false;
     }
 
@@ -183,17 +174,13 @@ public:
 
         auto mode = config_.mode;
 
-        // EWMA logic
         if (mode == SecureGraspMode::EWMA || mode == SecureGraspMode::BOTH) {
             ewma_d_mu = update_ewma(mu_late, std_late);
         }
-
-        // Slope logic
         if (mode == SecureGraspMode::SLOPE || mode == SecureGraspMode::BOTH) {
             slope_val = update_slope(mu_late, std_late);
         }
 
-        // Combine
         if (mode == SecureGraspMode::EWMA) {
             secure_ = ewma_secure_;
         } else if (mode == SecureGraspMode::SLOPE) {
@@ -202,7 +189,6 @@ public:
             secure_ = ewma_secure_ && slope_secure_;
         }
 
-        // Diagnostic d_mu
         double d_mu = 0.0;
         if (mode == SecureGraspMode::EWMA) {
             d_mu = ewma_d_mu;
@@ -279,7 +265,6 @@ private:
 
         double slope = (den > 0.0) ? (num / den) : 0.0;
 
-        // Range check: guard against oscillating signals with zero slope
         double buf_min = mu_buffer_[(buf_head_ - W + W) % W];
         double buf_max = buf_min;
         for (int32_t i = 1; i < W; ++i) {

@@ -79,9 +79,6 @@ namespace franka_kitting_controller {
     bool is_recording_{false};
 
     // --- Async write queue ---
-    // Subscriber callbacks push messages here (fast, no disk I/O).
-    // A dedicated writer thread drains the queue and writes to the bag,
-    // decoupling callback throughput from disk latency.
     struct PendingMsg {
       topic_tools::ShapeShifter::ConstPtr msg;
       std::string topic;

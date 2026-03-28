@@ -467,7 +467,6 @@ namespace franka_kitting_controller {
                  needs_open ? "opening" : "");
       }
 
-      // Label published after state commit below.
     }
 
     if (new_state == GraspState::CLOSING_COMMAND) {
@@ -479,8 +478,6 @@ namespace franka_kitting_controller {
       closing_cmd_seen_executing_ = false;
       closing_command_entered_ = true;
       fr_phase_start_time_ = ros::Time::now();
-
-      // Label published after state commit below.
     }
 
     if (new_state == GraspState::GRASPING) {
@@ -510,12 +507,9 @@ namespace franka_kitting_controller {
       gripper_stop_sent_.store(false, std::memory_order_relaxed);
     }
 
-    // Commit state before publishing labels so external consumers never
-    // observe a label while current_state_ still holds the old value.
     current_state_.store(new_state, std::memory_order_release);
     state_changed_.store(false, std::memory_order_release);
 
-    // Publish labels after state commit.
     if (new_state == GraspState::UNKNOWN) {
       publishStateLabel("UNKNOWN");
       logStateTransition("UNKNOWN", "Preparing for baseline");

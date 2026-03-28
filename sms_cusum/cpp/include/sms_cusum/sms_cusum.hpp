@@ -202,8 +202,6 @@ public:
      * is about to be sent.
      */
     void enter_grasping() noexcept {
-        // Propagate any config changes (e.g., per-trial mode override)
-        // to the detector's own copy before resetting.
         secure_grasp_.set_config(config_.secure_grasp_stage);
         secure_grasp_.begin_step(0);
         state_ = GraspState::GRASPING;

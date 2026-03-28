@@ -133,14 +133,7 @@ class SecureGraspDetector:
         self._secure: bool = False
 
     def set_config(self, config: SecureGraspConfig) -> None:
-        """Replace configuration and reset all state.
-
-        Call this before starting a new grasp cycle when the config
-        may have changed (e.g., per-trial mode override).
-
-        A shallow copy is made so the detector owns its config
-        independently (matching C++ value semantics).
-        """
+        """Replace configuration and reset all state."""
         self._config = copy.copy(config)
         self.reset()
 
