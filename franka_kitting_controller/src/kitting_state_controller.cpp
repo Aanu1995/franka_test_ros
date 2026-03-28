@@ -180,9 +180,24 @@ namespace franka_kitting_controller {
     node_handle.param("grasp_force_hold_time", fr_grasp_force_hold_time_, 2.0);
     node_handle.param("grasp_settle_time", fr_grasp_settle_time_, 0.5);
 
-    // Secure grasp detection uses built-in optimized parameters from SecureGraspConfig
-    // (mean_converge=0.03 Nm, std=0.08 Nm, n_confirm=2).
-    // Already configured via SMSCusumConfig defaults in sms_detector_ initialization.
+    // Secure grasp detection mode: "ewma", "slope", or "both"
+    {
+      std::string sg_mode_str;
+      node_handle.param<std::string>("secure_grasp_mode", sg_mode_str, "ewma");
+      if (sg_mode_str == "slope") {
+        fr_secure_grasp_mode_ = sms_cusum::SecureGraspMode::SLOPE;
+      } else if (sg_mode_str == "both") {
+        fr_secure_grasp_mode_ = sms_cusum::SecureGraspMode::BOTH;
+      } else if (sg_mode_str == "ewma") {
+        fr_secure_grasp_mode_ = sms_cusum::SecureGraspMode::EWMA;
+      } else {
+        ROS_WARN("KittingStateController: unrecognized secure_grasp_mode '%s', using 'ewma'",
+                sg_mode_str.c_str());
+        fr_secure_grasp_mode_ = sms_cusum::SecureGraspMode::EWMA;
+      }
+      sms_detector_.mutable_config().secure_grasp_stage.mode = fr_secure_grasp_mode_;
+      ROS_INFO("KittingStateController: secure_grasp_mode = %s", sg_mode_str.c_str());
+    }
 
     if (fr_f_min_ <= 0.0) {
       ROS_ERROR("KittingStateController: f_min must be positive (got %.2f)", fr_f_min_);
@@ -452,8 +467,7 @@ namespace franka_kitting_controller {
                  needs_open ? "opening" : "");
       }
 
-      publishStateLabel("UNKNOWN");
-      logStateTransition("UNKNOWN", "Preparing for baseline — data not collected");
+      // Label published after state commit below.
     }
 
     if (new_state == GraspState::CLOSING_COMMAND) {
@@ -466,13 +480,7 @@ namespace franka_kitting_controller {
       closing_command_entered_ = true;
       fr_phase_start_time_ = ros::Time::now();
 
-      publishStateLabel("CLOSING_COMMAND");
-      ROS_INFO("  [CLOSING_COMMAND]  SMS-CUSUM  speed=%.4f m/s  "
-              "tau_baseline=%.3f  sigma=%.4f%s",
-              rt_closing_v_cmd_,
-              cd_baseline_,
-              sms_detector_.baseline_ready() ? sms_detector_.baseline().sigma() : 0.0,
-              cd_baseline_ready_.load(std::memory_order_relaxed) ? "" : " (NOT READY)");
+      // Label published after state commit below.
     }
 
     if (new_state == GraspState::GRASPING) {
@@ -502,8 +510,27 @@ namespace franka_kitting_controller {
       gripper_stop_sent_.store(false, std::memory_order_relaxed);
     }
 
-    current_state_.store(new_state, std::memory_order_relaxed);
-    state_changed_.store(false, std::memory_order_relaxed);
+    // Commit state before publishing labels so external consumers never
+    // observe a label while current_state_ still holds the old value.
+    current_state_.store(new_state, std::memory_order_release);
+    state_changed_.store(false, std::memory_order_release);
+
+    // Publish labels after state commit.
+    if (new_state == GraspState::UNKNOWN) {
+      publishStateLabel("UNKNOWN");
+      logStateTransition("UNKNOWN", "Preparing for baseline");
+    } else if (new_state == GraspState::CLOSING_COMMAND) {
+      publishStateLabel("CLOSING_COMMAND");
+      ROS_INFO("  [CLOSING_COMMAND]  SMS-CUSUM  speed=%.4f m/s  "
+              "tau_baseline=%.3f  sigma=%.4f%s",
+              rt_closing_v_cmd_,
+              cd_baseline_,
+              sms_detector_.baseline_ready() ? sms_detector_.baseline().sigma() : 0.0,
+              cd_baseline_ready_.load(std::memory_order_relaxed) ? "" : " (NOT READY)");
+    } else if (new_state == GraspState::GRASPING) {
+      publishStateLabel("GRASP_1");
+      logStateTransition("GRASP_1", "Force ramp starting");
+    }
   }
 
   void KittingStateController::updateCartesianCommand(const ros::Duration& period) {

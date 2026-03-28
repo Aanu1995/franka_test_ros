@@ -1,0 +1,13 @@
+object_name: bigCircle
+trial_number: 4
+bag_filename: "20260327_130034_bigCircle_trial_004.bag"
+csv_filename: "trial_004_signals.csv"
+start_time: "20260327_130034"
+stop_time: "20260327_130103"
+total_samples: 6274
+topics_recorded:
+  - /kitting_state_controller/kitting_state_data
+  - /kitting_controller/state
+export_csv_on_stop: true
+detector_parameters:
+  method: torque_drop

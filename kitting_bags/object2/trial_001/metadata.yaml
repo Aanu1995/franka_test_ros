@@ -1,0 +1,13 @@
+object_name: irregularShape
+trial_number: 1
+bag_filename: "20260327_132118_irregularShape_trial_001.bag"
+csv_filename: "trial_001_signals.csv"
+start_time: "20260327_132118"
+stop_time: "20260327_132159"
+total_samples: 8946
+topics_recorded:
+  - /kitting_state_controller/kitting_state_data
+  - /kitting_controller/state
+export_csv_on_stop: true
+detector_parameters:
+  method: torque_drop

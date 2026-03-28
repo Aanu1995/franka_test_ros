@@ -245,8 +245,7 @@ class TestSMSCusumSecureGrasp(unittest.TestCase):
         config = SMSCusumConfig(
             contact_stage=CusumStageConfig(k_min=0.05, h=0.8, debounce_count=5),
             secure_grasp_stage=SecureGraspConfig(
-                mean_converge_threshold=0.03,
-                std_threshold=0.08,
+                mode="ewma",
                 n_confirm=2,
             ),
             baseline_init_samples=20,

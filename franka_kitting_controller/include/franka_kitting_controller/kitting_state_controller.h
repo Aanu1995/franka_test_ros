@@ -233,6 +233,7 @@ namespace franka_kitting_controller {
     double fr_load_transfer_min_{1.5};
     double fr_grasp_force_hold_time_{2.0};
     double fr_grasp_settle_time_{0.5};
+    sms_cusum::SecureGraspMode fr_secure_grasp_mode_{sms_cusum::SecureGraspMode::EWMA};
 
     // RT-local copies (snapshotted at GRASPING entry)
     double rt_fr_f_min_{3.0};

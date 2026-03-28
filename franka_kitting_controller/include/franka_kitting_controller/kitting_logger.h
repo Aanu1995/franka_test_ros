@@ -4,6 +4,8 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -66,7 +68,7 @@ namespace franka_kitting_controller {
     std::vector<std::unique_ptr<ExportTask>> export_tasks_;
 
     // --- Trial state ---
-    std::mutex trial_mutex_;  // Protects all trial state below
+    std::mutex trial_mutex_;  // Protects bag_, is_recording_, trial_dir_, etc.
     std::unique_ptr<rosbag::Bag> bag_;
     std::string trial_dir_;
     std::string bag_path_;
@@ -75,6 +77,25 @@ namespace franka_kitting_controller {
     int trial_number_{0};
     int total_samples_{0};
     bool is_recording_{false};
+
+    // --- Async write queue ---
+    // Subscriber callbacks push messages here (fast, no disk I/O).
+    // A dedicated writer thread drains the queue and writes to the bag,
+    // decoupling callback throughput from disk latency.
+    struct PendingMsg {
+      topic_tools::ShapeShifter::ConstPtr msg;
+      std::string topic;
+      ros::Time stamp;
+      uint64_t generation;  // Trial generation at enqueue time
+    };
+    std::mutex write_queue_mutex_;
+    std::deque<PendingMsg> write_queue_;
+    std::condition_variable write_queue_cv_;
+    std::thread write_thread_;
+    std::atomic<bool> write_thread_shutdown_{false};
+    std::atomic<uint64_t> trial_generation_{0};  // Incremented on stop/abort
+    static constexpr size_t kMaxQueueSize = 10000;  // ~40s at 250 Hz
+    void writeLoop();  // Writer thread entry point
 
     // --- ROS ---
     ros::NodeHandle nh_;

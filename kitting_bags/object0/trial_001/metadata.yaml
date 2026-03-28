@@ -1,0 +1,13 @@
+object_name: triangle
+trial_number: 1
+bag_filename: "20260327_124849_triangle_trial_001.bag"
+csv_filename: "trial_001_signals.csv"
+start_time: "20260327_124849"
+stop_time: "20260327_124931"
+total_samples: 8993
+topics_recorded:
+  - /kitting_state_controller/kitting_state_data
+  - /kitting_controller/state
+export_csv_on_stop: true
+detector_parameters:
+  method: torque_drop

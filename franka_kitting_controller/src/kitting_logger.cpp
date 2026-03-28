@@ -89,6 +89,13 @@ namespace franka_kitting_controller {
         &KittingLogger::recordControlCallback, this);
 
     // --- Subscribe to all data topics using ShapeShifter (always subscribed) ---
+    // Subscriber callbacks enqueue messages to write_queue_ (no disk I/O).
+    // The dedicated write_thread_ drains the queue and writes to the bag
+    // under trial_mutex_, decoupling callback throughput from disk latency.
+    // Start the writer thread before subscribing so no messages are lost.
+    write_thread_shutdown_.store(false, std::memory_order_relaxed);
+    write_thread_ = std::thread(&KittingLogger::writeLoop, this);
+
     for (const auto& topic : topics_to_record_) {
       auto sub = nh_.subscribe<topic_tools::ShapeShifter>(
           topic, 100,
@@ -136,6 +143,23 @@ namespace franka_kitting_controller {
 
     // Reap completed exports (non-blocking) to keep the task list short.
     reapFinishedExports();
+
+    // Drain the write queue before stopping/aborting so no messages are lost.
+    // The writer thread may be mid-batch, so we signal it and wait for the
+    // queue to empty.  This is safe because we are on a callback thread,
+    // not the RT loop.
+    if (cmd == "STOP" || cmd == "ABORT") {
+      write_queue_cv_.notify_one();
+      // Spin briefly until the writer thread drains the queue.
+      for (int i = 0; i < 200; ++i) {
+        {
+          std::lock_guard<std::mutex> qlock(write_queue_mutex_);
+          if (write_queue_.empty()) break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+    }
+
     std::lock_guard<std::mutex> lock(trial_mutex_);
 
     if (cmd == "STOP") {
@@ -144,6 +168,7 @@ namespace franka_kitting_controller {
         return;
       }
       stopTrial();
+      trial_generation_.fetch_add(1, std::memory_order_relaxed);
 
     } else if (cmd == "ABORT") {
       if (!is_recording_) {
@@ -151,6 +176,7 @@ namespace franka_kitting_controller {
         return;
       }
       abortTrial();
+      trial_generation_.fetch_add(1, std::memory_order_relaxed);
 
     } else {
       ROS_WARN("KittingLogger: Unknown command '%s' on record_control "
@@ -161,54 +187,109 @@ namespace franka_kitting_controller {
   void KittingLogger::topicCallback(
       const topic_tools::ShapeShifter::ConstPtr& msg,
       const std::string& topic) {
-    ros::Time now = ros::Time::now();
+    // Enqueue the message for the writer thread.  This is the only work
+    // done on the subscriber callback — no disk I/O, no trial_mutex_.
+    uint64_t gen = trial_generation_.load(std::memory_order_relaxed);
+    {
+      std::lock_guard<std::mutex> lock(write_queue_mutex_);
+      if (write_queue_.size() >= kMaxQueueSize) {
+        write_queue_.pop_front();  // Drop oldest to bound memory
+        ROS_WARN_THROTTLE(5.0, "KittingLogger: Write queue full (%zu), "
+                "dropping oldest message — disk I/O may be too slow",
+                kMaxQueueSize);
+      }
+      write_queue_.push_back({msg, topic, ros::Time::now(), gen});
+    }
+    write_queue_cv_.notify_one();
+  }
 
-    bool is_state_topic = (topic == "/kitting_controller/state");
+  void KittingLogger::writeLoop() {
+    std::deque<PendingMsg> batch;
 
-    // Reap completed exports on state transitions (non-blocking).
-    // Skipped on the 250 Hz data path — only state topic triggers this.
-    if (is_state_topic) {
+    while (!write_thread_shutdown_.load(std::memory_order_relaxed)) {
+      // Wait for messages (with timeout so shutdown flag is checked).
+      {
+        std::unique_lock<std::mutex> lock(write_queue_mutex_);
+        write_queue_cv_.wait_for(lock, std::chrono::milliseconds(100),
+            [this]{ return !write_queue_.empty() || write_thread_shutdown_.load(std::memory_order_relaxed); });
+        batch.swap(write_queue_);
+      }
+
+      if (batch.empty()) continue;
+
+      // Reap finished exports (non-blocking, outside trial_mutex_).
       reapFinishedExports();
-    }
 
-    std::lock_guard<std::mutex> lock(trial_mutex_);
-    if (is_recording_ && bag_) {
-      try {
-        bag_->write(topic, now, *msg);
-        if (topic == "/kitting_state_controller/kitting_state_data") {
-          total_samples_++;
-        }
-      } catch (const rosbag::BagIOException& e) {
-        ROS_ERROR_THROTTLE(1.0, "KittingLogger: Failed to write to bag: %s", e.what());
-      }
+      // Write the whole batch under trial_mutex_.
+      uint64_t cur_gen = trial_generation_.load(std::memory_order_relaxed);
+      std::lock_guard<std::mutex> lock(trial_mutex_);
+      for (auto& pm : batch) {
+        // Skip messages from a previous trial generation.  This prevents
+        // stale traffic (e.g., a BASELINE label still in the queue after
+        // STOP) from inadvertently starting a new recording.
+        if (pm.generation != cur_gen) continue;
 
-      // Auto-stop on terminal state: the message is already in the bag,
-      // so stopTrial() can safely close it.
-      if (is_state_topic) {
-        auto str_msg = msg->instantiate<std_msgs::String>();
-        if (str_msg &&
-            (str_msg->data == "SUCCESS" || str_msg->data == "FAILED")) {
-          ROS_INFO("KittingLogger: Terminal state '%s' — auto-stopping recording",
-                  str_msg->data.c_str());
-          stopTrial();
-        }
-      }
-    }
+        bool is_state_topic = (pm.topic == "/kitting_controller/state");
 
-    // Auto-start new trial on BASELINE: enables multi-trial recording
-    // without relaunching the logger. The BASELINE message is written
-    // to the new bag as the first message.
-    if (!is_recording_ && is_state_topic) {
-      auto str_msg = msg->instantiate<std_msgs::String>();
-      if (str_msg && str_msg->data == "BASELINE") {
-        ROS_INFO("KittingLogger: BASELINE detected — starting new trial");
-        startTrial();
         if (is_recording_ && bag_) {
           try {
-            bag_->write(topic, now, *msg);
+            bag_->write(pm.topic, pm.stamp, *pm.msg);
+            if (pm.topic == "/kitting_state_controller/kitting_state_data") {
+              total_samples_++;
+            }
           } catch (const rosbag::BagIOException& e) {
-            ROS_ERROR_THROTTLE(1.0, "KittingLogger: Failed to write BASELINE to new bag: %s", e.what());
+            ROS_ERROR_THROTTLE(1.0, "KittingLogger: Failed to write to bag: %s", e.what());
           }
+
+          // Auto-stop on terminal state.
+          if (is_state_topic) {
+            auto str_msg = pm.msg->instantiate<std_msgs::String>();
+            if (str_msg &&
+                (str_msg->data == "SUCCESS" || str_msg->data == "FAILED")) {
+              ROS_INFO("KittingLogger: Terminal state '%s' — auto-stopping recording",
+                      str_msg->data.c_str());
+              stopTrial();
+              // Advance generation so remaining batch messages are skipped.
+              trial_generation_.fetch_add(1, std::memory_order_relaxed);
+              cur_gen = trial_generation_.load(std::memory_order_relaxed);
+            }
+          }
+        }
+
+        // Auto-start new trial on BASELINE.
+        if (!is_recording_ && is_state_topic) {
+          auto str_msg = pm.msg->instantiate<std_msgs::String>();
+          if (str_msg && str_msg->data == "BASELINE") {
+            ROS_INFO("KittingLogger: BASELINE detected — starting new trial");
+            startTrial();
+            // New trial gets a fresh generation.
+            trial_generation_.fetch_add(1, std::memory_order_relaxed);
+            cur_gen = trial_generation_.load(std::memory_order_relaxed);
+            if (is_recording_ && bag_) {
+              try {
+                bag_->write(pm.topic, pm.stamp, *pm.msg);
+              } catch (const rosbag::BagIOException& e) {
+                ROS_ERROR_THROTTLE(1.0, "KittingLogger: Failed to write BASELINE to new bag: %s", e.what());
+              }
+            }
+          }
+        }
+      }
+      batch.clear();
+    }
+
+    // Drain remaining messages on shutdown.
+    {
+      std::lock_guard<std::mutex> qlock(write_queue_mutex_);
+      batch.swap(write_queue_);
+    }
+    if (!batch.empty()) {
+      std::lock_guard<std::mutex> lock(trial_mutex_);
+      for (auto& pm : batch) {
+        if (is_recording_ && bag_) {
+          try {
+            bag_->write(pm.topic, pm.stamp, *pm.msg);
+          } catch (...) {}
         }
       }
     }
@@ -545,11 +626,20 @@ namespace franka_kitting_controller {
       ROS_ERROR("KittingLogger: CSV export failed: %s", e.what());
     } catch (const std::exception& e) {
       ROS_ERROR("KittingLogger: CSV export failed: %s", e.what());
+    } catch (...) {
+      ROS_ERROR("KittingLogger: CSV export failed: unknown exception");
     }
     done.store(true, std::memory_order_release);
   }
 
   void KittingLogger::onShutdown() {
+    // Stop the writer thread first so all queued messages are flushed.
+    write_thread_shutdown_.store(true, std::memory_order_relaxed);
+    write_queue_cv_.notify_one();
+    if (write_thread_.joinable()) {
+      write_thread_.join();
+    }
+
     {
       std::lock_guard<std::mutex> lock(trial_mutex_);
       if (is_recording_) {

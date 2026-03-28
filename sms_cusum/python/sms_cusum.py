@@ -242,7 +242,9 @@ class SMSCusum:
         is about to be sent. Resets the secure grasp detector and
         begins step 0.
         """
-        self._secure_grasp.reset()
+        # Propagate any config changes (e.g., per-trial mode override)
+        # to the detector's own copy before resetting.
+        self._secure_grasp.set_config(self._config.secure_grasp_stage)
         self._secure_grasp.begin_step(0)
         self._state = GraspState.GRASPING
 

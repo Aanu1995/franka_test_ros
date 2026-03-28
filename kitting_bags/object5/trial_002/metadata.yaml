@@ -1,0 +1,13 @@
+object_name: thyme
+trial_number: 2
+bag_filename: "20260324_135202_thyme_trial_002.bag"
+csv_filename: "trial_002_signals.csv"
+start_time: "20260324_135202"
+stop_time: "20260324_135230"
+total_samples: 6311
+topics_recorded:
+  - /kitting_state_controller/kitting_state_data
+  - /kitting_controller/state
+export_csv_on_stop: true
+detector_parameters:
+  method: torque_drop

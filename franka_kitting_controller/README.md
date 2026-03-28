@@ -17,7 +17,7 @@ This controller runs inside the `ros_control` real-time loop provided by `franka
 - SMS-CUSUM contact detection during CLOSING (noise-adaptive CUSUM change-point detection on tau_ext_norm — automatically scales sensitivity to measured noise level, no per-object threshold tuning)
 - Immediate gripper stop on contact: calls `franka::Gripper::stop()` to physically halt the motor
 - Multi-step force ramp on table: grasps at f_min, f_min+f_step, ..., up to f_max — each step settles, holds, then advances. Secure grasp detection must confirm grip before proceeding to UPLIFT + EVALUATE. If f_max is reached without secure grasp, the attempt fails immediately
-- Secure grasp convergence detection: SMS-CUSUM monitors tau_ext_norm mean convergence across consecutive force ramp steps — detects when the object is fully compressed and grip force increase is no longer needed
+- Secure grasp convergence detection: SMS-CUSUM monitors tau_ext_norm convergence across force ramp steps using selectable EWMA band or slope-based plateau detection — detects when the object is fully compressed and grip force increase is no longer needed. Mode configurable via `secure_grasp_mode` YAML parameter (`"ewma"`, `"slope"`, or `"both"`)
 - Three-gate AND slip detection: load transfer + support drop + jaw widening (directional force decomposition, Fn = |Fz|) during EVALUATE hold
 - One rosbag per trial with all state transitions (recording starts automatically on launch)
 - Automatic CSV export on stop for analysis-ready datasets
@@ -357,6 +357,14 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
   "{command: 'GRASPING', f_min: 3.0, f_max: 70.0, f_step: 3.0}" --once
 
+# GRASPING — override secure grasp mode for this trial
+rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
+  "{command: 'GRASPING', secure_grasp_mode: 'slope'}" --once
+
+# GRASPING — use AND-gated mode (both EWMA and slope must agree)
+rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
+  "{command: 'GRASPING', secure_grasp_mode: 'both'}" --once
+
 # GRASPING — override all force ramp parameters for a specific object
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
   "{command: 'GRASPING', \
@@ -365,7 +373,8 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
     fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
     fr_uplift_distance: 0.010, fr_lift_speed: 0.01, fr_uplift_hold: 1.0, \
     fr_slip_drop_thresh: 0.15, fr_slip_width_thresh: 0.0005, \
-    fr_load_transfer_min: 1.5}" --once
+    fr_load_transfer_min: 1.5, \
+    secure_grasp_mode: 'ewma'}" --once
 
 # Stop recording
 rostopic pub /kitting_controller/record_control std_msgs/String "data: 'STOP'" --once
@@ -394,7 +403,8 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
     fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
     fr_uplift_distance: 0.010, fr_lift_speed: 0.01, fr_uplift_hold: 1.0, \
     fr_slip_drop_thresh: 0.15, fr_slip_width_thresh: 0.0005, \
-    fr_load_transfer_min: 1.5}" --once
+    fr_load_transfer_min: 1.5, \
+    secure_grasp_mode: 'ewma'}" --once
 ```
 
 ## Gripper Action Servers
@@ -496,28 +506,56 @@ Once CONTACT is declared, it is **latched** — the detector stops evaluating. T
 
 After contact is confirmed and the force ramp begins, the SMS-CUSUM secure grasp detector monitors tau_ext_norm during each step's HOLDING phase to detect when the grasp has become secure — i.e., when increasing grip force no longer changes the steady-state torque, indicating the object is fully compressed.
 
-### Algorithm
+### Signal Extraction
 
 During each GRASP_k step, the HOLDING phase is split into two segments:
 - **Early segment** (first half): Transient settling after force increment (ignored by the detector)
 - **Late segment** (last half): Steady-state samples fed to `sms_detector_.update(tau_ext_norm)`
 
-At each step's completion (`STEP_COMPLETE`), `sms_detector_.finalize_grasp_step()` computes:
-
-1. **Mean convergence** (primary): `|mu_late[N] - mu_late[N-1]| < mean_converge_threshold` — has the steady-state torque plateaued?
-2. **Signal stability** (secondary): `sigma_late[N] < std_threshold` — is the signal stable (not oscillating)?
-
-Both criteria must hold for `n_confirm` (default 2) consecutive steps. Step 0 is skipped (no previous mean to compare).
+At each step's completion (`STEP_COMPLETE`), `sms_detector_.finalize_grasp_step()` computes the settled mean `mu_late[N]` and standard deviation `sigma_late[N]` from the accumulated late-segment samples, then applies the selected detection algorithm.
 
 When secure grasp is detected, the force ramp terminates early and transitions directly to UPLIFT, skipping remaining force increments. This avoids unnecessary force on the object while maintaining grasp quality (validated by the subsequent UPLIFT + EVALUATE phase).
 
+### Detection Modes
+
+Three modes are available, selected via the `secure_grasp_mode` YAML parameter:
+
+#### EWMA Band Detection (`"ewma"`, default)
+
+Tracks an exponentially weighted moving average (EWMA) of the step-level settled means (Roberts, 1959). At each step, the new mean is compared to the running EWMA; if it stays within a tolerance band for `n_confirm` consecutive steps, the grasp is declared secure.
+
+```
+Z_N = lambda * mu_late[N] + (1 - lambda) * Z_{N-1}
+Secure when: |mu_late[N] - Z_N| < band_width AND sigma_late[N] < std_threshold
+             for n_confirm consecutive steps
+```
+
+#### Slope-Based Plateau Detection (`"slope"`)
+
+Fits a linear regression to the last W step means (Kelly & Hedengren, 2013). If |slope| is near zero and the range of values in the window is small, the signal is flat — indicating a plateau.
+
+```
+slope = sum((x_i - x_mean)(y_i - y_mean)) / sum((x_i - x_mean)^2)
+Secure when: |slope| < slope_threshold AND range(window) < slope_max_range
+             AND sigma_late[N] < std_threshold
+```
+
+#### AND-Gated Combination (`"both"`)
+
+Both EWMA and Slope must independently declare secure before the detector fires. Most conservative mode.
+
 ### Parameters
 
-| Parameter | Built-in default | Description |
-|-----------|-----------------|-------------|
-| Mean convergence threshold | 0.03 Nm | Max `\|d_mu\|` between consecutive settled steps |
-| Std threshold | 0.08 Nm | Max sigma_late for signal stability |
-| N confirm | 2 | Consecutive converged steps required |
+| Parameter | Default | Mode | Description |
+|-----------|---------|------|-------------|
+| `secure_grasp_mode` | `"ewma"` | YAML | Detection mode: `"ewma"`, `"slope"`, or `"both"` |
+| `ewma_lambda` | 0.4 | EWMA | Smoothing factor (0-1) |
+| `ewma_band_width` | 0.08 Nm | EWMA | Max deviation from EWMA |
+| `n_confirm` | 2 | EWMA | Consecutive converged steps required |
+| `slope_window_size` | 3 | Slope | Step means in regression window |
+| `slope_threshold` | 0.03 | Slope | Max |slope| for plateau |
+| `slope_max_range` | 0.15 Nm | Slope | Max range of window values (oscillation guard) |
+| `std_threshold` | 0.14 Nm | All | Max within-step std for stability |
 
 ### Integration
 
@@ -533,7 +571,7 @@ The controller calls:
 - `sms_detector_.finalize_grasp_step()` at each STEP_COMPLETE to check for convergence
 - `sms_detector_.begin_grasp_step(iteration)` when advancing to the next step
 
-All operations are O(1) per sample with zero dynamic allocation, safe for the 250 Hz real-time loop.
+All operations are O(1) per sample (O(W) per step finalization, W=3) with zero dynamic allocation, safe for the 250 Hz real-time loop.
 
 ## Grasp: Slip Detection (Directional Force Decomposition + AND-Gating)
 
@@ -778,6 +816,7 @@ The **velocity profile** (first derivative) is:
 | `uplift_hold`              | double | `1.0`   | Hold time at top for evaluation: early (first half) + late (second half) windows [s] (min 0.5, max 120.0) |
 | `grasp_force_hold_time`    | double | `2.0`   | Hold at each force ramp step before advancing [s] (min 0.25). W_pre accumulated during HOLDING of last step |
 | `grasp_settle_time`        | double | `0.5`   | Settle time after each grasp command completes [s]                  |
+| `secure_grasp_mode`        | string | `"ewma"` | Secure grasp detection mode: `"ewma"`, `"slope"`, or `"both"`      |
 | `slip_drop_thresh`         | double | `0.15`   | DF_TH: max allowed relative support force drop (15% = fail)         |
 | `slip_width_thresh`        | double | `0.0005` | W_TH: max allowed jaw widening P95-P5 [m] (0.5 mm = fail)          |
 | `load_transfer_min`        | double | `1.5`    | Floor for load transfer threshold [N] (lower for light objects)     |
@@ -888,13 +927,14 @@ Per-object command published on `/kitting_controller/state_cmd`. Any float64 par
 | `fr_slip_drop_thresh`     | float64 | DF_TH: max allowed relative support force drop (0 = use default 0.15)           |
 | `fr_slip_width_thresh`    | float64 | W_TH: max allowed jaw widening P95-P5 [m] (0 = use default 0.0005)             |
 | `fr_load_transfer_min`    | float64 | Floor for load transfer threshold [N] (0 = use default 1.5)                     |
+| `secure_grasp_mode`       | string  | Secure grasp detection: `"ewma"`, `"slope"`, or `"both"` (`""` = use YAML default) |
 | `auto_delay`           | float64 | Delay between auto transitions [s] (0 = default 5.0). Only used by `AUTO` command  |
 
 Only the parameters relevant to the command are used:
 
 - `BASELINE` uses `open_gripper` and `open_width`
 - `CLOSING` uses `closing_width` and `closing_speed` (`contact_torque_thresh` and `contact_debounce_time` are ignored — SMS-CUSUM auto-tunes detection)
-- `GRASPING` requires CONTACT state and uses all `f_*`/`fr_*` force ramp parameters plus `grasp_force_hold_time` and `grasp_settle_time` (grasp width is always from `contact_width`; rejected if not in CONTACT or if `contact_width` is out of range `[0, max_width]`)
+- `GRASPING` requires CONTACT state and uses all `f_*`/`fr_*` force ramp parameters plus `grasp_force_hold_time`, `grasp_settle_time`, and `secure_grasp_mode` (grasp width is always from `contact_width`; rejected if not in CONTACT or if `contact_width` is out of range `[0, max_width]`). `secure_grasp_mode` can be overridden per-trial to switch between `"ewma"`, `"slope"`, or `"both"` without restarting the controller
 - `AUTO` uses all of the above, plus `auto_delay`
 
 ## KittingState Message

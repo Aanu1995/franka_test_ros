@@ -52,6 +52,18 @@ namespace franka_kitting_controller {
       cancelAutoMode();
     }
 
+    // Reject commands while a previous transition is still pending.
+    // state_changed_ is set by each handler and cleared by the RT loop
+    // in applyPendingStateTransition().  Accepting a second command
+    // would silently overwrite the staging payload and lose the first.
+    // BASELINE is exempted because it acts as a reset from any state.
+    if (cmd != "BASELINE" && state_changed_.load(std::memory_order_acquire)) {
+      ROS_WARN("KittingStateController: Command '%s' rejected — previous state "
+              "transition still pending (RT thread has not consumed it yet)",
+              cmd.c_str());
+      return;
+    }
+
     if (cmd == "BASELINE") {
       handleBaselineCmd(msg);
     } else if (cmd == "CLOSING") {
@@ -151,6 +163,26 @@ namespace franka_kitting_controller {
     staging_fr_grasp_force_hold_time_ = resolveParam(msg->grasp_force_hold_time, fr_grasp_force_hold_time_);
     staging_fr_grasp_settle_time_     = resolveParam(msg->grasp_settle_time, fr_grasp_settle_time_);
 
+    // Secure grasp mode: restore YAML default, then apply per-trial override
+    {
+      auto& sg_cfg = sms_detector_.mutable_config().secure_grasp_stage;
+      sg_cfg.mode = fr_secure_grasp_mode_;  // Always restore configured default
+
+      if (!msg->secure_grasp_mode.empty()) {
+        if (msg->secure_grasp_mode == "slope") {
+          sg_cfg.mode = sms_cusum::SecureGraspMode::SLOPE;
+        } else if (msg->secure_grasp_mode == "both") {
+          sg_cfg.mode = sms_cusum::SecureGraspMode::BOTH;
+        } else if (msg->secure_grasp_mode == "ewma") {
+          sg_cfg.mode = sms_cusum::SecureGraspMode::EWMA;
+        } else {
+          ROS_WARN("    unrecognized secure_grasp_mode '%s', keeping default",
+                  msg->secure_grasp_mode.c_str());
+        }
+        ROS_INFO("    secure_grasp_mode = %s", msg->secure_grasp_mode.c_str());
+      }
+    }
+
     if (staging_fr_uplift_distance_ > kMaxUpliftDistance) {
       ROS_WARN("KittingStateController: fr_uplift_distance %.4f exceeds max %.4f, clamping",
               staging_fr_uplift_distance_, kMaxUpliftDistance);
@@ -191,8 +223,10 @@ namespace franka_kitting_controller {
 
     pending_state_.store(GraspState::GRASPING, std::memory_order_relaxed);
     state_changed_.store(true, std::memory_order_release);
-    publishStateLabel("GRASP_1");
-    logStateTransition("GRASP_1", "Force ramp starting");
+    // Note: GRASP_1 label is published by applyPendingStateTransition() in the
+    // RT thread, after staging variables are snapshotted and current_state_ is
+    // committed.  This ensures external observers see the label only after the
+    // controller is actually in the GRASPING state.
     ROS_INFO("    width=%.4f m  f_min=%.1f N  f_max=%.1f N  f_step=%.1f N  (%d steps)",
             width, staging_fr_f_min_, staging_fr_f_max_, staging_fr_f_step_, total_steps);
     ROS_INFO("    ramp: hold=%.2f s  settle=%.2f s",

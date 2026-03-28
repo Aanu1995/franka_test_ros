@@ -6,8 +6,9 @@ grasping trials across 6 object types (circle4, circle6, rectangle6,
 triangle, triangle4, triangle6) with baseline noise sigma 0.031-0.067 Nm
 and contact drop magnitudes 0.13-0.75 Nm.
 
-Secure grasp parameters derived from kitting_bags 3 trials (triangle1, thyme)
-with 4 trials showing convergence at GRASP_4-5 (9-18N).
+Secure grasp parameters derived from kitting_bags 3 trials across 7 object
+types (29 trials total). Two detection modes available: EWMA band and
+slope-based plateau detection.
 """
 
 from dataclasses import dataclass, field
@@ -50,27 +51,70 @@ class SecureGraspConfig:
     tau_ext_norm, indicating the object is fully compressed and the grasp
     is secure.
 
-    Detection is AND-gated: mean convergence AND signal stability must both
-    hold for n_confirm consecutive force ramp steps.
+    Three modes are available, selectable via the ``mode`` parameter:
+
+    - ``"ewma"``: EWMA band detection. Tracks an exponentially weighted
+      moving average of step means and checks if new means stay within
+      ±band_width of the EWMA. Fast, adaptive.
+    - ``"slope"``: Slope-based plateau detection. Fits a linear regression
+      to the last W step means and checks if |slope| ≈ 0. Detects flat
+      trends regardless of absolute level.
+    - ``"both"``: AND-gated combination — both EWMA and Slope must
+      independently declare secure before the detector fires.
 
     Parameters
     ----------
-    mean_converge_threshold : float
-        Maximum |μ_late[N] - μ_late[N-1]| (Nm) for convergence.
-        Converged steps typically show |d_mu| < 0.016 Nm.
-        Non-converged steps show |d_mu| > 0.065 Nm.
-    std_threshold : float
-        Maximum σ_late (Nm) for signal stability.
-        Stable equilibrium: σ < 0.073 Nm. Guards against cases where
-        means coincidentally match but the system is still oscillating.
+    mode : str
+        Detection mode: ``"ewma"``, ``"slope"``, or ``"both"``.
+    ewma_lambda : float
+        EWMA smoothing factor (0–1). Higher = more weight on current step.
+    ewma_band_width : float
+        Maximum |μ_late - EWMA| (Nm) for EWMA convergence.
     n_confirm : int
-        Number of consecutive converged steps required before declaring
-        secure grasp. Prevents false triggers on oscillatory signals.
+        Consecutive converged steps required for EWMA mode.
+    slope_window_size : int
+        Number of recent step means used for slope regression.
+    slope_threshold : float
+        Maximum |slope| for plateau detection.
+    slope_max_range : float
+        Maximum (max - min) of values in the slope window. Guards against
+        oscillating signals where slope is near zero but amplitude is large.
+    std_threshold : float
+        Maximum σ_late (Nm) for within-step signal stability.
+        Shared across all modes.
     """
 
-    mean_converge_threshold: float = 0.03
-    std_threshold: float = 0.08
+    mode: str = "ewma"
+    ewma_lambda: float = 0.4
+    ewma_band_width: float = 0.08
     n_confirm: int = 2
+    slope_window_size: int = 3
+    slope_threshold: float = 0.03
+    slope_max_range: float = 0.15
+    std_threshold: float = 0.14
+
+    def __post_init__(self) -> None:
+        valid_modes = ("ewma", "slope", "both")
+        if self.mode not in valid_modes:
+            raise ValueError(
+                f"SecureGraspConfig.mode must be one of {valid_modes}, "
+                f"got {self.mode!r}"
+            )
+        if not (2 <= self.slope_window_size <= 8):
+            raise ValueError(
+                f"SecureGraspConfig.slope_window_size must be in [2, 8], "
+                f"got {self.slope_window_size}"
+            )
+        if self.n_confirm < 1:
+            raise ValueError(
+                f"SecureGraspConfig.n_confirm must be >= 1, "
+                f"got {self.n_confirm}"
+            )
+        if not (0.0 < self.ewma_lambda <= 1.0):
+            raise ValueError(
+                f"SecureGraspConfig.ewma_lambda must be in (0, 1], "
+                f"got {self.ewma_lambda}"
+            )
 
 
 @dataclass

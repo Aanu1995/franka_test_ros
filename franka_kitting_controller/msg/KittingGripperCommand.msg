@@ -54,6 +54,7 @@ float64 fr_epsilon           # [m]   Epsilon for ramp grasps, same for inner/out
 float64 fr_slip_drop_thresh     # DF_TH: max allowed relative support force drop (0 = use default 0.15)
 float64 fr_slip_width_thresh    # [m] W_TH: max allowed jaw widening P95-P5 (0 = use default 0.0005)
 float64 fr_load_transfer_min    # [N] Min load transfer threshold floor (0 = use default 1.5)
+string  secure_grasp_mode       # Secure grasp detection: "ewma", "slope", or "both" ("" = use YAML default)
 
 # --- AUTO parameters (used when command == "AUTO") ---
 # AUTO runs the full sequence: BASELINE → CLOSING → GRASPING automatically.

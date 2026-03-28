@@ -66,6 +66,7 @@ sms_cusum/
 │   ├── cusum.py               # CUSUM detector with noise-adaptive allowance
 │   ├── adaptive_baseline.py   # EMA baseline with lifecycle management
 │   ├── sms_cusum.py           # SMS-CUSUM state machine (core algorithm)
+│   ├── secure_grasp.py        # Secure grasp detector (EWMA + Slope modes)
 │   ├── config.py              # Parameter configuration dataclasses
 │   ├── validate_offline.py    # Offline validation against CSV trial data
 │   ├── tune_parameters.py     # Grid search parameter optimization
@@ -74,11 +75,13 @@ sms_cusum/
 │   └── include/sms_cusum/
 │       ├── cusum.hpp           # Header-only CUSUM (noexcept, zero alloc)
 │       ├── adaptive_baseline.hpp  # Header-only baseline estimator
-│       └── sms_cusum.hpp       # Header-only SMS-CUSUM state machine
+│       ├── sms_cusum.hpp       # Header-only SMS-CUSUM state machine
+│       └── secure_grasp.hpp    # Header-only secure grasp detector
 └── tests/
     ├── test_cusum.py           # 10 CUSUM unit tests
     ├── test_baseline.py        # 11 baseline unit tests
-    └── test_sms_cusum.py       # 12 SMS-CUSUM integration tests
+    ├── test_sms_cusum.py       # 12 SMS-CUSUM integration tests
+    └── test_secure_grasp.py    # 19 secure grasp tests (EWMA/Slope/Both)
 ```
 
 ### 1. CUSUM Detector (`cusum.py` / `cusum.hpp`)
@@ -238,11 +241,25 @@ if (result.detected && result.event.new_state == sms_cusum::GraspState::CONTACT)
 }
 ```
 
-## Offline Validation
+## Validation
 
-Run against trial data:
+### Unit Tests
+
+Run all tests (contact detection + secure grasp):
 ```bash
 cd sms_cusum
+python3 -m unittest discover -s tests -v
+```
+
+Run secure grasp tests only:
+```bash
+python3 tests/test_secure_grasp.py -v
+```
+
+### Offline Contact Validation
+
+Run contact detection against trial data:
+```bash
 python3 python/validate_offline.py --data-dir ../kitting_bags2
 ```
 
@@ -251,14 +268,9 @@ With publication-quality plots:
 python3 python/validate_offline.py --data-dir ../kitting_bags2 --plot
 ```
 
-Grid search parameter tuning:
+Grid search parameter tuning for contact detection:
 ```bash
 python3 python/tune_parameters.py --data-dir ../kitting_bags2
-```
-
-Run unit tests:
-```bash
-python3 -m unittest discover -s tests -v
 ```
 
 ## Why SMS-CUSUM Over Alternatives
@@ -284,35 +296,81 @@ when the grasp has become secure — i.e., when increasing grip force no
 longer changes the steady-state tau_ext_norm, indicating the object is
 fully compressed and additional force is unnecessary.
 
-### Algorithm
+### Detection Modes
 
-During each force ramp step's HOLDING phase, the detector accumulates
-tau_ext_norm samples in the **late segment** (last half, after settling):
+Three modes are available, selectable via the `secure_grasp_mode` parameter
+in the controller YAML config:
+
+#### Mode 1: EWMA Band Detection (`"ewma"`, default)
+
+Tracks an exponentially weighted moving average (EWMA) of the step-level
+settled means. At each step, the new mean is compared to the running EWMA;
+if it stays within a tolerance band for `n_confirm` consecutive steps, the
+grasp is declared secure.
+
+The EWMA is a standard signal processing technique for online mean
+estimation (Roberts, 1959; Lucas & Saccucci, 1990), widely used in
+statistical process control for detecting small sustained shifts.
 
 ```
-mu_late[N] = mean(tau_ext_norm samples in late HOLDING of GRASP_N)
-sigma_late[N] = std(tau_ext_norm samples in late HOLDING of GRASP_N)
+EWMA update:    Z_N = lambda * mu_late[N] + (1 - lambda) * Z_{N-1}
+Detection:      |mu_late[N] - Z_N| < band_width  AND  sigma_late[N] < std_threshold
+Confirmation:   above holds for n_confirm consecutive steps
 ```
 
-At step completion, two AND-gated criteria are checked:
+- Adapts naturally to different objects' tau_ext_norm baselines
+- Recursive O(1) computation per step, zero allocation
+- Empirical result: **100% detection (29/29), avg 3.2 steps**
 
-1. **Mean convergence**: `|mu_late[N] - mu_late[N-1]| < mean_converge_threshold`
-2. **Signal stability**: `sigma_late[N] < std_threshold`
+#### Mode 2: Slope-Based Plateau Detection (`"slope"`)
 
-Both must hold for `n_confirm` consecutive steps. Step 0 is always skipped
-(no previous mean to compare).
+Fits a linear regression to the last W step means. If |slope| is near zero
+and the range of values in the window is small, the signal is flat —
+indicating a plateau and a secure grasp.
+
+This approach draws on steady-state detection methods from process control,
+where a slope near zero combined with low residual variance is a standard
+criterion for declaring a process has reached equilibrium (Kelly &
+Hedengren, 2013).
+
+```
+Regression:     slope = sum((x_i - x_mean)(y_i - y_mean)) / sum((x_i - x_mean)^2)
+Detection:      |slope| < slope_threshold  AND  range(window) < slope_max_range
+                AND  sigma_late[N] < std_threshold
+```
+
+- Detects a different property than EWMA: "trend is flat" vs "value is near
+  running average"
+- O(W) per step finalization (W=3, negligible)
+- Empirical result: **93-100% detection (27-29/29), avg 4.3 steps**
+
+#### Mode 3: AND-Gated Combination (`"both"`)
+
+Both EWMA and Slope must independently declare secure before the detector
+fires. This is the most conservative mode — suitable when false early
+termination is costlier than additional force ramp steps.
 
 ### Parameters
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `mean_converge_threshold` | 0.03 Nm | Max inter-step mean difference for convergence |
-| `std_threshold` | 0.08 Nm | Max late-segment std for stability |
-| `n_confirm` | 2 | Consecutive converged steps required |
+| Parameter | Default | Mode | Description |
+|-----------|---------|------|-------------|
+| `mode` | `"ewma"` | All | Detection mode: `"ewma"`, `"slope"`, or `"both"` |
+| `ewma_lambda` | 0.4 | EWMA | Smoothing factor (0-1). Higher = more weight on current step |
+| `ewma_band_width` | 0.08 Nm | EWMA | Max deviation from EWMA for convergence |
+| `n_confirm` | 2 | EWMA | Consecutive converged steps required |
+| `slope_window_size` | 3 | Slope | Number of recent step means for regression |
+| `slope_threshold` | 0.03 | Slope | Max |slope| for plateau detection |
+| `slope_max_range` | 0.15 Nm | Slope | Max range of window values (oscillation guard) |
+| `std_threshold` | 0.14 Nm | All | Max within-step std for signal stability |
 
 ### Lifecycle
 
 ```python
+from sms_cusum.python.config import SecureGraspConfig, SMSCusumConfig
+
+# Configure mode
+sg_config = SecureGraspConfig(mode="ewma")  # or "slope" or "both"
+config = SMSCusumConfig(secure_grasp_stage=sg_config)
 detector = SMSCusum(config)
 
 # Phase 1: Baseline + Contact (as before)
@@ -330,12 +388,35 @@ for step in range(num_steps):
     detector.begin_grasp_step(step + 1)
 ```
 
+### Controller Configuration
+
+Default mode is set in `kitting_state_controller.yaml`:
+```yaml
+secure_grasp_mode: "ewma"    # "ewma", "slope", or "both"
+```
+
+The mode can be overridden per-trial via the `secure_grasp_mode` field
+in the `KittingGripperCommand` message (empty string = use YAML default):
+```bash
+# Use slope mode for this trial only
+rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
+  "{command: 'GRASPING', secure_grasp_mode: 'slope'}" --once
+
+# Use AND-gated mode for this trial only
+rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
+  "{command: 'GRASPING', secure_grasp_mode: 'both'}" --once
+```
+
 ### Validation
 
-Validated against 4 trials (triangle1 x2, thyme x2):
-- Triangle1 trial 1: Secure at GRASP_5 (18N), saving steps 6-7 (23-28N)
-- Thyme trials: Secure at GRASP_5 (10N), confirming convergence
-- Triangle1 trial 2 (oscillatory): Correctly never triggers
+Validated against 29 trials across 7 objects (triangle1, triangle,
+smallCircle, bigCircle, thyme, irregularShape, irregularShape1):
+
+| Mode | Detection Rate | Avg Steps | Notes |
+|------|---------------|-----------|-------|
+| EWMA | 29/29 (100%) | 3.2 | Fastest, most adaptive |
+| Slope | 27-29/29 (93-100%) | 4.3 | Misses highly oscillatory trials |
+| Both | 27+/29 | 4+ | Most conservative |
 
 ## Extensibility
 
@@ -347,6 +428,8 @@ automatically become the reference for subsequent stages via context
 inheritance.
 
 ## References
+
+### Contact Detection (CUSUM)
 
 1. Page, E.S. (1954). "Continuous inspection schemes." *Biometrika*,
    41(1-2), 100-115. DOI: [10.1093/biomet/41.1-2.100](https://doi.org/10.1093/biomet/41.1-2.100)
@@ -372,6 +455,36 @@ inheritance.
    In *Academic Press Library in Signal Processing*, Vol. 3, pp. 209-255.
    Elsevier. -- Modern overview covering Bayesian and minimax formulations,
    optimal and asymptotically optimal solutions, and generalizations.
+
+### Secure Grasp Detection (EWMA and Slope)
+
+6. Roberts, S.W. (1959). "Control chart tests based on geometric moving
+   averages." *Technometrics*, 1(3), 239-250.
+   DOI: [10.1080/00401706.1959.10489860](https://doi.org/10.1080/00401706.1959.10489860)
+   -- Introduced the EWMA statistic for process monitoring. Foundation
+   for the EWMA band detection mode.
+
+7. Lucas, J.M. & Saccucci, M.S. (1990). "Exponentially weighted moving
+   average control schemes: properties and enhancements." *Technometrics*,
+   32(1), 1-12.
+   DOI: [10.1080/00401706.1990.10484583](https://doi.org/10.1080/00401706.1990.10484583)
+   -- Comprehensive analysis of EWMA control chart properties, parameter
+   selection guidelines, and comparison with CUSUM. Informs the choice
+   of lambda and band width parameters.
+
+8. Kelly, J.D. & Hedengren, J.D. (2013). "A steady-state detection (SSD)
+   algorithm to detect non-stationary drifts in processes." *Journal of
+   Process Control*, 23(3), 326-331.
+   DOI: [10.1016/j.jprocont.2012.12.001](https://doi.org/10.1016/j.jprocont.2012.12.001)
+   -- Slope-near-zero combined with residual analysis as a criterion for
+   steady-state detection. Informs the slope-based plateau detection mode.
+
+9. Rhinehart, R.R. (2013). "Automated steady and transient state
+   identification in noisy processes." *Proceedings of the American Control
+   Conference (ACC)*, 4477-4493.
+   -- Variance ratio method for online steady-state identification.
+   Evaluated during algorithm selection; the core variance ratio idea
+   informed the oscillation guard (slope_max_range) used in slope mode.
 
 ## License
 

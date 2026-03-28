@@ -177,6 +177,7 @@ public:
     int32_t event_count() const noexcept { return event_count_; }
     const DetectionEvent& event(int32_t i) const noexcept { return events_[i]; }
     const SMSCusumConfig& config() const noexcept { return config_; }
+    SMSCusumConfig& mutable_config() noexcept { return config_; }
 
     // ------------------------------------------------------------------
     // State transition API
@@ -201,7 +202,9 @@ public:
      * is about to be sent.
      */
     void enter_grasping() noexcept {
-        secure_grasp_.reset();
+        // Propagate any config changes (e.g., per-trial mode override)
+        // to the detector's own copy before resetting.
+        secure_grasp_.set_config(config_.secure_grasp_stage);
         secure_grasp_.begin_step(0);
         state_ = GraspState::GRASPING;
     }
