@@ -226,11 +226,6 @@ namespace franka_kitting_controller {
         fr_ramp_phase_ = RampPhase::HOLDING;
         fr_ramp_step_start_time_ = time;
 
-        // Always accumulate W_pre (needed regardless of which step triggers UPLIFT)
-        fr_pre_sum_ = 0.0;
-        fr_pre_sum_sq_ = 0.0;
-        fr_pre_count_ = 0;
-
         fr_holding_elapsed_ = 0.0;
 
         ROS_INFO("    GRASP_%d: holding at F=%.1f N for %.2fs",
@@ -240,11 +235,6 @@ namespace franka_kitting_controller {
 
       case RampPhase::HOLDING: {
         double hold_elapsed = (time - fr_ramp_step_start_time_).toSec();
-
-        // Always accumulate W_pre (support force stats for slip evaluation)
-        fr_pre_sum_ += support_force;
-        fr_pre_sum_sq_ += support_force * support_force;
-        fr_pre_count_++;
 
         if (hold_elapsed >= rt_fr_grasp_force_hold_time_ / 2.0) {
           sms_detector_.update(tau_ext_norm);
@@ -339,9 +329,9 @@ namespace franka_kitting_controller {
     current_state_.store(GraspState::EVALUATE, std::memory_order_relaxed);
     publishStateLabel("EVALUATE");
     logStateTransition("EVALUATE", "Hold + slip score evaluation");
-    ROS_INFO("    early=%.2fs  late=%.2fs  (total hold=%.2fs)  W_pre samples=%d",
+    ROS_INFO("    early=%.2fs  late=%.2fs  (total hold=%.2fs)",
             rt_fr_uplift_hold_ / 2.0, rt_fr_uplift_hold_ / 2.0,
-            rt_fr_uplift_hold_, fr_pre_count_);
+            rt_fr_uplift_hold_);
   }
 
   void KittingStateController::tickEvaluate(const ros::Time& time,
@@ -366,17 +356,11 @@ namespace franka_kitting_controller {
       return;
     }
 
-    double Fn_pre   = (fr_pre_count_ > 0) ? fr_pre_sum_ / fr_pre_count_ : 0.0;
-    double sigma_pre = 0.0;
-    if (fr_pre_count_ > 1) {
-      double var = fr_pre_sum_sq_ / fr_pre_count_ - Fn_pre * Fn_pre;
-      sigma_pre = std::sqrt(std::max(var, 0.0));
-    }
     double Fn_early = (fr_early_count_ > 0) ? fr_early_sum_ / fr_early_count_ : 0.0;
     double Fn_late  = (fr_late_count_ > 0)  ? fr_late_sum_ / fr_late_count_   : 0.0;
 
-    double deltaF = Fn_early - Fn_pre;
-    double load_thresh = std::max(3.0 * sigma_pre, rt_fr_load_transfer_min_);
+    double deltaF = Fn_early - fn_baseline_;
+    double load_thresh = rt_fr_load_transfer_min_;
     bool load_transferred = deltaF > load_thresh;
 
     double dF = (Fn_early - Fn_late) / std::max(Fn_early, kEpsilon);
@@ -384,8 +368,8 @@ namespace franka_kitting_controller {
 
     bool is_slipping = !(load_transferred && drop_ok);
 
-    ROS_DEBUG("  [EVAL] Gate 1: deltaF=%.3f threshold=%.3f %s",
-              deltaF, load_thresh, load_transferred ? "PASS" : "FAIL");
+    ROS_DEBUG("  [EVAL] Gate 1: deltaF=%.3f (Fn_early=%.3f - Fn_baseline=%.3f) threshold=%.3f %s",
+              deltaF, Fn_early, fn_baseline_, load_thresh, load_transferred ? "PASS" : "FAIL");
     ROS_DEBUG("  [EVAL] Gate 2: dF=%.1f%% threshold=%.0f%% %s",
               dF * 100.0, rt_fr_slip_drop_thresh_ * 100.0, drop_ok ? "PASS" : "FAIL");
     ROS_INFO("  [EVAL] %s  (deltaF=%.3f  dF=%.1f%%)",

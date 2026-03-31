@@ -174,7 +174,7 @@ namespace franka_kitting_controller {
     node_handle.param("epsilon", fr_epsilon_, 0.008);
     node_handle.param("slip_drop_thresh", fr_slip_drop_thresh_, 0.15);
 
-    node_handle.param("load_transfer_min", fr_load_transfer_min_, 1.5);
+    node_handle.param("load_transfer_min", fr_load_transfer_min_, 0.02);
     node_handle.param("grasp_force_hold_time", fr_grasp_force_hold_time_, 2.0);
     node_handle.param("grasp_settle_time", fr_grasp_settle_time_, 0.5);
 
@@ -376,9 +376,6 @@ namespace franka_kitting_controller {
     fr_ramp_phase_ = RampPhase::COMMAND_SENT;
     fr_holding_elapsed_ = 0.0;
     // Clear slip evaluation accumulators (defensive — re-initialized before use)
-    fr_pre_sum_ = 0.0;
-    fr_pre_sum_sq_ = 0.0;
-    fr_pre_count_ = 0;
     fr_early_sum_ = 0.0;
     fr_early_count_ = 0;
     fr_late_sum_ = 0.0;
@@ -417,6 +414,9 @@ namespace franka_kitting_controller {
       cd_baseline_count_ = 0;
       cd_baseline_ = 0.0;
       cd_baseline_ready_.store(false, std::memory_order_relaxed);
+      fn_baseline_sum_ = 0.0;
+      fn_baseline_count_ = 0;
+      fn_baseline_ = 0.0;
       unknown_settle_started_ = false;
 
       ROS_INFO("  [UNKNOWN]  State machine reset for new trial");
@@ -633,15 +633,19 @@ namespace franka_kitting_controller {
 
         if (bl_state == GraspState::BASELINE) {
           sms_detector_.update(tau_ext_norm);
+          fn_baseline_sum_ += support_force;
+          fn_baseline_count_++;
 
           if (!cd_baseline_ready_.load(std::memory_order_relaxed) && sms_detector_.baseline_ready()) {
             cd_baseline_ready_.store(true, std::memory_order_relaxed);
             cd_baseline_ = sms_detector_.baseline().mean();
             cd_baseline_count_ = sms_detector_.config().baseline_init_samples;
+            fn_baseline_ = (fn_baseline_count_ > 0) ? fn_baseline_sum_ / fn_baseline_count_ : 0.0;
             ROS_INFO("  [BASELINE]  SMS-CUSUM baseline ready: mu=%.3f Nm, sigma=%.4f Nm  "
-                     "(from %d samples, 0.2s)",
+                     "Fn_baseline=%.3f N  (from %d samples)",
                      sms_detector_.baseline().mean(),
                      sms_detector_.baseline().sigma(),
+                     fn_baseline_,
                      sms_detector_.config().baseline_init_samples);
           }
         }

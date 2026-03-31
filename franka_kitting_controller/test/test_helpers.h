@@ -167,7 +167,7 @@ class KittingControllerTestFixture : public ::testing::Test {
     controller_.rt_fr_grasp_speed_ = 0.02;
     controller_.rt_fr_epsilon_ = 0.008;
     controller_.rt_fr_slip_drop_thresh_ = 0.15;
-    controller_.rt_fr_load_transfer_min_ = 1.5;
+    controller_.rt_fr_load_transfer_min_ = 0.02;
     controller_.rt_fr_grasp_force_hold_time_ = 2.0;
     controller_.rt_fr_grasp_settle_time_ = 0.5;
   }
@@ -275,11 +275,8 @@ class KittingControllerTestFixture : public ::testing::Test {
   double upliftZStart() const { return controller_.uplift_z_start_; }
   double downliftZStart() const { return controller_.downlift_z_start_; }
 
-  // Access to pre/early/late accumulators for EVALUATE tests
-  void setPreAccumulators(double sum, double sum_sq, int count) {
-    controller_.fr_pre_sum_ = sum;
-    controller_.fr_pre_sum_sq_ = sum_sq;
-    controller_.fr_pre_count_ = count;
+  void setFnBaseline(double fn) {
+    controller_.fn_baseline_ = fn;
   }
 
   void setEarlyAccumulators(double sum, int count) {

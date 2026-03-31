@@ -209,7 +209,7 @@ The force ramp runs entirely on the table (no mid-trial lift/lower). The control
 **Each ramp step (GRASP_k):**
 1. **Grasp command**: Dispatches a deferred grasp at force `f_current` to the `contact_width` (updated after each step)
 2. **Settle** (`grasp_settle_time`, default 0.5 s): Wait for the grasp command to complete and signals to stabilize. Published `grasp_ramp_phase = "settling"`
-3. **Hold** (`grasp_force_hold_time`, default 2.0 s): Hold at force level for data logging and analysis. Published `grasp_ramp_phase = "holding"`. During the late segment (last half), tau_ext_norm samples are fed to the SMS-CUSUM secure grasp detector. W_pre (support force baseline for slip evaluation) is accumulated during every step's HOLDING sub-phase
+3. **Hold** (`grasp_force_hold_time`, default 2.0 s): Hold at force level for data logging and analysis. Published `grasp_ramp_phase = "holding"`. During the late segment (last half), tau_ext_norm samples are fed to the SMS-CUSUM secure grasp detector
 4. **Advance**: Update `contact_width` from the current gripper width. If secure grasp was detected, transition to UPLIFT. If `f_current >= f_max` without secure grasp, transition to FAILED. Otherwise increment force by `f_step` and advance to next step
 
 After secure grasp is confirmed, the controller transitions to UPLIFT. If `f_max` is reached without secure grasp, the controller transitions directly to FAILED.
@@ -237,7 +237,7 @@ Assess grasp stability at the lifted position. **Auto-triggered** after UPLIFT c
 - Holds position for `uplift_hold` seconds (default 1.0 s): early window (first half) + late window (second half)
 - Uses directional force decomposition for slip detection
 - Two-gate AND evaluation (see [Slip Detection](#grasp-slip-detection-directional-force-decomposition--and-gating)):
-  - **Gate 1**: Load transfer confirmation — `deltaF > max(3*sigma_pre, load_transfer_min)`
+  - **Gate 1**: Load transfer confirmation — `Fn_early - Fn_baseline > load_transfer_min`
   - **Gate 2**: Support drop check — `dF <= slip_drop_thresh`
 - If **secure** (all gates pass): transitions to SUCCESS
 - If **slip** (any gate fails): transitions to FAILED
@@ -364,7 +364,7 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
     fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
     fr_uplift_distance: 0.010, fr_lift_speed: 0.01, fr_uplift_hold: 1.0, \
     fr_slip_drop_thresh: 0.15, \
-    fr_load_transfer_min: 1.5}" --once
+    fr_load_transfer_min: 0.02}" --once
 
 # Stop recording
 rostopic pub /kitting_controller/record_control std_msgs/String "data: 'STOP'" --once
@@ -393,7 +393,7 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
     fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
     fr_uplift_distance: 0.010, fr_lift_speed: 0.01, fr_uplift_hold: 1.0, \
     fr_slip_drop_thresh: 0.15, \
-    fr_load_transfer_min: 1.5}" --once
+    fr_load_transfer_min: 0.02}" --once
 ```
 
 ## Gripper Action Servers
@@ -554,33 +554,31 @@ The slip evaluation uses time windows across the grasp-lift-hold sequence:
 
 | Window         | Duration                | When                                          | Signal              | Purpose                     |
 | -------------- | ----------------------- | --------------------------------------------- | -------------------- | --------------------------- |
-| **W_pre**      | `grasp_force_hold_time` | HOLDING sub-phase of the **last** ramp step   | Fn (support force)   | Baseline before lift        |
+| **Fn_baseline** | BASELINE phase        | Before any object contact                     | Fn (support force)   | No-load reference for load transfer |
 | **W_hold_early** | `uplift_hold/2`       | First half of EVALUATE                        | Fn (support force)   | Loaded reference after lift |
 | **W_hold_late**  | `uplift_hold/2`       | Second half of EVALUATE                       | Fn (support force)   | Late hold for drop check   |
 
 ```
-  GRASPING (multi-step ramp on table)                UPLIFT     EVALUATE (uplift_hold)
-  GRASP_1 → GRASP_2 → ... → GRASP_N                 [lift]     ├── W_hold_early [0, hold/2)
-                              │                                 └── W_hold_late  [hold/2, hold)
-                              └── W_pre [hold phase]                Fn_early, Fn_late
-                                  Fn_pre, sigma_pre
+  BASELINE (no load)         GRASPING (ramp on table)    UPLIFT     EVALUATE (uplift_hold)
+  Fn_baseline captured       GRASP_1 → ... → GRASP_N     [lift]     ├── W_hold_early [0, hold/2)
+                                                                     └── W_hold_late  [hold/2, hold)
+                                                                         Fn_early, Fn_late
 ```
 
 ### Load Transfer Gate (Mandatory)
 
-The load transfer gate confirms the object is actually supported by the gripper after lifting. Without it, an empty gripper or failed pickup would pass the drop/motion checks (no drop because nothing was there to drop). This acts as a prerequisite — if not passed, the failure is "pickup failure" not "slip".
+The load transfer gate confirms the object is actually supported by the gripper after lifting. It compares the in-air support force against the no-load baseline captured during BASELINE (before any object is grasped). This enables reliable detection even for very light objects (< 50 g), since the reference is the arm's own Fn with no load rather than the on-table grasped Fn.
 
 ```
-  Fn_pre    = mean(Fn over W_pre)
-  sigma_pre = std(Fn over W_pre)
-  Fn_early  = mean(Fn over W_hold_early)
+  Fn_baseline = mean(Fn over BASELINE phase)     # no-load reference
+  Fn_early    = mean(Fn over W_hold_early)        # in-air after lift
 
-  deltaF = Fn_early - Fn_pre
+  deltaF = Fn_early - Fn_baseline
 
-  Load transfer confirmed if:  deltaF > max(3 * sigma_pre, load_transfer_min)
+  Load transfer confirmed if:  deltaF > load_transfer_min
 ```
 
-The `3 * sigma_pre` threshold adapts to sensor noise. The `load_transfer_min` floor (default 1.5 N, configurable) prevents declaring load transfer from noise alone. Lower this for light objects (e.g., 0.5 N for a ~51 g object).
+The `load_transfer_min` floor (default 0.02 N, configurable) prevents declaring load transfer from noise alone. The default supports objects down to ~5 g.
 
 ### Gate 2: Support Drop Check
 
@@ -609,26 +607,26 @@ Both gates must pass for the grasp to be declared secure. If either gate fails, 
 | Parameter               | Default  | Description                                                        |
 | ----------------------- | -------- | ------------------------------------------------------------------ |
 | `slip_drop_thresh`      | 0.15     | DF_TH: maximum allowed relative support force drop (15% = fail)    |
-| `load_transfer_min`     | 1.5 N    | Floor for load transfer threshold (lower for light objects)        |
+| `load_transfer_min`     | 0.02 N   | Floor for load transfer threshold (supports objects down to ~5 g)  |
 
 ### Example Log Output
 
 Secure grasp (both gates pass):
 
 ```
-  [SLIP] Gate 1 — Load Transfer:  deltaF=2.624 N  threshold=2.000 N  (Fn_pre=3.210  sigma=0.142  Fn_early=5.834)  PASS
+  [SLIP] Gate 1 — Load Transfer:  deltaF=2.624 N  threshold=1.500 N  (Fn_early=5.834  Fn_baseline=3.210)  PASS
   [SLIP] Gate 2 — Support Drop:    dF=2.1%  threshold=15%  PASS
   [SLIP] Verdict: SECURE
 ```
 
-- Gate 1: `deltaF=2.624` > `max(3*0.142, 2.0)` = 2.0 → PASS
+- Gate 1: `deltaF=2.624` > 1.5 → PASS
 - Gate 2: `dF=2.1%` ≤ 15% → PASS
 - **Verdict: SECURE → SUCCESS**
 
 Slip detected — load transferred but object slipped during hold:
 
 ```
-  [SLIP] Gate 1 — Load Transfer:  deltaF=2.740 N  threshold=2.000 N  (Fn_pre=3.180  sigma=0.138  Fn_early=5.920)  PASS
+  [SLIP] Gate 1 — Load Transfer:  deltaF=2.740 N  threshold=1.500 N  (Fn_early=5.920  Fn_baseline=3.180)  PASS
   [SLIP] Gate 2 — Support Drop:    dF=23.8%  threshold=15%  FAIL
   [SLIP] Verdict: SLIPPING
 ```
@@ -640,20 +638,20 @@ Slip detected — load transferred but object slipped during hold:
 Failed load transfer (object not lifted):
 
 ```
-  [SLIP] Gate 1 — Load Transfer:  deltaF=0.142 N  threshold=2.000 N  (Fn_pre=3.210  sigma=0.142  Fn_early=3.352)  FAIL
+  [SLIP] Gate 1 — Load Transfer:  deltaF=0.142 N  threshold=1.500 N  (Fn_early=3.352  Fn_baseline=3.210)  FAIL
   [SLIP] Gate 2 — Support Drop:    dF=1.6%  threshold=15%  PASS
   [SLIP] Verdict: SLIPPING
 ```
 
-- Gate 1: FAIL (`deltaF=0.142` < 2.0 — object weight never appeared on gripper)
-- Gates 2 & 3 pass, but Gate 1 failure alone triggers SLIPPING
+- Gate 1: FAIL (`deltaF=0.142` < 1.5 — object weight never appeared on gripper)
+- Gate 2 passes, but Gate 1 failure alone triggers SLIPPING
 - **Verdict: SLIPPING → FAILED**
 
 ### How to Read the Log
 
 | Field | What it tells you |
 | ----- | ----------------- |
-| `Gate 1 — Load Transfer` | PASS/FAIL — did the object weight actually transfer to the gripper? deltaF must exceed `max(3*sigma, load_transfer_min)` |
+| `Gate 1 — Load Transfer` | PASS/FAIL — did the object weight transfer to the gripper? `Fn_early - Fn_baseline` must exceed `load_transfer_min` |
 | `Gate 2 — Support Drop` | PASS/FAIL — has support force dropped during hold? dF% must be ≤ slip_drop_thresh |
 | `Verdict` | SECURE (all gates pass) or SLIPPING (any gate fails) |
 
@@ -733,7 +731,7 @@ The **velocity profile** (first derivative) is:
 | Maximum closing speed   | `v ≤ 0.10 m/s`    | Hard clamp — speeds above 0.10 m/s are clamped with a warning              |
 | Maximum uplift distance | `d ≤ 0.3 m`       | Hard clamp — any `d > 300 mm` is clamped with a warning                    |
 | Minimum lift speed      | `v ≥ 0.001 m/s`   | Hard clamp — prevents divide-by-zero in UPLIFT/downlift duration calc      |
-| Minimum uplift hold     | `t ≥ 0.5 s`       | Hard clamp — ensures W_pre ≥ 0.25 s for reliable pre-lift baseline         |
+| Minimum uplift hold     | `t ≥ 0.5 s`       | Hard clamp — ensures sufficient evaluation window                          |
 | Maximum uplift hold     | `t ≤ 120.0 s`     | Hard clamp on evaluation duration |
 | Precondition            | —                 | GRASPING requires CONTACT state                                           |
 | BASELINE interruption   | —                 | New BASELINE command restarts the full UNKNOWN → BASELINE cycle            |
@@ -761,10 +759,10 @@ The **velocity profile** (first derivative) is:
 | `uplift_distance`          | double | `0.010` | Micro-uplift distance after final ramp step [m] (max 0.3)           |
 | `lift_speed`               | double | `0.01`  | Lift speed for UPLIFT and BASELINE prep downlift [m/s] (min 0.001)  |
 | `uplift_hold`              | double | `1.0`   | Hold time at top for evaluation: early (first half) + late (second half) windows [s] (min 0.5, max 120.0) |
-| `grasp_force_hold_time`    | double | `2.0`   | Hold at each force ramp step before advancing [s] (min 0.25). W_pre accumulated during HOLDING of last step |
+| `grasp_force_hold_time`    | double | `2.0`   | Hold at each force ramp step before advancing [s] (min 0.25) |
 | `grasp_settle_time`        | double | `0.5`   | Settle time after each grasp command completes [s]                  |
 | `slip_drop_thresh`         | double | `0.15`   | DF_TH: max allowed relative support force drop (15% = fail)         |
-| `load_transfer_min`        | double | `1.5`    | Floor for load transfer threshold [N] (lower for light objects)     |
+| `load_transfer_min`        | double | `0.02`   | Floor for load transfer threshold [N] (supports objects down to ~5 g) |
 | `require_logger`           | bool   | `false` | Gate commands behind logger readiness (set true when `record:=true`)|
 
 Gripper and GRASPING parameters are **defaults**. They can be overridden per-command by setting non-zero values in the `KittingGripperCommand` message published on `/kitting_controller/state_cmd`.
@@ -870,7 +868,7 @@ Per-object command published on `/kitting_controller/state_cmd`. Any float64 par
 | `fr_grasp_speed`       | float64 | Gripper speed for ramp GraspAction [m/s] (0 = use default 0.02)                    |
 | `fr_epsilon`           | float64 | Epsilon for ramp GraspAction, inner and outer [m] (0 = use default 0.008)          |
 | `fr_slip_drop_thresh`     | float64 | DF_TH: max allowed relative support force drop (0 = use default 0.15)           |
-| `fr_load_transfer_min`    | float64 | Floor for load transfer threshold [N] (0 = use default 1.5)                     |
+| `fr_load_transfer_min`    | float64 | Floor for load transfer threshold [N] (0 = use default 0.02)                    |
 | `auto_delay`           | float64 | Delay between auto transitions [s] (0 = default 5.0). Only used by `AUTO` command  |
 
 Only the parameters relevant to the command are used:
@@ -997,7 +995,7 @@ The Grasp logger is written in C++ using the `rosbag::Bag` API directly and `top
 - GRASPING timeout: 10 seconds maximum for any ramp step's gripper command completion, then FAILED
 - Force ramp runs autonomously after GRASPING: GRASP_1 → ... → GRASP_N → UPLIFT → EVALUATE → SUCCESS/FAILED (secure grasp required; f_max without it → FAILED)
 - Each ramp step: grasp at force → settle (grasp_settle_time) → hold/log (grasp_force_hold_time) → update contact_width → advance
-- W_pre accumulated during HOLDING sub-phase of the last ramp step only
+- Fn_baseline captured during BASELINE phase for load transfer evaluation
 - Slip detected during EVALUATE transitions to FAILED (no retry loop)
 - Deferred grasp mechanism used for ramp step advancement: RT thread stores params, read thread calls `stop()` to release any existing grip, then dispatches
 - GRASPING timeout sends `stop_requested_` to cancel the in-flight gripper command — prevents stale commands from blocking future operations

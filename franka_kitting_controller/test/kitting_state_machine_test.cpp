@@ -152,34 +152,25 @@ TEST_F(KittingControllerTestFixture, TickUplift_TrajectoryDone) {
 // Helper: set up EVALUATE state with pre-computed accumulator data
 class EvaluateTest : public KittingControllerTestFixture {
  protected:
-  void SetUpEvaluate(double fn_pre, double sigma_pre, int pre_n,
-                     double fn_early, int early_n,
+  void SetUpEvaluate(double fn_baseline, double fn_early, int early_n,
                      double fn_late, int late_n) {
     setCurrentState(GraspState::EVALUATE);
-
-    double pre_sum = fn_pre * pre_n;
-    double pre_sum_sq = (sigma_pre * sigma_pre + fn_pre * fn_pre) * pre_n;
-    setPreAccumulators(pre_sum, pre_sum_sq, pre_n);
-
+    setFnBaseline(fn_baseline);
     setEarlyAccumulators(fn_early * early_n, early_n);
     setLateAccumulators(fn_late * late_n, late_n);
   }
 };
 
 TEST_F(EvaluateTest, AllGatesPass_Success) {
-  // Gate 1: deltaF = Fn_early - Fn_pre = 10 - 2 = 8 > max(3*0.5, 1.5) = 1.5 ✓
+  // Gate 1: deltaF = Fn_early - Fn_baseline = 10 - 2 = 8 > 1.5 ✓
   // Gate 2: dF = (10 - 9.5) / 10 = 0.05 ≤ 0.15 ✓
-  SetUpEvaluate(/*fn_pre=*/2.0, /*sigma=*/0.5, /*pre_n=*/125,
-                /*fn_early=*/10.0, /*early_n=*/125,
+  SetUpEvaluate(/*fn_baseline=*/2.0, /*fn_early=*/10.0, /*early_n=*/125,
                 /*fn_late=*/9.5, /*late_n=*/125);
 
-  // uplift_hold = 1.0s, so kEarlyEnd = 0.5, kLateEnd = 1.0
-  // We need elapsed >= kLateEnd to trigger evaluation
   ros::Time phase_start(100.0);
   setPhaseStartTime(phase_start);
   auto g = makeDefaultGripper();
 
-  // Call at elapsed = 1.1s (past kLateEnd)
   ros::Time t(101.1);
   callTickEvaluate(t, 0.0, 5.0, g);
 
@@ -187,10 +178,9 @@ TEST_F(EvaluateTest, AllGatesPass_Success) {
 }
 
 TEST_F(EvaluateTest, Gate1Fail_NoLoadTransfer) {
-  // Gate 1 FAIL: deltaF = 3 - 2.5 = 0.5 < max(3*0.1, 1.5) = 1.5
-  SetUpEvaluate(/*fn_pre=*/2.5, /*sigma=*/0.1, /*pre_n=*/125,
-                /*fn_early=*/3.0, /*early_n=*/125,
-                /*fn_late=*/3.0, /*late_n=*/125);
+  // Gate 1 FAIL: deltaF = Fn_early - Fn_baseline = 3.01 - 3.0 = 0.01 < 0.02
+  SetUpEvaluate(/*fn_baseline=*/3.0, /*fn_early=*/3.01, /*early_n=*/125,
+                /*fn_late=*/3.01, /*late_n=*/125);
 
   ros::Time phase_start(100.0);
   setPhaseStartTime(phase_start);
@@ -205,8 +195,7 @@ TEST_F(EvaluateTest, Gate1Fail_NoLoadTransfer) {
 TEST_F(EvaluateTest, Gate2Fail_SupportDrop) {
   // Gate 1 PASS: deltaF = 10 - 2 = 8 > 1.5 ✓
   // Gate 2 FAIL: dF = (10 - 8) / 10 = 0.2 > 0.15 ✗
-  SetUpEvaluate(/*fn_pre=*/2.0, /*sigma=*/0.1, /*pre_n=*/125,
-                /*fn_early=*/10.0, /*early_n=*/125,
+  SetUpEvaluate(/*fn_baseline=*/2.0, /*fn_early=*/10.0, /*early_n=*/125,
                 /*fn_late=*/8.0, /*late_n=*/125);
 
   ros::Time phase_start(100.0);
@@ -222,7 +211,6 @@ TEST_F(EvaluateTest, Gate2Fail_SupportDrop) {
 TEST_F(EvaluateTest, EarlyWindowAccumulates) {
   // During early window: elapsed < kEarlyEnd → should accumulate, not evaluate
   setCurrentState(GraspState::EVALUATE);
-  setPreAccumulators(0.0, 0.0, 0);
   setEarlyAccumulators(0.0, 0);
   setLateAccumulators(0.0, 0);
 
@@ -240,7 +228,6 @@ TEST_F(EvaluateTest, EarlyWindowAccumulates) {
 TEST_F(EvaluateTest, LateWindowAccumulates) {
   // During late window: kEarlyEnd ≤ elapsed < kLateEnd → accumulate, no verdict
   setCurrentState(GraspState::EVALUATE);
-  setPreAccumulators(0.0, 0.0, 0);
   setEarlyAccumulators(0.0, 0);
   setLateAccumulators(0.0, 0);
 
@@ -560,7 +547,7 @@ TEST_F(KittingControllerTestFixture, FullCycle_GraspingToSuccess) {
   t = ros::Time(100.5);
   callTickGrasping(t, 0.0, 8.0, g);
 
-  // Settle time passes → HOLDING (last step, W_pre accumulates)
+  // Settle time passes → HOLDING
   t = ros::Time(101.1);
   callTickGrasping(t, 0.0, 8.0, g);
 
@@ -580,9 +567,7 @@ TEST_F(KittingControllerTestFixture, FullCycle_GraspingToSuccess) {
   EXPECT_EQ(currentState(), GraspState::EVALUATE);
 
   // --- EVALUATE phase ---
-  // Now manually set up accumulators to simulate a secure grasp
-  // fn_pre was accumulated during W_pre (≈8.0), fn_early/late ≈ 15.0 (load transferred, stable)
-  setPreAccumulators(8.0 * 125, 65.0 * 125, 125);  // mean=8.0, var≈1.0
+  setFnBaseline(2.0);  // No-load Fn from BASELINE
   setEarlyAccumulators(15.0 * 125, 125);
   setLateAccumulators(14.8 * 125, 125);
 

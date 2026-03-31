@@ -31,7 +31,7 @@ kitting_state_controller:
   lift_speed: 0.01 # [m/s] Lift speed for final UPLIFT (clamped to min 0.001)
   uplift_hold: 1.0  # [s] Evaluation hold at top; early + late windows (clamped to 0.5–120.0)
   slip_drop_thresh: 0.15    # DF_TH: max allowed relative support force drop (15% = fail)
-  load_transfer_min: 1.5    # [N] Minimum load transfer threshold (lighter objects need lower value)
+  load_transfer_min: 0.02   # [N] Minimum load transfer threshold (supports objects down to ~5g)
 
   # Recording / Logger parameters (used by launch file, see kitting_state_controller.launch)
   # Set require_logger: true to enable rosbag recording (launch arg: record:=true)

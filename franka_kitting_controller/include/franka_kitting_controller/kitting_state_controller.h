@@ -201,6 +201,9 @@ namespace franka_kitting_controller {
     int    cd_baseline_count_{0};
     double cd_baseline_{0.0};
     std::atomic<bool> cd_baseline_ready_{false};
+    double fn_baseline_sum_{0.0};
+    int    fn_baseline_count_{0};
+    double fn_baseline_{0.0};  // No-load support force (Fn) captured during BASELINE
 
     franka_hw::TriggerRate signal_log_trigger_{2.0};
     franka_hw::TriggerRate gripper_log_trigger_{10.0};
@@ -229,7 +232,7 @@ namespace franka_kitting_controller {
     double fr_grasp_speed_{0.02};
     double fr_epsilon_{0.008};
     double fr_slip_drop_thresh_{0.15};
-    double fr_load_transfer_min_{1.5};
+    double fr_load_transfer_min_{0.02};
     double fr_grasp_force_hold_time_{2.0};
     double fr_grasp_settle_time_{0.5};
 
@@ -243,7 +246,7 @@ namespace franka_kitting_controller {
     double rt_fr_grasp_speed_{0.02};
     double rt_fr_epsilon_{0.008};
     double rt_fr_slip_drop_thresh_{0.15};
-    double rt_fr_load_transfer_min_{1.5};
+    double rt_fr_load_transfer_min_{0.02};
     double rt_fr_grasp_force_hold_time_{2.0};
     double rt_fr_grasp_settle_time_{0.5};
 
@@ -257,7 +260,7 @@ namespace franka_kitting_controller {
     double staging_fr_grasp_speed_{0.02};
     double staging_fr_epsilon_{0.008};
     double staging_fr_slip_drop_thresh_{0.15};
-    double staging_fr_load_transfer_min_{1.5};
+    double staging_fr_load_transfer_min_{0.02};
     double staging_fr_grasp_force_hold_time_{2.0};
     double staging_fr_grasp_settle_time_{0.5};
     uint32_t staging_fr_expected_cmd_gen_{0};
@@ -277,9 +280,6 @@ namespace franka_kitting_controller {
     double fr_holding_elapsed_{0.0};
 
     // Slip evaluation accumulators
-    double fr_pre_sum_{0.0};
-    double fr_pre_sum_sq_{0.0};
-    int    fr_pre_count_{0};
     double fr_early_sum_{0.0};
     int    fr_early_count_{0};
     double fr_late_sum_{0.0};
