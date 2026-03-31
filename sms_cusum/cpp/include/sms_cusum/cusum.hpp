@@ -103,7 +103,11 @@ public:
         , S_{0.0}
         , alarm_streak_{0}
         , k_eff_{config.k_min}
-    {}
+    {
+        if (config_.h <= 0.0) config_.h = 0.01;
+        if (config_.debounce_count < 1) config_.debounce_count = 1;
+        if (config_.noise_multiplier < 0.0) config_.noise_multiplier = 0.0;
+    }
 
     /**
      * @brief Reset CUSUM state for a new detection cycle.

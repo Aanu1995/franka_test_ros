@@ -160,11 +160,12 @@ public:
         , contact_cusum_{config.contact_stage}
         , secure_grasp_{config.secure_grasp_stage}
         , event_count_{0}
-    {}
+    {
+        if (config_.baseline_init_samples < 2) config_.baseline_init_samples = 2;
+        if (config_.baseline_alpha <= 0.0) config_.baseline_alpha = 0.001;
+        if (config_.baseline_alpha > 1.0) config_.baseline_alpha = 1.0;
+    }
 
-    // ------------------------------------------------------------------
-    // Accessors
-    // ------------------------------------------------------------------
 
     GraspState state() const noexcept { return state_; }
     const char* state_name() const noexcept { return grasp_state_name(state_); }
@@ -178,9 +179,6 @@ public:
     const DetectionEvent& event(int32_t i) const noexcept { return events_[i]; }
     const SMSCusumConfig& config() const noexcept { return config_; }
 
-    // ------------------------------------------------------------------
-    // State transition API
-    // ------------------------------------------------------------------
 
     /**
      * @brief Signal that the gripper is starting to close.
@@ -245,9 +243,6 @@ public:
         return result;
     }
 
-    // ------------------------------------------------------------------
-    // Core update loop: O(1) per sample
-    // ------------------------------------------------------------------
 
     /**
      * @brief Process one sample. O(1) time, zero dynamic allocation.
@@ -313,9 +308,6 @@ public:
         return result;
     }
 
-    // ------------------------------------------------------------------
-    // Reset / lifecycle
-    // ------------------------------------------------------------------
 
     void reset() noexcept {
         state_      = GraspState::FREE_MOTION;

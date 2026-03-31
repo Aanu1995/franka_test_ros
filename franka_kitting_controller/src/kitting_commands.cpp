@@ -91,7 +91,6 @@ namespace franka_kitting_controller {
 
     pending_state_.store(GraspState::BASELINE, std::memory_order_relaxed);
     state_changed_.store(true, std::memory_order_release);
-    // State label published by RT loop: UNKNOWN first (prep/settle), then BASELINE.
   }
 
   void KittingStateController::handleClosingCmd(
@@ -105,7 +104,14 @@ namespace franka_kitting_controller {
 
     double width = resolveParam(msg->closing_width, closing_width_);
     double speed = resolveParam(msg->closing_speed, closing_speed_);
+    double max_w = gripper_data_buf_.readFromNonRT()->max_width;
 
+    if (width > max_w) {
+      ROS_WARN("KittingStateController: closing_width %.4f exceeds max %.4f, clamping",
+              width, max_w);
+      width = max_w;
+    }
+    if (width < 0.0) width = 0.0;
     if (speed > kMaxClosingSpeed) {
       ROS_WARN("KittingStateController: closing_speed %.4f exceeds max %.4f, clamping",
               speed, kMaxClosingSpeed);
@@ -199,6 +205,9 @@ namespace franka_kitting_controller {
     if (staging_fr_grasp_settle_time_ < 0.0) {
       staging_fr_grasp_settle_time_ = 0.0;
     }
+    if (staging_fr_slip_drop_thresh_ < 0.0) staging_fr_slip_drop_thresh_ = 0.0;
+    if (staging_fr_slip_drop_thresh_ > 1.0) staging_fr_slip_drop_thresh_ = 1.0;
+    if (staging_fr_load_transfer_min_ < 0.0) staging_fr_load_transfer_min_ = 0.0;
 
     staging_fr_expected_cmd_gen_ = cmd_gen_.load(std::memory_order_relaxed);
 

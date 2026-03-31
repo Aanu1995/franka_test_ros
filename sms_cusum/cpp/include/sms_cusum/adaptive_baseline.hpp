@@ -59,8 +59,8 @@ public:
      *                     Default 0.01 (time constant ~100 samples = 0.4 s at 250 Hz).
      */
     explicit AdaptiveBaseline(int32_t init_samples = 50, double alpha = 0.01) noexcept
-        : init_samples_{init_samples}
-        , alpha_{alpha}
+        : init_samples_{init_samples < 2 ? 2 : init_samples}
+        , alpha_{(alpha <= 0.0) ? 0.001 : (alpha > 1.0 ? 1.0 : alpha)}
         , sum_{0.0}
         , sum_sq_{0.0}
         , count_{0}

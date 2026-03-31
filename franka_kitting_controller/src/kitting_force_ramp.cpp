@@ -90,7 +90,6 @@ namespace franka_kitting_controller {
       }
     }
 
-    // Deferred CONTACT: gripper_stopped_ acquire guarantees contact_width_ visibility.
     if (contact_latched_ &&
         current_state_.load(std::memory_order_relaxed) == GraspState::CONTACT_CONFIRMED &&
         gripper_stopped_.load(std::memory_order_acquire)) {
@@ -110,7 +109,6 @@ namespace franka_kitting_controller {
       return;
     }
 
-    // Fallback baseline collection if CLOSING sent without prior BASELINE.
     if (!sms_detector_.baseline_ready()) {
       sms_detector_.update(tau_ext_norm);
       if (sms_detector_.baseline_ready() && !cd_baseline_ready_.load(std::memory_order_relaxed)) {
@@ -200,7 +198,6 @@ namespace franka_kitting_controller {
       }
 
       case RampPhase::WAITING_EXECUTION: {
-        // Acquire on cmd_executing_ pairs with release in command thread.
         if (cmd_executing_.load(std::memory_order_acquire)) {
           return;
         }
@@ -214,7 +211,7 @@ namespace franka_kitting_controller {
         }
         fr_ramp_phase_ = RampPhase::SETTLING;
         fr_ramp_step_start_time_ = time;
-        ROS_INFO("    GRASP_%d: grasp complete at F=%.1f N, settling for %.2fs",
+        ROS_DEBUG("    GRASP_%d: grasp complete at F=%.1f N, settling for %.2fs",
                 fr_iteration_ + 1, fr_f_current_, rt_fr_grasp_settle_time_);
         break;
       }
@@ -228,7 +225,7 @@ namespace franka_kitting_controller {
 
         fr_holding_elapsed_ = 0.0;
 
-        ROS_INFO("    GRASP_%d: holding at F=%.1f N for %.2fs",
+        ROS_DEBUG("    GRASP_%d: holding at F=%.1f N for %.2fs",
                 fr_iteration_ + 1, fr_f_current_, rt_fr_grasp_force_hold_time_);
         break;
       }
@@ -246,7 +243,7 @@ namespace franka_kitting_controller {
 
         contact_width_.store(gripper_snapshot.width, std::memory_order_relaxed);
 
-        ROS_INFO("    GRASP_%d: hold complete  F=%.1f N  width=%.4f m (updated)",
+        ROS_DEBUG("    GRASP_%d: hold complete  F=%.1f N  width=%.4f m (updated)",
                 fr_iteration_ + 1, fr_f_current_, gripper_snapshot.width);
 
         fr_ramp_phase_ = RampPhase::STEP_COMPLETE;
@@ -306,7 +303,7 @@ namespace franka_kitting_controller {
           std::snprintf(label, sizeof(label), "GRASP_%d", fr_iteration_ + 1);
           publishStateLabel(label);
           logStateTransition(label, "Force ramp step");
-          ROS_INFO("    iter=%d  F=%.1f N  width=%.4f m", fr_iteration_ + 1, fr_f_current_, w);
+          ROS_DEBUG("    iter=%d  F=%.1f N  width=%.4f m", fr_iteration_ + 1, fr_f_current_, w);
         }
         break;
       }
@@ -329,7 +326,7 @@ namespace franka_kitting_controller {
     current_state_.store(GraspState::EVALUATE, std::memory_order_relaxed);
     publishStateLabel("EVALUATE");
     logStateTransition("EVALUATE", "Hold + slip score evaluation");
-    ROS_INFO("    early=%.2fs  late=%.2fs  (total hold=%.2fs)",
+    ROS_DEBUG("    early=%.2fs  late=%.2fs  (total hold=%.2fs)",
             rt_fr_uplift_hold_ / 2.0, rt_fr_uplift_hold_ / 2.0,
             rt_fr_uplift_hold_);
   }

@@ -5,6 +5,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <future>
 #include <memory>
@@ -172,6 +173,7 @@ namespace franka_kitting_controller {
     std::atomic<bool> baseline_needs_open_{false};
     std::atomic<bool> baseline_open_dispatched_{false};
     bool baseline_open_seen_executing_{false};
+    std::chrono::steady_clock::time_point baseline_open_dispatch_time_{};
     std::atomic<double> baseline_open_width_{0.0};
 
     bool unknown_settle_started_{false};

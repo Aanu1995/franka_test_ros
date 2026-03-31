@@ -41,6 +41,14 @@ class CusumStageConfig:
     debounce_count: int = 5
     noise_multiplier: float = 2.0
 
+    def __post_init__(self) -> None:
+        if self.h <= 0.0:
+            raise ValueError(f"CusumStageConfig.h must be > 0, got {self.h}")
+        if self.debounce_count < 1:
+            raise ValueError(f"CusumStageConfig.debounce_count must be >= 1, got {self.debounce_count}")
+        if self.noise_multiplier < 0.0:
+            raise ValueError(f"CusumStageConfig.noise_multiplier must be >= 0, got {self.noise_multiplier}")
+
 
 @dataclass
 class SecureGraspConfig:
@@ -112,3 +120,15 @@ class SMSCusumConfig:
     baseline_init_samples: int = 50
     baseline_alpha: float = 0.01
     sample_rate: float = 250.0
+
+    def __post_init__(self) -> None:
+        if self.baseline_init_samples < 2:
+            raise ValueError(
+                f"SMSCusumConfig.baseline_init_samples must be >= 2, "
+                f"got {self.baseline_init_samples}"
+            )
+        if not (0.0 < self.baseline_alpha <= 1.0):
+            raise ValueError(
+                f"SMSCusumConfig.baseline_alpha must be in (0, 1], "
+                f"got {self.baseline_alpha}"
+            )

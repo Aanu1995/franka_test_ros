@@ -65,7 +65,6 @@ namespace franka_kitting_controller {
 
   KittingLogger::KittingLogger()
       : private_nh_("~") {
-    // --- Load parameters ---
     private_nh_.param<std::string>("base_directory", base_directory_, "~/kitting_bags");
     if (!base_directory_.empty() && base_directory_[0] == '~') {
       const char* home = getenv("HOME");
@@ -83,7 +82,6 @@ namespace franka_kitting_controller {
           "/kitting_controller/state"};
     }
 
-    // --- Subscribe to record control (STOP, ABORT) ---
     record_control_sub_ = nh_.subscribe(
         "/kitting_controller/record_control", 10,
         &KittingLogger::recordControlCallback, this);
@@ -98,10 +96,6 @@ namespace franka_kitting_controller {
       topic_subs_.push_back(sub);
     }
 
-    // --- Auto-start recording on launch ---
-    // Recording begins immediately when the logger node starts.
-    // The ready signal is published AFTER recording starts, so the controller
-    // never accepts commands without an active recording session.
     {
       std::lock_guard<std::mutex> lock(trial_mutex_);
       startTrial();
@@ -113,9 +107,6 @@ namespace franka_kitting_controller {
       return;
     }
 
-    // --- Publish latched logger_ready signal ---
-    // The controller gates Grasp commands behind this signal.
-    // Latched = new subscribers immediately receive the last published message.
     logger_ready_pub_ = nh_.advertise<std_msgs::Bool>(
         "/kitting_controller/logger_ready", 1, true /* latched */);
     std_msgs::Bool ready_msg;
@@ -260,7 +251,6 @@ namespace franka_kitting_controller {
       batch.clear();
     }
 
-    // Flush remaining messages on shutdown.
     {
       std::lock_guard<std::mutex> qlock(write_queue_mutex_);
       batch.swap(write_queue_);
@@ -301,9 +291,7 @@ namespace franka_kitting_controller {
   }
 
   void KittingLogger::startTrial() {
-    // Caller must hold trial_mutex_
 
-    // Directory: <base>/<object>/trial_NNN/
     std::string obj_dir = base_directory_ + "/" + object_name_;
     trial_number_ = nextTrialNumber(obj_dir);
 
@@ -317,7 +305,6 @@ namespace franka_kitting_controller {
       return;
     }
 
-    // Timestamp (localtime_r is thread-safe, unlike std::localtime)
     auto now = std::time(nullptr);
     struct tm tm;
     localtime_r(&now, &tm);
@@ -327,7 +314,6 @@ namespace franka_kitting_controller {
 
     total_samples_ = 0;
 
-    // Bag filename
     std::ostringstream bag_ss;
     bag_ss << trial_dir_ << "/" << start_time_str_
           << "_" << object_name_
@@ -335,7 +321,6 @@ namespace franka_kitting_controller {
           << ".bag";
     bag_path_ = bag_ss.str();
 
-    // Open bag
     try {
       bag_ = std::make_unique<rosbag::Bag>();
       bag_->open(bag_path_, rosbag::bagmode::Write);
@@ -350,10 +335,8 @@ namespace franka_kitting_controller {
   }
 
   void KittingLogger::stopTrial() {
-    // Caller must hold trial_mutex_
     if (!is_recording_) return;
 
-    // Close bag
     if (bag_) {
       try {
         bag_->close();
@@ -365,7 +348,6 @@ namespace franka_kitting_controller {
 
     is_recording_ = false;
 
-    // Record stop timestamp (localtime_r is thread-safe)
     auto now = std::time(nullptr);
     struct tm tm;
     localtime_r(&now, &tm);
@@ -385,17 +367,14 @@ namespace franka_kitting_controller {
     ROS_INFO("KittingLogger: Recording stopped (trial %d) -> %s",
             trial_number_, trial_dir_.c_str());
 
-    // Launch CSV export in background — never blocks the callback thread.
     if (export_csv_on_stop_) {
       launchExport(bag_path_, csv_path);
     }
   }
 
   void KittingLogger::abortTrial() {
-    // Caller must hold trial_mutex_
     if (!is_recording_) return;
 
-    // Close bag
     if (bag_) {
       try {
         bag_->close();
@@ -412,7 +391,6 @@ namespace franka_kitting_controller {
   }
 
   void KittingLogger::writeMetadata() {
-    // Caller must hold trial_mutex_
     std::string meta_path = trial_dir_ + "/metadata.yaml";
     std::ofstream f(meta_path);
     if (!f.is_open()) {
@@ -420,7 +398,6 @@ namespace franka_kitting_controller {
       return;
     }
 
-    // Extract just the filenames (not full paths)
     std::string bag_filename = bag_path_.substr(bag_path_.find_last_of('/') + 1);
     std::ostringstream csv_fn_ss;
     csv_fn_ss << "trial_" << std::setw(3) << std::setfill('0') << trial_number_
@@ -464,7 +441,6 @@ namespace franka_kitting_controller {
   }
 
   void KittingLogger::reapFinishedExports() {
-    // Non-blocking: join and remove completed export threads.
     std::lock_guard<std::mutex> lock(export_mutex_);
     auto it = export_tasks_.begin();
     while (it != export_tasks_.end()) {
@@ -478,7 +454,6 @@ namespace franka_kitting_controller {
   }
 
   void KittingLogger::joinAllExports() {
-    // Blocking: join all threads (shutdown only).
     std::lock_guard<std::mutex> lock(export_mutex_);
     for (auto& task : export_tasks_) {
       if (task->thread.joinable()) {
@@ -494,17 +469,14 @@ namespace franka_kitting_controller {
     ROS_INFO("KittingLogger: CSV export starting -> %s", csv_path.c_str());
 
     try {
-      // Open bag for reading
       rosbag::Bag bag;
       bag.open(bag_path, rosbag::bagmode::Read);
 
-      // Create view over kitting_state_data and state topics
       std::vector<std::string> query_topics = {
           "/kitting_state_controller/kitting_state_data",
           "/kitting_controller/state"};
       rosbag::View view(bag, rosbag::TopicQuery(query_topics));
 
-      // Open CSV file
       std::ofstream csv(csv_path);
       if (!csv.is_open()) {
         ROS_ERROR("KittingLogger: Failed to open CSV: %s", csv_path.c_str());
@@ -615,7 +587,6 @@ namespace franka_kitting_controller {
   }
 
   void KittingLogger::onShutdown() {
-    // Stop the writer thread first so all queued messages are flushed.
     write_thread_shutdown_.store(true, std::memory_order_relaxed);
     write_queue_cv_.notify_one();
     if (write_thread_.joinable()) {
@@ -629,7 +600,6 @@ namespace franka_kitting_controller {
         stopTrial();
       }
     }
-    // Join all exports (including the one just launched by stopTrial)
     joinAllExports();
   }
 

@@ -74,13 +74,7 @@ namespace franka_kitting_controller {
   }
 
   void KittingStateController::logStateTransition(const char* label, const char* detail) {
-    ROS_INFO("============================================================");
-    if (detail) {
-      ROS_INFO("  [STATE]  >>  %s  <<  %s", label, detail);
-    } else {
-      ROS_INFO("  [STATE]  >>  %s  <<", label);
-    }
-    ROS_INFO("============================================================");
+    ROS_DEBUG("  [STATE]  >>  %s  <<  %s", label, detail ? detail : "");
   }
 
   void KittingStateController::requestGripperStop(const char* source) {
@@ -173,8 +167,11 @@ namespace franka_kitting_controller {
     node_handle.param("grasp_speed", fr_grasp_speed_, 0.02);
     node_handle.param("epsilon", fr_epsilon_, 0.008);
     node_handle.param("slip_drop_thresh", fr_slip_drop_thresh_, 0.15);
+    if (fr_slip_drop_thresh_ < 0.0) fr_slip_drop_thresh_ = 0.0;
+    if (fr_slip_drop_thresh_ > 1.0) fr_slip_drop_thresh_ = 1.0;
 
     node_handle.param("load_transfer_min", fr_load_transfer_min_, 0.02);
+    if (fr_load_transfer_min_ < 0.0) fr_load_transfer_min_ = 0.0;
     node_handle.param("grasp_force_hold_time", fr_grasp_force_hold_time_, 2.0);
     node_handle.param("grasp_settle_time", fr_grasp_settle_time_, 0.5);
 
@@ -375,7 +372,6 @@ namespace franka_kitting_controller {
     fr_grasping_phase_initialized_ = false;
     fr_ramp_phase_ = RampPhase::COMMAND_SENT;
     fr_holding_elapsed_ = 0.0;
-    // Clear slip evaluation accumulators (defensive — re-initialized before use)
     fr_early_sum_ = 0.0;
     fr_early_count_ = 0;
     fr_late_sum_ = 0.0;
@@ -388,8 +384,6 @@ namespace franka_kitting_controller {
     }
     GraspState new_state = pending_state_.load(std::memory_order_relaxed);
 
-    // BASELINE command → enter UNKNOWN first (prep + settle), then BASELINE.
-    // Data published during UNKNOWN is not used for baseline collection.
     if (new_state == GraspState::BASELINE) {
       new_state = GraspState::UNKNOWN;
 
@@ -612,17 +606,15 @@ namespace franka_kitting_controller {
 
       const GripperData gripper_snapshot = *gripper_data_buf_.readFromRT();
 
-      // UNKNOWN → BASELINE transition: settle after prep, then settle again in BASELINE.
       {
         GraspState bl_state = current_state_.load(std::memory_order_relaxed);
 
-        // UNKNOWN: wait for prep done, then settle before entering BASELINE.
         if (bl_state == GraspState::UNKNOWN &&
             baseline_prep_done_.load(std::memory_order_acquire)) {
           if (!unknown_settle_started_) {
             unknown_settle_start_ = time;
             unknown_settle_started_ = true;
-            ROS_INFO("  [UNKNOWN]  Prep complete — settling for %.1fs", kBaselineSettleTime);
+            ROS_DEBUG("  [UNKNOWN]  Prep complete — settling for %.1fs", kBaselineSettleTime);
           }
           if ((time - unknown_settle_start_).toSec() >= kBaselineSettleTime) {
             current_state_.store(GraspState::BASELINE, std::memory_order_relaxed);
@@ -635,12 +627,12 @@ namespace franka_kitting_controller {
           sms_detector_.update(tau_ext_norm);
           fn_baseline_sum_ += support_force;
           fn_baseline_count_++;
+          fn_baseline_ = fn_baseline_sum_ / fn_baseline_count_;
 
           if (!cd_baseline_ready_.load(std::memory_order_relaxed) && sms_detector_.baseline_ready()) {
             cd_baseline_ready_.store(true, std::memory_order_relaxed);
             cd_baseline_ = sms_detector_.baseline().mean();
             cd_baseline_count_ = sms_detector_.config().baseline_init_samples;
-            fn_baseline_ = (fn_baseline_count_ > 0) ? fn_baseline_sum_ / fn_baseline_count_ : 0.0;
             ROS_INFO("  [BASELINE]  SMS-CUSUM baseline ready: mu=%.3f Nm, sigma=%.4f Nm  "
                      "Fn_baseline=%.3f N  (from %d samples)",
                      sms_detector_.baseline().mean(),

@@ -46,7 +46,6 @@ namespace franka_kitting_controller {
         data.stamp = now;
         gripper_data_buf_.writeFromNonRT(data);
 
-        // Post-stop width capture: first readOnce() after stop() records the settled width.
         if (width_capture_pending_.load(std::memory_order_relaxed)) {
           contact_width_.store(gs.width, std::memory_order_relaxed);
           gripper_stopped_.store(true, std::memory_order_release);
@@ -66,8 +65,6 @@ namespace franka_kitting_controller {
           }
         }
 
-        // Deferred grasp: previous grasp completed; clear grasped state then re-grasp at higher force.
-        // Acquire pairs with release in requestDeferredGrasp, guaranteeing param visibility.
         if (deferred_grasp_pending_.load(std::memory_order_acquire)) {
           // stop() clears libfranka's "grasped" internal state. Without this,
           // grasp() on an already-grasped gripper releases to open position first,
@@ -96,7 +93,6 @@ namespace franka_kitting_controller {
           deferred_grasp_pending_.store(false, std::memory_order_relaxed);
         }
 
-        // Baseline prep step 2: queue gripper open after downlift completes.
         if (baseline_needs_open_.load(std::memory_order_relaxed) &&
             !baseline_prep_done_.load(std::memory_order_acquire) &&
             !baseline_open_dispatched_.load(std::memory_order_relaxed) &&
@@ -109,19 +105,22 @@ namespace franka_kitting_controller {
           baseline_open_seen_executing_ = false;
           queueGripperCommand(open_cmd);
           baseline_open_dispatched_.store(true, std::memory_order_relaxed);
+          baseline_open_dispatch_time_ = std::chrono::steady_clock::now();
           ROS_INFO("  [BASELINE]  Step 2: Gripper open queued (post-downlift): "
                    "move(width=%.4f, speed=0.1)", baseline_open_width_.load(std::memory_order_relaxed));
         }
 
-        // Baseline prep complete: wait for open to finish (seen executing → done).
         if (baseline_open_dispatched_.load(std::memory_order_relaxed) &&
             !baseline_prep_done_.load(std::memory_order_relaxed)) {
-          if (!baseline_open_seen_executing_ &&
-              cmd_executing_.load(std::memory_order_relaxed)) {
+          bool executing = cmd_executing_.load(std::memory_order_relaxed);
+          if (!baseline_open_seen_executing_ && executing) {
             baseline_open_seen_executing_ = true;
           }
-          if (baseline_open_seen_executing_ &&
-              !cmd_executing_.load(std::memory_order_relaxed)) {
+          bool done_normal = baseline_open_seen_executing_ && !executing;
+          auto elapsed = std::chrono::steady_clock::now() - baseline_open_dispatch_time_;
+          bool done_timeout = !executing &&
+              elapsed > std::chrono::seconds(5);
+          if (done_normal || done_timeout) {
             baseline_prep_done_.store(true, std::memory_order_release);
             ROS_INFO("  [BASELINE]  Gripper open complete — baseline collection starting");
           }
@@ -184,7 +183,6 @@ namespace franka_kitting_controller {
       }
       cmd_success_.store(success, std::memory_order_relaxed);
       cmd_gen_.store(cmd_gen_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
-      // Release: cmd_success_ and cmd_gen_ visible before RT thread sees cmd_executing_ == false.
       cmd_executing_.store(false, std::memory_order_release);
     }
   }
@@ -274,10 +272,18 @@ namespace franka_kitting_controller {
 
   void KittingStateController::executeStopAction(const franka_gripper::StopGoalConstPtr& /*goal*/) {
     franka_gripper::StopResult result;
+    auto state = current_state_.load(std::memory_order_relaxed);
+    if (state != GraspState::START && state != GraspState::SUCCESS &&
+        state != GraspState::FAILED) {
+      result.success = false;
+      result.error = "stop rejected: grasp sequence active (state: " +
+                     std::string(stateToString(state)) + ")";
+      stop_action_server_->setAborted(result, result.error);
+      return;
+    }
     gripper_stopped_.store(false, std::memory_order_relaxed);
     width_capture_pending_.store(false, std::memory_order_relaxed);
     stop_requested_.store(true, std::memory_order_release);
-    // Wait for the read thread to execute stop() AND capture the post-stop width.
     for (int i = 0; i < 100; ++i) {
       if (gripper_stopped_.load(std::memory_order_acquire)) {
         result.success = true;
