@@ -27,7 +27,7 @@ namespace sms_cusum {
  */
 struct SecureGraspConfig {
     double  ewma_lambda             = 0.4;
-    double  ewma_band_width         = 0.08;
+    double  ewma_band_width         = 0.12;
     int32_t n_confirm               = 2;
     double  std_threshold           = 0.14;
 };
@@ -49,10 +49,8 @@ struct SecureGraspResult {
 
 class SecureGraspDetector {
 public:
-    explicit SecureGraspDetector(const SecureGraspConfig& config = SecureGraspConfig{}) noexcept
-        : config_{config}
-    {
-        reset();
+    explicit SecureGraspDetector(const SecureGraspConfig& config = SecureGraspConfig{}) noexcept {
+        set_config(config);
     }
 
     void set_config(const SecureGraspConfig& config) noexcept {
@@ -102,8 +100,8 @@ public:
         if (step_index_ == 0) {
             ewma_ = mu_late;
         } else {
-            ewma_ = config_.ewma_lambda * mu_late + (1.0 - config_.ewma_lambda) * ewma_;
             d_mu = std::fabs(mu_late - ewma_);
+            ewma_ = config_.ewma_lambda * mu_late + (1.0 - config_.ewma_lambda) * ewma_;
 
             if (d_mu < config_.ewma_band_width && std_late < config_.std_threshold) {
                 ++ewma_streak_;

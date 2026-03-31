@@ -147,8 +147,11 @@ public:
                 phase_ = BaselinePhase::TRACKING;
             }
         } else {
-            // TRACKING: EMA update
+            // TRACKING: EMA update of mean and sigma
             mu_ = alpha_ * x + (1.0 - alpha_) * mu_;
+            double diff = x - mu_;
+            double new_var = alpha_ * (diff * diff) + (1.0 - alpha_) * (sigma_ * sigma_);
+            sigma_ = std::sqrt(std::max(new_var, 0.0));
             ++count_;
         }
     }

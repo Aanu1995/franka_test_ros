@@ -318,7 +318,7 @@ Confirmation:   above holds for n_confirm consecutive steps
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `ewma_lambda` | 0.4 | Smoothing factor (0-1). Higher = more weight on current step |
-| `ewma_band_width` | 0.08 Nm | Max deviation from EWMA for convergence |
+| `ewma_band_width` | 0.12 Nm | Max deviation from EWMA for convergence |
 | `n_confirm` | 2 | Consecutive converged steps required |
 | `std_threshold` | 0.14 Nm | Max within-step std for signal stability |
 
@@ -346,9 +346,8 @@ for step in range(num_steps):
 
 ### Validation
 
-Validated against 29 trials across 7 objects (triangle1, triangle,
-smallCircle, bigCircle, thyme, irregularShape, irregularShape1):
-100% detection rate, average 3.2 force ramp steps.
+Validated against 27 trials across 6 objects (object0–object5):
+100% detection rate, average 3.3 force ramp steps.
 
 ## Extensibility
 

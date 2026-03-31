@@ -374,8 +374,7 @@ namespace franka_kitting_controller {
     fr_grasp_cmd_seen_executing_ = false;
     fr_grasping_phase_initialized_ = false;
     fr_ramp_phase_ = RampPhase::COMMAND_SENT;
-    fr_holding_sample_count_ = 0;
-    fr_holding_late_start_ = 0;
+    fr_holding_elapsed_ = 0.0;
     // Clear slip evaluation accumulators (defensive — re-initialized before use)
     fr_pre_sum_ = 0.0;
     fr_pre_sum_sq_ = 0.0;
@@ -454,8 +453,7 @@ namespace franka_kitting_controller {
       gripper_stopped_.store(false, std::memory_order_relaxed);
       width_capture_pending_.store(false, std::memory_order_relaxed);
       closing_cmd_seen_executing_ = false;
-      closing_command_entered_ = true;
-      fr_phase_start_time_ = ros::Time::now();
+      closing_command_entered_ = false;
     }
 
     if (new_state == GraspState::GRASPING) {
@@ -601,7 +599,7 @@ namespace franka_kitting_controller {
     applyPendingStateTransition();
     updateCartesianCommand(period);
 
-    if (rate_trigger_()) {
+    {
       franka::RobotState robot_state = franka_state_handle_->getRobotState();
 
       double tau_ext_norm = arrayNorm(robot_state.tau_ext_hat_filtered);
@@ -664,26 +662,26 @@ namespace franka_kitting_controller {
         if (state == GraspState::UNKNOWN) {
           if (!baseline_prep_done_.load(std::memory_order_relaxed)) {
             if (downlift_active_.load(std::memory_order_relaxed)) {
-              ROS_INFO("  [SIGNAL]  UNKNOWN  |  prep: lowering arm");
+              ROS_DEBUG("  [SIGNAL]  UNKNOWN  |  prep: lowering arm");
             } else if (!baseline_open_dispatched_.load(std::memory_order_relaxed)) {
-              ROS_INFO("  [SIGNAL]  UNKNOWN  |  prep: queuing gripper open");
+              ROS_DEBUG("  [SIGNAL]  UNKNOWN  |  prep: queuing gripper open");
             } else {
-              ROS_INFO("  [SIGNAL]  UNKNOWN  |  prep: gripper opening");
+              ROS_DEBUG("  [SIGNAL]  UNKNOWN  |  prep: gripper opening");
             }
           } else {
-            ROS_INFO("  [SIGNAL]  UNKNOWN  |  settling (%.1fs / %.1fs)",
+            ROS_DEBUG("  [SIGNAL]  UNKNOWN  |  settling (%.1fs / %.1fs)",
                     unknown_settle_started_ ? (time - unknown_settle_start_).toSec() : 0.0,
                     kBaselineSettleTime);
           }
         } else if (state == GraspState::BASELINE) {
           if (cd_baseline_ready_.load(std::memory_order_relaxed)) {
-            ROS_INFO("  [SIGNAL]  BASELINE  |  tau_baseline=%.3f Nm  (ready)", cd_baseline_);
+            ROS_DEBUG("  [SIGNAL]  BASELINE  |  tau_baseline=%.3f Nm  (ready)", cd_baseline_);
           } else {
-            ROS_INFO("  [SIGNAL]  BASELINE  |  collecting: %d/%d samples  tau_ext_norm=%.3f",
+            ROS_DEBUG("  [SIGNAL]  BASELINE  |  collecting: %d/%d samples  tau_ext_norm=%.3f",
                     sms_detector_.baseline().count(), sms_detector_.config().baseline_init_samples, tau_ext_norm);
           }
         } else if (isClosingPhase(state)) {
-          ROS_INFO("  [SIGNAL]  %s  |  cusum: tau=%.3f baseline=%.3f "
+          ROS_DEBUG("  [SIGNAL]  %s  |  cusum: tau=%.3f baseline=%.3f "
                   "S=%.3f k_eff=%.4f %s",
                   stateToString(state), tau_ext_norm, cd_baseline_,
                   sms_detector_.contact_cusum().statistic(),
@@ -700,7 +698,7 @@ namespace franka_kitting_controller {
               case RampPhase::STEP_COMPLETE:      ramp_sub = "step_done"; break;
             }
           }
-          ROS_INFO("  [SIGNAL]  GRASP_%d  |  F=%.1f  Fn=%.2f  phase=%s",
+          ROS_DEBUG("  [SIGNAL]  GRASP_%d  |  F=%.1f  Fn=%.2f  phase=%s",
                   fr_iteration_ + 1, fr_f_current_, support_force, ramp_sub);
         }
       }
@@ -712,8 +710,7 @@ namespace franka_kitting_controller {
                   gripper_snapshot.width - rt_closing_w_cmd_);
       }
 
-      if (kitting_publisher_.trylock()) {
-        // Compute model quantities only when we can actually publish
+      if (rate_trigger_() && kitting_publisher_.trylock()) {
         std::array<double, 42> jacobian =
             model_handle_->getZeroJacobian(franka::Frame::kEndEffector);
         std::array<double, 7> gravity = model_handle_->getGravity();

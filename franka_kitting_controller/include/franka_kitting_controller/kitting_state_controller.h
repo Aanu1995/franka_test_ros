@@ -274,8 +274,7 @@ namespace franka_kitting_controller {
 
 
     // HOLDING sample tracking for secure grasp late-segment feeding
-    int fr_holding_sample_count_{0};
-    int fr_holding_late_start_{0};
+    double fr_holding_elapsed_{0.0};
 
     // Slip evaluation accumulators
     double fr_pre_sum_{0.0};

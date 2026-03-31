@@ -140,8 +140,10 @@ class AdaptiveBaseline:
                 self._sigma = math.sqrt(max(variance, 0.0))
                 self._phase = BaselinePhase.TRACKING
         else:
-            # TRACKING: EMA update
             self._mu = self._alpha * x + (1.0 - self._alpha) * self._mu
+            diff = x - self._mu
+            new_var = self._alpha * (diff * diff) + (1.0 - self._alpha) * (self._sigma * self._sigma)
+            self._sigma = math.sqrt(max(new_var, 0.0))
             self._count += 1
 
     def snapshot(self) -> tuple[float, float]:

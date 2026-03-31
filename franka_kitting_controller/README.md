@@ -413,7 +413,7 @@ Action server requests are only accepted when the internal state machine is **id
 | `/franka_gripper/homing`  | `franka_gripper/HomingAction` | Run the gripper homing routine (recalibrate)             |
 | `/franka_gripper/stop`    | `franka_gripper/StopAction`   | Immediately stop the gripper (always allowed, any state) |
 
-**Move**, **Grasp**, and **Homing** are routed through the existing gripper command thread to prevent concurrent `libfranka` calls. **Stop** is routed through the read thread's `stop_requested_` flag to avoid concurrent `gripper_->stop()` calls from multiple threads — the read thread serializes all gripper I/O. The action server polls for completion (up to 500 ms timeout).
+**Move**, **Grasp**, and **Homing** are routed through the existing gripper command thread to prevent concurrent `libfranka` calls. **Stop** is routed through the read thread's `stop_requested_` flag — the action server waits for `gripper_stopped_` (set after the post-stop width capture) before reporting success, ensuring the gripper has fully settled (up to 1000 ms timeout).
 
 ### Usage Examples
 
@@ -520,7 +520,7 @@ Secure when: |mu_late[N] - Z_N| < band_width AND sigma_late[N] < std_threshold
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `ewma_lambda` | 0.4 | Smoothing factor (0-1) |
-| `ewma_band_width` | 0.08 Nm | Max deviation from EWMA |
+| `ewma_band_width` | 0.12 Nm | Max deviation from EWMA |
 | `n_confirm` | 2 | Consecutive converged steps required |
 | `std_threshold` | 0.14 Nm | Max within-step std for stability |
 
@@ -750,7 +750,7 @@ The **velocity profile** (first derivative) is:
 | Parameter                  | Type   | Default | Description                                                         |
 | -------------------------- | ------ | ------- | ------------------------------------------------------------------- |
 | `arm_id`                   | string | `panda` | Robot arm identifier                                                |
-| `publish_rate`             | double | `250.0` | State data publish rate [Hz]                                        |
+| `publish_rate`             | double | `250.0` | KittingState publish rate [Hz] (detection runs at full 1 kHz control rate) |
 | `closing_width`            | double | `0.001` | Default width for MoveAction in CLOSING [m]                                |
 | `closing_speed`            | double | `0.05`  | Default speed for MoveAction in CLOSING [m/s] (clamped to max 0.10) |
 | `grasp_speed`              | double | `0.02`  | Gripper speed for GraspAction [m/s]                                 |

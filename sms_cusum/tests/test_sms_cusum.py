@@ -274,30 +274,30 @@ class TestSMSCusumSecureGrasp(unittest.TestCase):
         self._drive_to_contact(det)
         det.enter_grasping()
 
-        # Step 0: initial
+        # Step 0: initial (seeds EWMA at 1.0)
         for _ in range(100):
             det.update(1.0)
         r0 = det.finalize_grasp_step()
         self.assertFalse(r0.detected)
 
-        # Step 1: large shift
+        # Step 1: large shift (d_mu=0.2 > 0.12, resets streak)
         det.begin_grasp_step(1)
         for _ in range(100):
             det.update(1.2)
         r1 = det.finalize_grasp_step()
         self.assertFalse(r1.detected)
 
-        # Step 2: converge (streak=1)
+        # Step 2: close to EWMA (streak=1)
         det.begin_grasp_step(2)
         for _ in range(100):
-            det.update(1.21)
+            det.update(1.15)
         r2 = det.finalize_grasp_step()
         self.assertFalse(r2.detected)
 
-        # Step 3: converge (streak=2 -> SECURE)
+        # Step 3: still close (streak=2 -> SECURE)
         det.begin_grasp_step(3)
         for _ in range(100):
-            det.update(1.215)
+            det.update(1.14)
         r3 = det.finalize_grasp_step()
         self.assertTrue(r3.detected)
         self.assertEqual(r3.event.new_state, GraspState.SECURE_GRASP)

@@ -148,9 +148,8 @@ class SecureGraspDetector:
         if self._step_index == 0:
             self._ewma = mu_late
         else:
-            lam = self._config.ewma_lambda
-            self._ewma = lam * mu_late + (1.0 - lam) * self._ewma
             d_mu = abs(mu_late - self._ewma)
+            self._ewma = self._config.ewma_lambda * mu_late + (1.0 - self._config.ewma_lambda) * self._ewma
 
             if d_mu < self._config.ewma_band_width and std_late < self._config.std_threshold:
                 self._converge_streak += 1

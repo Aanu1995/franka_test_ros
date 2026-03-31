@@ -178,6 +178,27 @@ namespace franka_kitting_controller {
               staging_fr_uplift_hold_, kMaxUpliftHold);
       staging_fr_uplift_hold_ = kMaxUpliftHold;
     }
+    if (staging_fr_f_min_ <= 0.0) {
+      ROS_WARN("KittingStateController: f_min %.2f invalid, clamping to 1.0", staging_fr_f_min_);
+      staging_fr_f_min_ = 1.0;
+    }
+    if (staging_fr_f_step_ <= 0.0) {
+      ROS_WARN("KittingStateController: f_step %.2f invalid, clamping to 1.0", staging_fr_f_step_);
+      staging_fr_f_step_ = 1.0;
+    }
+    if (staging_fr_f_max_ < staging_fr_f_min_) {
+      ROS_WARN("KittingStateController: f_max %.2f < f_min %.2f, clamping to f_min",
+              staging_fr_f_max_, staging_fr_f_min_);
+      staging_fr_f_max_ = staging_fr_f_min_;
+    }
+    if (staging_fr_grasp_force_hold_time_ < 0.25) {
+      ROS_WARN("KittingStateController: grasp_force_hold_time %.2f below min 0.25, clamping",
+              staging_fr_grasp_force_hold_time_);
+      staging_fr_grasp_force_hold_time_ = 0.25;
+    }
+    if (staging_fr_grasp_settle_time_ < 0.0) {
+      staging_fr_grasp_settle_time_ = 0.0;
+    }
 
     staging_fr_expected_cmd_gen_ = cmd_gen_.load(std::memory_order_relaxed);
 

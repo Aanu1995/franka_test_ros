@@ -11,11 +11,8 @@ kitting_state_controller:
   # Uses built-in optimized parameters: k_min=0.02, h=0.3, debounce=5 samples, noise_mult=2.0
   # Baseline: 50 samples (0.2s at 250Hz), EMA alpha=0.01
 
-  # Secure grasp detection: convergence detector on tau_ext_norm during force ramp
-  # Uses built-in optimized parameters: mean_converge=0.03 Nm, std=0.08 Nm,
-  # n_confirm=2
-  # Detects when increasing grip force no longer changes steady-state tau_ext_norm,
-  # enabling early termination of the force ramp before reaching f_max.
+  # Secure grasp detection (EWMA band): built-in parameters
+  # ewma_lambda=0.4, band_width=0.12 Nm, n_confirm=2, std_threshold=0.14 Nm
 
   # Grasping parameters (overridable per-command via KittingGripperCommand)
   # After GRASPING command, controller runs a contact-only force ramp:

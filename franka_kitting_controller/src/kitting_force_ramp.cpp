@@ -32,8 +32,9 @@ namespace franka_kitting_controller {
 
     if ((state == GraspState::CLOSING_COMMAND || state == GraspState::CLOSING) &&
         !contact_latched_) {
-      if (closing_command_entered_) {
-        closing_command_entered_ = false;
+      if (!closing_command_entered_) {
+        closing_command_entered_ = true;
+        fr_phase_start_time_ = time;
         return;
       }
 
@@ -230,12 +231,7 @@ namespace franka_kitting_controller {
         fr_pre_sum_sq_ = 0.0;
         fr_pre_count_ = 0;
 
-        // Init late-segment counter for secure grasp detection
-        {
-          int total = static_cast<int>(rt_fr_grasp_force_hold_time_ * 250.0);
-          fr_holding_sample_count_ = 0;
-          fr_holding_late_start_ = total / 2;  // late segment = last half of HOLDING
-        }
+        fr_holding_elapsed_ = 0.0;
 
         ROS_INFO("    GRASP_%d: holding at F=%.1f N for %.2fs",
                 fr_iteration_ + 1, fr_f_current_, rt_fr_grasp_force_hold_time_);
@@ -250,9 +246,7 @@ namespace franka_kitting_controller {
         fr_pre_sum_sq_ += support_force * support_force;
         fr_pre_count_++;
 
-        // Feed tau_ext_norm to secure grasp detector during late segment
-        fr_holding_sample_count_++;
-        if (fr_holding_sample_count_ >= fr_holding_late_start_) {
+        if (hold_elapsed >= rt_fr_grasp_force_hold_time_ / 2.0) {
           sms_detector_.update(tau_ext_norm);
         }
 
@@ -390,14 +384,12 @@ namespace franka_kitting_controller {
 
     bool is_slipping = !(load_transferred && drop_ok);
 
-    ROS_INFO("  [EVAL] Gate 1 — Load Transfer:  deltaF=%.3f N  threshold=%.3f N  "
-             "(Fn_pre=%.3f  sigma=%.3f  Fn_early=%.3f)  %s",
-             deltaF, load_thresh, Fn_pre, sigma_pre, Fn_early,
-             load_transferred ? "PASS" : "FAIL");
-    ROS_INFO("  [EVAL] Gate 2 — Support Drop:   dF=%.1f%%  threshold=%.0f%%  %s",
-             dF * 100.0, rt_fr_slip_drop_thresh_ * 100.0,
-             drop_ok ? "PASS" : "FAIL");
-    ROS_INFO("  [EVAL] Verdict: %s", is_slipping ? "SLIPPING" : "SECURE");
+    ROS_DEBUG("  [EVAL] Gate 1: deltaF=%.3f threshold=%.3f %s",
+              deltaF, load_thresh, load_transferred ? "PASS" : "FAIL");
+    ROS_DEBUG("  [EVAL] Gate 2: dF=%.1f%% threshold=%.0f%% %s",
+              dF * 100.0, rt_fr_slip_drop_thresh_ * 100.0, drop_ok ? "PASS" : "FAIL");
+    ROS_INFO("  [EVAL] %s  (deltaF=%.3f  dF=%.1f%%)",
+             is_slipping ? "SLIPPING" : "SECURE", deltaF, dF * 100.0);
 
     if (!is_slipping) {
       accumulated_uplift_ += rt_fr_uplift_distance_;

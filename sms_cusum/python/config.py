@@ -7,7 +7,7 @@ triangle, triangle4, triangle6) with baseline noise sigma 0.031-0.067 Nm
 and contact drop magnitudes 0.13-0.75 Nm.
 
 Secure grasp parameters derived from kitting_bags 3 trials across 7 object
-types (29 trials total) using EWMA band detection.
+types (27 trials, 6 objects) using EWMA band detection.
 """
 
 from dataclasses import dataclass, field
@@ -63,7 +63,7 @@ class SecureGraspConfig:
     """
 
     ewma_lambda: float = 0.4
-    ewma_band_width: float = 0.08
+    ewma_band_width: float = 0.12
     n_confirm: int = 2
     std_threshold: float = 0.14
 
