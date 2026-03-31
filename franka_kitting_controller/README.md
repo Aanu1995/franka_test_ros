@@ -17,8 +17,8 @@ This controller runs inside the `ros_control` real-time loop provided by `franka
 - SMS-CUSUM contact detection during CLOSING (noise-adaptive CUSUM change-point detection on tau_ext_norm — automatically scales sensitivity to measured noise level, no per-object threshold tuning)
 - Immediate gripper stop on contact: calls `franka::Gripper::stop()` to physically halt the motor
 - Multi-step force ramp on table: grasps at f_min, f_min+f_step, ..., up to f_max — each step settles, holds, then advances. Secure grasp detection must confirm grip before proceeding to UPLIFT + EVALUATE. If f_max is reached without secure grasp, the attempt fails immediately
-- Secure grasp convergence detection: SMS-CUSUM monitors tau_ext_norm convergence across force ramp steps using selectable EWMA band or slope-based plateau detection — detects when the object is fully compressed and grip force increase is no longer needed. Mode configurable via `secure_grasp_mode` YAML parameter (`"ewma"`, `"slope"`, or `"both"`)
-- Three-gate AND slip detection: load transfer + support drop + jaw widening (directional force decomposition, Fn = |Fz|) during EVALUATE hold
+- Secure grasp convergence detection: SMS-CUSUM monitors tau_ext_norm convergence across force ramp steps using EWMA band detection — detects when the object is fully compressed and grip force increase is no longer needed
+- Two-gate AND slip detection: load transfer + support drop (directional force decomposition, Fn = |Fz|) during EVALUATE hold
 - One rosbag per trial with all state transitions (recording starts automatically on launch)
 - Automatic CSV export on stop for analysis-ready datasets
 - Per-trial metadata output for offline analysis reproducibility
@@ -58,7 +58,7 @@ catkin_test_results build/franka_kitting_controller
 | Tier | File | What's tested |
 |------|------|---------------|
 | 1 — Pure unit | `test/kitting_unit_test.cpp` | `arrayNorm`, `resolveParam`, `stateToString`, `isClosingPhase`, `isForceRampPhase` |
-| 2 — State machine | `test/kitting_state_machine_test.cpp` | All tick functions, 3-gate slip detection (each gate individually), trajectory math (uplift/downlift cosine smoothing), multi-step force ramp, constants consistency |
+| 2 — State machine | `test/kitting_state_machine_test.cpp` | All tick functions, 2-gate slip detection (each gate individually), trajectory math (uplift/downlift cosine smoothing), multi-step force ramp, constants consistency |
 
 Tests bypass `init()` (which requires a real `franka::Gripper`) using a friend-class test fixture with `MockModel` and real `franka_hw` handles backed by test data.
 
@@ -236,10 +236,9 @@ Assess grasp stability at the lifted position. **Auto-triggered** after UPLIFT c
 
 - Holds position for `uplift_hold` seconds (default 1.0 s): early window (first half) + late window (second half)
 - Uses directional force decomposition for slip detection
-- Three-gate AND evaluation (see [Slip Detection](#grasp-slip-detection-directional-force-decomposition--and-gating)):
+- Two-gate AND evaluation (see [Slip Detection](#grasp-slip-detection-directional-force-decomposition--and-gating)):
   - **Gate 1**: Load transfer confirmation — `deltaF > max(3*sigma_pre, load_transfer_min)`
   - **Gate 2**: Support drop check — `dF <= slip_drop_thresh`
-  - **Gate 3**: Jaw widening check — `P95-P5 <= slip_width_thresh`
 - If **secure** (all gates pass): transitions to SUCCESS
 - If **slip** (any gate fails): transitions to FAILED
 
@@ -263,7 +262,7 @@ Terminal state indicating grasp failure. **Auto-triggered** on any of:
 - CLOSING_COMMAND timeout (move command did not start executing within 10 seconds)
 - GRASPING timeout (gripper command did not complete within 10 seconds)
 - Grasp failed at a ramp step (`grasp()` returned false — hardware rejected the grasp command)
-- Slip detected during EVALUATE (any of the three gates failed after the full ramp + UPLIFT)
+- Slip detected during EVALUATE (either gate failed after the full ramp + UPLIFT)
 - State label published for offline analysis with diagnostic information
 - **Recording auto-stops**: if `record:=true`, the logger detects FAILED and automatically stops recording (saves bag + metadata + CSV)
 - To retry, publish `BASELINE` (resets the entire state machine)
@@ -357,14 +356,6 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
   "{command: 'GRASPING', f_min: 3.0, f_max: 70.0, f_step: 3.0}" --once
 
-# GRASPING — override secure grasp mode for this trial
-rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
-  "{command: 'GRASPING', secure_grasp_mode: 'slope'}" --once
-
-# GRASPING — use AND-gated mode (both EWMA and slope must agree)
-rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
-  "{command: 'GRASPING', secure_grasp_mode: 'both'}" --once
-
 # GRASPING — override all force ramp parameters for a specific object
 rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
   "{command: 'GRASPING', \
@@ -372,9 +363,8 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
     grasp_force_hold_time: 2.0, grasp_settle_time: 0.5, \
     fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
     fr_uplift_distance: 0.010, fr_lift_speed: 0.01, fr_uplift_hold: 1.0, \
-    fr_slip_drop_thresh: 0.15, fr_slip_width_thresh: 0.0005, \
-    fr_load_transfer_min: 1.5, \
-    secure_grasp_mode: 'ewma'}" --once
+    fr_slip_drop_thresh: 0.15, \
+    fr_load_transfer_min: 1.5}" --once
 
 # Stop recording
 rostopic pub /kitting_controller/record_control std_msgs/String "data: 'STOP'" --once
@@ -402,9 +392,8 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
     grasp_force_hold_time: 2.0, grasp_settle_time: 0.5, \
     fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
     fr_uplift_distance: 0.010, fr_lift_speed: 0.01, fr_uplift_hold: 1.0, \
-    fr_slip_drop_thresh: 0.15, fr_slip_width_thresh: 0.0005, \
-    fr_load_transfer_min: 1.5, \
-    secure_grasp_mode: 'ewma'}" --once
+    fr_slip_drop_thresh: 0.15, \
+    fr_load_transfer_min: 1.5}" --once
 ```
 
 ## Gripper Action Servers
@@ -516,11 +505,7 @@ At each step's completion (`STEP_COMPLETE`), `sms_detector_.finalize_grasp_step(
 
 When secure grasp is detected, the force ramp terminates early and transitions directly to UPLIFT, skipping remaining force increments. This avoids unnecessary force on the object while maintaining grasp quality (validated by the subsequent UPLIFT + EVALUATE phase).
 
-### Detection Modes
-
-Three modes are available, selected via the `secure_grasp_mode` YAML parameter:
-
-#### EWMA Band Detection (`"ewma"`, default)
+### Algorithm: EWMA Band Detection
 
 Tracks an exponentially weighted moving average (EWMA) of the step-level settled means (Roberts, 1959). At each step, the new mean is compared to the running EWMA; if it stays within a tolerance band for `n_confirm` consecutive steps, the grasp is declared secure.
 
@@ -530,32 +515,14 @@ Secure when: |mu_late[N] - Z_N| < band_width AND sigma_late[N] < std_threshold
              for n_confirm consecutive steps
 ```
 
-#### Slope-Based Plateau Detection (`"slope"`)
-
-Fits a linear regression to the last W step means (Kelly & Hedengren, 2013). If |slope| is near zero and the range of values in the window is small, the signal is flat — indicating a plateau.
-
-```
-slope = sum((x_i - x_mean)(y_i - y_mean)) / sum((x_i - x_mean)^2)
-Secure when: |slope| < slope_threshold AND range(window) < slope_max_range
-             AND sigma_late[N] < std_threshold
-```
-
-#### AND-Gated Combination (`"both"`)
-
-Both EWMA and Slope must independently declare secure before the detector fires. Most conservative mode.
-
 ### Parameters
 
-| Parameter | Default | Mode | Description |
-|-----------|---------|------|-------------|
-| `secure_grasp_mode` | `"ewma"` | YAML | Detection mode: `"ewma"`, `"slope"`, or `"both"` |
-| `ewma_lambda` | 0.4 | EWMA | Smoothing factor (0-1) |
-| `ewma_band_width` | 0.08 Nm | EWMA | Max deviation from EWMA |
-| `n_confirm` | 2 | EWMA | Consecutive converged steps required |
-| `slope_window_size` | 3 | Slope | Step means in regression window |
-| `slope_threshold` | 0.03 | Slope | Max |slope| for plateau |
-| `slope_max_range` | 0.15 Nm | Slope | Max range of window values (oscillation guard) |
-| `std_threshold` | 0.14 Nm | All | Max within-step std for stability |
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `ewma_lambda` | 0.4 | Smoothing factor (0-1) |
+| `ewma_band_width` | 0.08 Nm | Max deviation from EWMA |
+| `n_confirm` | 2 | Consecutive converged steps required |
+| `std_threshold` | 0.14 Nm | Max within-step std for stability |
 
 ### Integration
 
@@ -571,11 +538,11 @@ The controller calls:
 - `sms_detector_.finalize_grasp_step()` at each STEP_COMPLETE to check for convergence
 - `sms_detector_.begin_grasp_step(iteration)` when advancing to the next step
 
-All operations are O(1) per sample (O(W) per step finalization, W=3) with zero dynamic allocation, safe for the 250 Hz real-time loop.
+All operations are O(1) per sample with zero dynamic allocation, safe for the 250 Hz real-time loop.
 
 ## Grasp: Slip Detection (Directional Force Decomposition + AND-Gating)
 
-After UPLIFT (which occurs once, after the final ramp step), the controller evaluates grasp quality using directional force decomposition and rigid AND-gating across three independent boolean gates. Instead of using `wrench_norm` (the L2 norm of the full 6D wrench), the controller decomposes `O_F_ext_hat_K` into **support force** Fn = |Fz| (along the lift direction). This gives physically meaningful signals for kitting operations where slip is primarily gravity-driven.
+After UPLIFT (which occurs once, after the final ramp step), the controller evaluates grasp quality using directional force decomposition and rigid AND-gating across two independent boolean gates. Instead of using `wrench_norm` (the L2 norm of the full 6D wrench), the controller decomposes `O_F_ext_hat_K` into **support force** Fn = |Fz| (along the lift direction). This gives physically meaningful signals for kitting operations where slip is primarily gravity-driven.
 
 ### Why Fn Instead of wrench_norm
 
@@ -583,7 +550,7 @@ The controller uses `Fn = |Fz|` — the absolute z-component of the external for
 
 ### Time Windows
 
-The slip evaluation uses three time windows across the grasp-lift-hold sequence:
+The slip evaluation uses time windows across the grasp-lift-hold sequence:
 
 | Window         | Duration                | When                                          | Signal              | Purpose                     |
 | -------------- | ----------------------- | --------------------------------------------- | -------------------- | --------------------------- |
@@ -627,50 +594,35 @@ In kitting operations (horizontal approach, vertical lift), gravity-driven slip 
 
 A `dF` exceeding `slip_drop_thresh` (default 15%) means the support force dropped too much during the hold — the object is slipping.
 
-### Gate 3: Jaw Widening
-
-Gripper width increase during hold is a direct mechanical indicator of slip — if the object moves, it pushes the fingers apart. This is a secondary confirmation because: (a) it is lower bandwidth than force (gripper width updates slower than the 1 kHz force signal), (b) small slips may not produce measurable width change, but (c) when present it is a strong confirmation signal. Together with the support drop gate, it eliminates false positives where force changes come from arm dynamics rather than actual slip.
-
-```
-  dw = P95(width) - P5(width)      # percentile spread over entire hold
-
-  width_ok = (dw <= slip_width_thresh)                 # binary pass/fail
-```
-
 ### AND-Gating Verdict
 
-All three gates must pass for the grasp to be declared secure. If any gate fails, the grasp is declared slipping and the controller transitions to FAILED.
+Both gates must pass for the grasp to be declared secure. If either gate fails, the grasp is declared slipping and the controller transitions to FAILED.
 
 ```
-  secure = load_transferred AND drop_ok AND width_ok
+  secure = load_transferred AND drop_ok
 
   is_slipping = !secure
 ```
-
-This rigid AND-gating approach ensures that: (1) the object was actually picked up (Gate 1), (2) the support force has not dropped (Gate 2), and (3) the jaw width is stable (Gate 3). Each gate addresses a distinct failure mode, and all three must be satisfied simultaneously.
 
 ### Slip Detection Parameters
 
 | Parameter               | Default  | Description                                                        |
 | ----------------------- | -------- | ------------------------------------------------------------------ |
 | `slip_drop_thresh`      | 0.15     | DF_TH: maximum allowed relative support force drop (15% = fail)    |
-| `slip_width_thresh`     | 0.0005 m | W_TH: maximum allowed jaw widening P95-P5 [m] (0.5 mm = fail)     |
 | `load_transfer_min`     | 1.5 N    | Floor for load transfer threshold (lower for light objects)        |
 
 ### Example Log Output
 
-Secure grasp (all three gates pass):
+Secure grasp (both gates pass):
 
 ```
   [SLIP] Gate 1 — Load Transfer:  deltaF=2.624 N  threshold=2.000 N  (Fn_pre=3.210  sigma=0.142  Fn_early=5.834)  PASS
   [SLIP] Gate 2 — Support Drop:    dF=2.1%  threshold=15%  PASS
-  [SLIP] Gate 3 — Jaw Widening:   P95-P5=0.00020 m  threshold=0.0005 m  (P5=0.03410  P95=0.03430)  PASS
   [SLIP] Verdict: SECURE
 ```
 
 - Gate 1: `deltaF=2.624` > `max(3*0.142, 2.0)` = 2.0 → PASS
 - Gate 2: `dF=2.1%` ≤ 15% → PASS
-- Gate 3: `P95-P5=0.20 mm` ≤ 0.50 mm → PASS
 - **Verdict: SECURE → SUCCESS**
 
 Slip detected — load transferred but object slipped during hold:
@@ -678,13 +630,11 @@ Slip detected — load transferred but object slipped during hold:
 ```
   [SLIP] Gate 1 — Load Transfer:  deltaF=2.740 N  threshold=2.000 N  (Fn_pre=3.180  sigma=0.138  Fn_early=5.920)  PASS
   [SLIP] Gate 2 — Support Drop:    dF=23.8%  threshold=15%  FAIL
-  [SLIP] Gate 3 — Jaw Widening:   P95-P5=0.00140 m  threshold=0.0005 m  (P5=0.03400  P95=0.03540)  FAIL
   [SLIP] Verdict: SLIPPING
 ```
 
 - Gate 1: PASS (load transferred)
 - Gate 2: FAIL (23.8% decay >> 15% threshold)
-- Gate 3: FAIL (P95-P5 = 1.4 mm >> 0.5 mm threshold)
 - **Verdict: SLIPPING → FAILED**
 
 Failed load transfer (object not lifted):
@@ -692,7 +642,6 @@ Failed load transfer (object not lifted):
 ```
   [SLIP] Gate 1 — Load Transfer:  deltaF=0.142 N  threshold=2.000 N  (Fn_pre=3.210  sigma=0.142  Fn_early=3.352)  FAIL
   [SLIP] Gate 2 — Support Drop:    dF=1.6%  threshold=15%  PASS
-  [SLIP] Gate 3 — Jaw Widening:   P95-P5=0.00010 m  threshold=0.0005 m  (P5=0.03415  P95=0.03425)  PASS
   [SLIP] Verdict: SLIPPING
 ```
 
@@ -706,13 +655,11 @@ Failed load transfer (object not lifted):
 | ----- | ----------------- |
 | `Gate 1 — Load Transfer` | PASS/FAIL — did the object weight actually transfer to the gripper? deltaF must exceed `max(3*sigma, load_transfer_min)` |
 | `Gate 2 — Support Drop` | PASS/FAIL — has support force dropped during hold? dF% must be ≤ slip_drop_thresh |
-| `Gate 3 — Jaw Widening` | PASS/FAIL — are the jaws stable during hold? P95-P5 must be ≤ slip_width_thresh |
 | `Verdict` | SECURE (all gates pass) or SLIPPING (any gate fails) |
 
 **Quick diagnostic guide:**
 - `Gate 1: FAIL` → object not gripped or too light; increase force or lower `load_transfer_min`
 - `Gate 2: FAIL` → support force dropped during hold (object sliding down); increase force
-- `Gate 3: FAIL` → gripper opening during hold (fingers pushed apart); increase force
 
 ## Grasp: UPLIFT / DOWNLIFT Trajectory Mathematics
 
@@ -787,7 +734,7 @@ The **velocity profile** (first derivative) is:
 | Maximum uplift distance | `d ≤ 0.3 m`       | Hard clamp — any `d > 300 mm` is clamped with a warning                    |
 | Minimum lift speed      | `v ≥ 0.001 m/s`   | Hard clamp — prevents divide-by-zero in UPLIFT/downlift duration calc      |
 | Minimum uplift hold     | `t ≥ 0.5 s`       | Hard clamp — ensures W_pre ≥ 0.25 s for reliable pre-lift baseline         |
-| Maximum uplift hold     | `t ≤ 120.0 s`     | Hard clamp — prevents width sample vector from exceeding pre-allocated capacity |
+| Maximum uplift hold     | `t ≤ 120.0 s`     | Hard clamp on evaluation duration |
 | Precondition            | —                 | GRASPING requires CONTACT state                                           |
 | BASELINE interruption   | —                 | New BASELINE command restarts the full UNKNOWN → BASELINE cycle            |
 | CLOSING_COMMAND timeout | 10 s              | Transitions to FAILED if move command never starts executing               |
@@ -816,9 +763,7 @@ The **velocity profile** (first derivative) is:
 | `uplift_hold`              | double | `1.0`   | Hold time at top for evaluation: early (first half) + late (second half) windows [s] (min 0.5, max 120.0) |
 | `grasp_force_hold_time`    | double | `2.0`   | Hold at each force ramp step before advancing [s] (min 0.25). W_pre accumulated during HOLDING of last step |
 | `grasp_settle_time`        | double | `0.5`   | Settle time after each grasp command completes [s]                  |
-| `secure_grasp_mode`        | string | `"ewma"` | Secure grasp detection mode: `"ewma"`, `"slope"`, or `"both"`      |
 | `slip_drop_thresh`         | double | `0.15`   | DF_TH: max allowed relative support force drop (15% = fail)         |
-| `slip_width_thresh`        | double | `0.0005` | W_TH: max allowed jaw widening P95-P5 [m] (0.5 mm = fail)          |
 | `load_transfer_min`        | double | `1.5`    | Floor for load transfer threshold [N] (lower for light objects)     |
 | `require_logger`           | bool   | `false` | Gate commands behind logger readiness (set true when `record:=true`)|
 
@@ -925,16 +870,14 @@ Per-object command published on `/kitting_controller/state_cmd`. Any float64 par
 | `fr_grasp_speed`       | float64 | Gripper speed for ramp GraspAction [m/s] (0 = use default 0.02)                    |
 | `fr_epsilon`           | float64 | Epsilon for ramp GraspAction, inner and outer [m] (0 = use default 0.008)          |
 | `fr_slip_drop_thresh`     | float64 | DF_TH: max allowed relative support force drop (0 = use default 0.15)           |
-| `fr_slip_width_thresh`    | float64 | W_TH: max allowed jaw widening P95-P5 [m] (0 = use default 0.0005)             |
 | `fr_load_transfer_min`    | float64 | Floor for load transfer threshold [N] (0 = use default 1.5)                     |
-| `secure_grasp_mode`       | string  | Secure grasp detection: `"ewma"`, `"slope"`, or `"both"` (`""` = use YAML default) |
 | `auto_delay`           | float64 | Delay between auto transitions [s] (0 = default 5.0). Only used by `AUTO` command  |
 
 Only the parameters relevant to the command are used:
 
 - `BASELINE` uses `open_gripper` and `open_width`
 - `CLOSING` uses `closing_width` and `closing_speed` (`contact_torque_thresh` and `contact_debounce_time` are ignored — SMS-CUSUM auto-tunes detection)
-- `GRASPING` requires CONTACT state and uses all `f_*`/`fr_*` force ramp parameters plus `grasp_force_hold_time`, `grasp_settle_time`, and `secure_grasp_mode` (grasp width is always from `contact_width`; rejected if not in CONTACT or if `contact_width` is out of range `[0, max_width]`). `secure_grasp_mode` can be overridden per-trial to switch between `"ewma"`, `"slope"`, or `"both"` without restarting the controller
+- `GRASPING` requires CONTACT state and uses all `f_*`/`fr_*` force ramp parameters plus `grasp_force_hold_time` and `grasp_settle_time` (grasp width is always from `contact_width`; rejected if not in CONTACT or if `contact_width` is out of range `[0, max_width]`)
 - `AUTO` uses all of the above, plus `auto_delay`
 
 ## KittingState Message
@@ -985,7 +928,7 @@ The `franka_gripper` package is used only for action type definitions — `frank
 ## Real-Time Safety
 
 - Uses `realtime_tools::RealtimePublisher` with non-blocking `trylock()`
-- No dynamic memory allocation in `update()` — width sample vector pre-allocated in `starting()` with capacity for 120 s at 250 Hz (`kMaxWidthSamples + 1 = 30001`, the extra slot prevents a heap allocation on the edge-case tick where push_back fires simultaneously with evaluation)
+- No dynamic memory allocation in `update()`
 - No blocking operations in `update()`
 - Model queries are only called at the publish rate, not every control tick
 - Contact detection (SMS-CUSUM) uses O(1) per sample, zero dynamic allocation, only scalar arithmetic
@@ -1062,7 +1005,7 @@ The Grasp logger is written in C++ using the `rosbag::Bag` API directly and `top
 - UPLIFT/downlift orientation remains unchanged throughout the motion
 - Uplift distance is clamped to 300 mm maximum (with warning)
 - Lift speed is clamped to minimum `kMinLiftSpeed` (0.001 m/s) — prevents divide-by-zero in UPLIFT/downlift duration calculation
-- Uplift hold is clamped to maximum `kMaxUpliftHold` (120.0 s) — prevents width sample vector from exceeding pre-allocated capacity
+- Uplift hold is clamped to maximum `kMaxUpliftHold` (120.0 s)
 - SUCCESS keeps arm elevated for pick-and-place; accumulated uplift corrected automatically on next BASELINE (BASELINE prep downlift)
 - BASELINE during active force ramp clears trajectories and returns to passthrough
 - Per-command force ramp parameters override YAML defaults when non-zero

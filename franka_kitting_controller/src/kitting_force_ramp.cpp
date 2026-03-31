@@ -342,8 +342,6 @@ namespace franka_kitting_controller {
     fr_early_count_ = 0;
     fr_late_sum_ = 0.0;
     fr_late_count_ = 0;
-    fr_width_samples_.clear();
-
     current_state_.store(GraspState::EVALUATE, std::memory_order_relaxed);
     publishStateLabel("EVALUATE");
     logStateTransition("EVALUATE", "Hold + slip score evaluation");
@@ -361,9 +359,6 @@ namespace franka_kitting_controller {
     constexpr double kEpsilon = 1e-6;
 
     double elapsed = (time - fr_phase_start_time_).toSec();
-    double gw = gripper_snapshot.width;
-
-    fr_width_samples_.push_back(gw);
 
     if (elapsed < kEarlyEnd) {
       fr_early_sum_ += support_force;
@@ -377,10 +372,6 @@ namespace franka_kitting_controller {
       return;
     }
 
-    // ================================================================
-    // Hold complete — rigid AND-gating (3 gates)
-    // ================================================================
-
     double Fn_pre   = (fr_pre_count_ > 0) ? fr_pre_sum_ / fr_pre_count_ : 0.0;
     double sigma_pre = 0.0;
     if (fr_pre_count_ > 1) {
@@ -390,32 +381,14 @@ namespace franka_kitting_controller {
     double Fn_early = (fr_early_count_ > 0) ? fr_early_sum_ / fr_early_count_ : 0.0;
     double Fn_late  = (fr_late_count_ > 0)  ? fr_late_sum_ / fr_late_count_   : 0.0;
 
-    // Gate 1: Load Transfer
     double deltaF = Fn_early - Fn_pre;
     double load_thresh = std::max(3.0 * sigma_pre, rt_fr_load_transfer_min_);
     bool load_transferred = deltaF > load_thresh;
 
-    // Gate 2: Support drop
     double dF = (Fn_early - Fn_late) / std::max(Fn_early, kEpsilon);
     bool drop_ok = (dF <= rt_fr_slip_drop_thresh_);
 
-    // Gate 3: Jaw widening (P95 - P5)
-    double p5 = 0.0, p95 = 0.0, dw = 0.0;
-    int n = static_cast<int>(fr_width_samples_.size());
-    if (n >= 20) {
-      int i5  = static_cast<int>(0.05 * (n - 1));
-      int i95 = static_cast<int>(0.95 * (n - 1));
-      std::nth_element(fr_width_samples_.begin(), fr_width_samples_.begin() + i5,
-                       fr_width_samples_.end());
-      p5 = fr_width_samples_[i5];
-      std::nth_element(fr_width_samples_.begin() + i5 + 1, fr_width_samples_.begin() + i95,
-                       fr_width_samples_.end());
-      p95 = fr_width_samples_[i95];
-      dw = p95 - p5;
-    }
-    bool width_ok = (dw <= rt_fr_slip_width_thresh_);
-
-    bool is_slipping = !(load_transferred && drop_ok && width_ok);
+    bool is_slipping = !(load_transferred && drop_ok);
 
     ROS_INFO("  [EVAL] Gate 1 — Load Transfer:  deltaF=%.3f N  threshold=%.3f N  "
              "(Fn_pre=%.3f  sigma=%.3f  Fn_early=%.3f)  %s",
@@ -424,10 +397,6 @@ namespace franka_kitting_controller {
     ROS_INFO("  [EVAL] Gate 2 — Support Drop:   dF=%.1f%%  threshold=%.0f%%  %s",
              dF * 100.0, rt_fr_slip_drop_thresh_ * 100.0,
              drop_ok ? "PASS" : "FAIL");
-    ROS_INFO("  [EVAL] Gate 3 — Jaw Widening:   P95-P5=%.5f m  threshold=%.4f m  "
-             "(P5=%.5f  P95=%.5f)  %s",
-             dw, rt_fr_slip_width_thresh_, p5, p95,
-             width_ok ? "PASS" : "FAIL");
     ROS_INFO("  [EVAL] Verdict: %s", is_slipping ? "SLIPPING" : "SECURE");
 
     if (!is_slipping) {

@@ -3,7 +3,7 @@
 // Use of this source code is governed by the Apache-2.0 license, see LICENSE
 //
 // Tier 2 — State machine tests using KittingControllerTestFixture.
-// Tests tick functions, state transitions, trajectory math, and 3-gate slip detection.
+// Tests tick functions, state transitions, trajectory math, and 2-gate slip detection.
 
 #include <cmath>
 #include <vector>
@@ -28,14 +28,10 @@ TEST_F(KittingControllerTestFixture, ResetForceRampState_ClearsAll) {
   setGraspCmdSeenExecuting(true);
   setRampPhase(RampPhase::HOLDING);
   setGraspingInitialized(true);
-  widthSamples().push_back(1.0);
-  widthSamples().push_back(2.0);
-
   callResetForceRampState();
 
   EXPECT_DOUBLE_EQ(forceCurrent(), 0.0);
   EXPECT_EQ(iteration(), 0);
-  EXPECT_TRUE(widthSamples().empty());
 }
 
 // ============================================================================
@@ -150,7 +146,7 @@ TEST_F(KittingControllerTestFixture, TickUplift_TrajectoryDone) {
 }
 
 // ============================================================================
-// tickEvaluate tests — 3-gate slip detection
+// tickEvaluate tests — 2-gate slip detection
 // ============================================================================
 
 // Helper: set up EVALUATE state with pre-computed accumulator data
@@ -158,36 +154,21 @@ class EvaluateTest : public KittingControllerTestFixture {
  protected:
   void SetUpEvaluate(double fn_pre, double sigma_pre, int pre_n,
                      double fn_early, int early_n,
-                     double fn_late, int late_n,
-                     const std::vector<double>& widths = {}) {
+                     double fn_late, int late_n) {
     setCurrentState(GraspState::EVALUATE);
 
-    // Compute sum and sum_sq from mean and sigma
     double pre_sum = fn_pre * pre_n;
     double pre_sum_sq = (sigma_pre * sigma_pre + fn_pre * fn_pre) * pre_n;
     setPreAccumulators(pre_sum, pre_sum_sq, pre_n);
 
     setEarlyAccumulators(fn_early * early_n, early_n);
     setLateAccumulators(fn_late * late_n, late_n);
-
-    widthSamples().clear();
-    if (widths.empty()) {
-      // Generate stable width samples (all same value)
-      for (int i = 0; i < 250; ++i) {
-        widthSamples().push_back(0.040);
-      }
-    } else {
-      for (double w : widths) {
-        widthSamples().push_back(w);
-      }
-    }
   }
 };
 
 TEST_F(EvaluateTest, AllGatesPass_Success) {
   // Gate 1: deltaF = Fn_early - Fn_pre = 10 - 2 = 8 > max(3*0.5, 1.5) = 1.5 ✓
   // Gate 2: dF = (10 - 9.5) / 10 = 0.05 ≤ 0.15 ✓
-  // Gate 3: All widths identical → P95-P5 = 0 ≤ 0.0005 ✓
   SetUpEvaluate(/*fn_pre=*/2.0, /*sigma=*/0.5, /*pre_n=*/125,
                 /*fn_early=*/10.0, /*early_n=*/125,
                 /*fn_late=*/9.5, /*late_n=*/125);
@@ -238,35 +219,12 @@ TEST_F(EvaluateTest, Gate2Fail_SupportDrop) {
   EXPECT_EQ(currentState(), GraspState::FAILED);
 }
 
-TEST_F(EvaluateTest, Gate3Fail_JawWidening) {
-  // Gate 1 PASS, Gate 2 PASS, Gate 3 FAIL: P95 - P5 > 0.0005
-  // Create widths that spread: 50% at 0.040, 50% at 0.041 (spread = 0.001 > 0.0005)
-  std::vector<double> widths;
-  for (int i = 0; i < 125; ++i) widths.push_back(0.040);
-  for (int i = 0; i < 125; ++i) widths.push_back(0.041);
-
-  SetUpEvaluate(/*fn_pre=*/2.0, /*sigma=*/0.1, /*pre_n=*/125,
-                /*fn_early=*/10.0, /*early_n=*/125,
-                /*fn_late=*/9.8, /*late_n=*/125,
-                widths);
-
-  ros::Time phase_start(100.0);
-  setPhaseStartTime(phase_start);
-  auto g = makeDefaultGripper();
-
-  ros::Time t(101.1);
-  callTickEvaluate(t, 0.0, 5.0, g);
-
-  EXPECT_EQ(currentState(), GraspState::FAILED);
-}
-
 TEST_F(EvaluateTest, EarlyWindowAccumulates) {
   // During early window: elapsed < kEarlyEnd → should accumulate, not evaluate
   setCurrentState(GraspState::EVALUATE);
   setPreAccumulators(0.0, 0.0, 0);
   setEarlyAccumulators(0.0, 0);
   setLateAccumulators(0.0, 0);
-  widthSamples().clear();
 
   ros::Time phase_start(100.0);
   setPhaseStartTime(phase_start);
@@ -285,7 +243,6 @@ TEST_F(EvaluateTest, LateWindowAccumulates) {
   setPreAccumulators(0.0, 0.0, 0);
   setEarlyAccumulators(0.0, 0);
   setLateAccumulators(0.0, 0);
-  widthSamples().clear();
 
   ros::Time phase_start(100.0);
   setPhaseStartTime(phase_start);
@@ -561,13 +518,6 @@ TEST_F(KittingControllerTestFixture, ComputeDownliftPose_Midpoint) {
 // Constants sanity tests
 // ============================================================================
 
-TEST(ConstantsTest, WidthSamplesConsistency) {
-  // kMaxWidthSamples should be kMaxUpliftHold * kWidthSamplesPerSec
-  EXPECT_EQ(KittingStateController::kMaxWidthSamples,
-            static_cast<int>(KittingStateController::kMaxUpliftHold) *
-                KittingStateController::kWidthSamplesPerSec);
-}
-
 TEST(ConstantsTest, SafetyLimits) {
   EXPECT_GT(KittingStateController::kMaxClosingSpeed, 0.0);
   EXPECT_GT(KittingStateController::kMaxUpliftDistance, 0.0);
@@ -635,10 +585,6 @@ TEST_F(KittingControllerTestFixture, FullCycle_GraspingToSuccess) {
   setPreAccumulators(8.0 * 125, 65.0 * 125, 125);  // mean=8.0, var≈1.0
   setEarlyAccumulators(15.0 * 125, 125);
   setLateAccumulators(14.8 * 125, 125);
-  widthSamples().clear();
-  for (int i = 0; i < 250; ++i) {
-    widthSamples().push_back(0.040);  // Stable width
-  }
 
   ros::Time eval_start(102.0);
   setPhaseStartTime(eval_start);

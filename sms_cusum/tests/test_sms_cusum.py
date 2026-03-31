@@ -244,10 +244,7 @@ class TestSMSCusumSecureGrasp(unittest.TestCase):
         from python.config import SecureGraspConfig
         config = SMSCusumConfig(
             contact_stage=CusumStageConfig(k_min=0.05, h=0.8, debounce_count=5),
-            secure_grasp_stage=SecureGraspConfig(
-                mode="ewma",
-                n_confirm=2,
-            ),
+            secure_grasp_stage=SecureGraspConfig(n_confirm=2),
             baseline_init_samples=20,
         )
         return SMSCusum(config)

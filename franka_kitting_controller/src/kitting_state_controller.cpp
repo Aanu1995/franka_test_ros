@@ -26,12 +26,10 @@ namespace franka_kitting_controller {
   constexpr double KittingStateController::kMaxClosingSpeed;
   constexpr double KittingStateController::kMaxUpliftDistance;
   constexpr double KittingStateController::kMinUpliftHold;
-  constexpr int    KittingStateController::kWidthSamplesPerSec;
   constexpr double KittingStateController::kGraspSettleDelay;
   constexpr double KittingStateController::kGraspTimeout;
   constexpr double KittingStateController::kMaxUpliftHold;
   constexpr double KittingStateController::kMinLiftSpeed;
-  constexpr int    KittingStateController::kMaxWidthSamples;
   constexpr int    KittingStateController::kActionTimeoutSec;
   constexpr double KittingStateController::kBaselineSettleTime;
   constexpr double KittingStateController::kClosingCmdTimeout;
@@ -175,29 +173,12 @@ namespace franka_kitting_controller {
     node_handle.param("grasp_speed", fr_grasp_speed_, 0.02);
     node_handle.param("epsilon", fr_epsilon_, 0.008);
     node_handle.param("slip_drop_thresh", fr_slip_drop_thresh_, 0.15);
-    node_handle.param("slip_width_thresh", fr_slip_width_thresh_, 0.0005);
+
     node_handle.param("load_transfer_min", fr_load_transfer_min_, 1.5);
     node_handle.param("grasp_force_hold_time", fr_grasp_force_hold_time_, 2.0);
     node_handle.param("grasp_settle_time", fr_grasp_settle_time_, 0.5);
 
-    // Secure grasp detection mode: "ewma", "slope", or "both"
-    {
-      std::string sg_mode_str;
-      node_handle.param<std::string>("secure_grasp_mode", sg_mode_str, "ewma");
-      if (sg_mode_str == "slope") {
-        fr_secure_grasp_mode_ = sms_cusum::SecureGraspMode::SLOPE;
-      } else if (sg_mode_str == "both") {
-        fr_secure_grasp_mode_ = sms_cusum::SecureGraspMode::BOTH;
-      } else if (sg_mode_str == "ewma") {
-        fr_secure_grasp_mode_ = sms_cusum::SecureGraspMode::EWMA;
-      } else {
-        ROS_WARN("KittingStateController: unrecognized secure_grasp_mode '%s', using 'ewma'",
-                sg_mode_str.c_str());
-        fr_secure_grasp_mode_ = sms_cusum::SecureGraspMode::EWMA;
-      }
-      sms_detector_.mutable_config().secure_grasp_stage.mode = fr_secure_grasp_mode_;
-      ROS_INFO("KittingStateController: secure_grasp_mode = %s", sg_mode_str.c_str());
-    }
+
 
     if (fr_f_min_ <= 0.0) {
       ROS_ERROR("KittingStateController: f_min must be positive (got %.2f)", fr_f_min_);
@@ -252,7 +233,6 @@ namespace franka_kitting_controller {
                     << " speed=" << fr_lift_speed_ << " eval_hold=" << fr_uplift_hold_
                     << " | grasp: speed=" << fr_grasp_speed_ << " eps=" << fr_epsilon_
                     << " | eval: DF_TH=" << fr_slip_drop_thresh_
-                    << " W_TH=" << fr_slip_width_thresh_
                     << " load_min=" << fr_load_transfer_min_);
 
     if (!node_handle.getParam("robot_ip", robot_ip_)) {
@@ -377,7 +357,6 @@ namespace franka_kitting_controller {
     unknown_settle_started_ = false;
 
     resetForceRampState();
-    fr_width_samples_.reserve(kMaxWidthSamples + 1);
     accumulated_uplift_ = 0.0;
 
     logStateTransition("START", "Controller running");
@@ -395,7 +374,6 @@ namespace franka_kitting_controller {
     fr_grasp_cmd_seen_executing_ = false;
     fr_grasping_phase_initialized_ = false;
     fr_ramp_phase_ = RampPhase::COMMAND_SENT;
-    fr_width_samples_.clear();
     fr_holding_sample_count_ = 0;
     fr_holding_late_start_ = 0;
     // Clear slip evaluation accumulators (defensive — re-initialized before use)
@@ -490,7 +468,6 @@ namespace franka_kitting_controller {
       rt_fr_grasp_speed_ = staging_fr_grasp_speed_;
       rt_fr_epsilon_ = staging_fr_epsilon_;
       rt_fr_slip_drop_thresh_ = staging_fr_slip_drop_thresh_;
-      rt_fr_slip_width_thresh_ = staging_fr_slip_width_thresh_;
       rt_fr_load_transfer_min_ = staging_fr_load_transfer_min_;
       rt_fr_grasp_force_hold_time_ = staging_fr_grasp_force_hold_time_;
       rt_fr_grasp_settle_time_ = staging_fr_grasp_settle_time_;

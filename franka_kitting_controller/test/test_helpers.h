@@ -167,14 +167,9 @@ class KittingControllerTestFixture : public ::testing::Test {
     controller_.rt_fr_grasp_speed_ = 0.02;
     controller_.rt_fr_epsilon_ = 0.008;
     controller_.rt_fr_slip_drop_thresh_ = 0.15;
-    controller_.rt_fr_slip_width_thresh_ = 0.0005;
     controller_.rt_fr_load_transfer_min_ = 1.5;
     controller_.rt_fr_grasp_force_hold_time_ = 2.0;
     controller_.rt_fr_grasp_settle_time_ = 0.5;
-
-    // Pre-allocate width samples vector (mimics starting())
-    controller_.fr_width_samples_.reserve(
-        KittingStateController::kMaxWidthSamples + 1);
   }
 
   // --- Accessor / mutator helpers ---
@@ -198,10 +193,8 @@ class KittingControllerTestFixture : public ::testing::Test {
     controller_.rt_fr_uplift_hold_ = uplift_hold;
   }
 
-  void setSlipThresholds(double drop_thresh, double width_thresh,
-                         double load_transfer_min) {
+  void setSlipThresholds(double drop_thresh, double load_transfer_min) {
     controller_.rt_fr_slip_drop_thresh_ = drop_thresh;
-    controller_.rt_fr_slip_width_thresh_ = width_thresh;
     controller_.rt_fr_load_transfer_min_ = load_transfer_min;
   }
 
@@ -298,8 +291,6 @@ class KittingControllerTestFixture : public ::testing::Test {
     controller_.fr_late_sum_ = sum;
     controller_.fr_late_count_ = count;
   }
-
-  std::vector<double>& widthSamples() { return controller_.fr_width_samples_; }
 
   double accumulatedUplift() const { return controller_.accumulated_uplift_; }
 

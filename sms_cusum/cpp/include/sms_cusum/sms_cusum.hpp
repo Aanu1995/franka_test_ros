@@ -177,7 +177,6 @@ public:
     int32_t event_count() const noexcept { return event_count_; }
     const DetectionEvent& event(int32_t i) const noexcept { return events_[i]; }
     const SMSCusumConfig& config() const noexcept { return config_; }
-    SMSCusumConfig& mutable_config() noexcept { return config_; }
 
     // ------------------------------------------------------------------
     // State transition API

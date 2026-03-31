@@ -154,28 +154,9 @@ namespace franka_kitting_controller {
     staging_fr_grasp_speed_       = resolveParam(msg->fr_grasp_speed, fr_grasp_speed_);
     staging_fr_epsilon_           = resolveParam(msg->fr_epsilon, fr_epsilon_);
     staging_fr_slip_drop_thresh_     = resolveParam(msg->fr_slip_drop_thresh, fr_slip_drop_thresh_);
-    staging_fr_slip_width_thresh_    = resolveParam(msg->fr_slip_width_thresh, fr_slip_width_thresh_);
     staging_fr_load_transfer_min_    = resolveParam(msg->fr_load_transfer_min, fr_load_transfer_min_);
     staging_fr_grasp_force_hold_time_ = resolveParam(msg->grasp_force_hold_time, fr_grasp_force_hold_time_);
     staging_fr_grasp_settle_time_     = resolveParam(msg->grasp_settle_time, fr_grasp_settle_time_);
-
-    {
-      auto& sg_cfg = sms_detector_.mutable_config().secure_grasp_stage;
-      sg_cfg.mode = fr_secure_grasp_mode_;
-      if (!msg->secure_grasp_mode.empty()) {
-        if (msg->secure_grasp_mode == "slope") {
-          sg_cfg.mode = sms_cusum::SecureGraspMode::SLOPE;
-        } else if (msg->secure_grasp_mode == "both") {
-          sg_cfg.mode = sms_cusum::SecureGraspMode::BOTH;
-        } else if (msg->secure_grasp_mode == "ewma") {
-          sg_cfg.mode = sms_cusum::SecureGraspMode::EWMA;
-        } else {
-          ROS_WARN("    unrecognized secure_grasp_mode '%s', keeping default",
-                  msg->secure_grasp_mode.c_str());
-        }
-        ROS_INFO("    secure_grasp_mode = %s", msg->secure_grasp_mode.c_str());
-      }
-    }
 
     if (staging_fr_uplift_distance_ > kMaxUpliftDistance) {
       ROS_WARN("KittingStateController: fr_uplift_distance %.4f exceeds max %.4f, clamping",
@@ -225,9 +206,8 @@ namespace franka_kitting_controller {
             staging_fr_uplift_distance_, staging_fr_lift_speed_, staging_fr_uplift_hold_);
     ROS_INFO("    grasp: speed=%.4f m/s  eps=%.4f m",
             staging_fr_grasp_speed_, staging_fr_epsilon_);
-    ROS_INFO("    eval: DF_TH=%.3f  W_TH=%.4f m  load_min=%.2f N",
-            staging_fr_slip_drop_thresh_, staging_fr_slip_width_thresh_,
-            staging_fr_load_transfer_min_);
+    ROS_INFO("    eval: DF_TH=%.3f  load_min=%.2f N",
+            staging_fr_slip_drop_thresh_, staging_fr_load_transfer_min_);
   }
 
   void KittingStateController::handleAutoCmd(
@@ -315,13 +295,12 @@ namespace franka_kitting_controller {
     ROS_INFO("KittingStateController: AUTO -> forwarding to GRASPING"
             " (f_min=%.1f, f_max=%.1f, f_step=%.1f, uplift_dist=%.4f,"
             " uplift_hold=%.2f, lift_speed=%.4f, grasp_speed=%.4f,"
-            " eps=%.4f, DF_TH=%.3f, W_TH=%.4f, load_min=%.2f)",
+            " eps=%.4f, DF_TH=%.3f, load_min=%.2f)",
             auto_cmd_.f_min, auto_cmd_.f_max, auto_cmd_.f_step,
             auto_cmd_.fr_uplift_distance, auto_cmd_.fr_uplift_hold,
             auto_cmd_.fr_lift_speed, auto_cmd_.fr_grasp_speed,
             auto_cmd_.fr_epsilon,
-            auto_cmd_.fr_slip_drop_thresh, auto_cmd_.fr_slip_width_thresh,
-            auto_cmd_.fr_load_transfer_min);
+            auto_cmd_.fr_slip_drop_thresh, auto_cmd_.fr_load_transfer_min);
     handleGraspingCmd(msg);
     auto_mode_.store(false, std::memory_order_relaxed);
 

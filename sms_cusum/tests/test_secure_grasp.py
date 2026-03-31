@@ -1,4 +1,4 @@
-"""Unit tests for the secure grasp convergence detector."""
+"""Unit tests for the secure grasp convergence detector (EWMA band)."""
 
 import sys
 import os
@@ -10,10 +10,6 @@ from python.secure_grasp import SecureGraspDetector, SecureGraspResult
 from python.config import SecureGraspConfig
 
 
-# ============================================================================
-# Real trial data: step-level mean_tau_ext_norm and std_tau_ext_norm
-# from all 29 trials in kitting_bags 3.
-# ============================================================================
 TRIAL_DATA = {
     "triangle1_t1": {"means": [1.0913, 0.9961, 1.2003, 1.2125, 1.1985, 1.2037, 1.1929], "stds": [0.1468, 0.1095, 0.1057, 0.0759, 0.0788, 0.0836, 0.0773]},
     "triangle1_t2": {"means": [1.1201, 1.2745, 1.2851, 1.1025, 1.3052, 1.3136, 1.1106], "stds": [0.1645, 0.0861, 0.0495, 0.0945, 0.0853, 0.0492, 0.1022]},
@@ -47,29 +43,23 @@ TRIAL_DATA = {
 }
 
 
-def _make_detector(mode="ewma", **kwargs) -> SecureGraspDetector:
-    config = SecureGraspConfig(mode=mode, **kwargs)
+def _make_detector(**kwargs) -> SecureGraspDetector:
+    config = SecureGraspConfig(**kwargs)
     return SecureGraspDetector(config)
 
 
 def _feed_step(det, step_index, mu, std=0.01, n_samples=100):
-    """Simulate a GRASP step with given mean and noise."""
     det.begin_step(step_index)
     rng = random.Random(42 + step_index)
     for _ in range(n_samples):
-        sample = mu + rng.gauss(0, std)
-        det.update(sample)
+        det.update(mu + rng.gauss(0, std))
     return det.finalize_step()
 
 
 def _run_trial_means(det, means, stds):
-    """Feed step-level means/stds through a detector.
-    Returns (detected, step_detected_1indexed).
-    """
     det.reset()
     for i, (mu, std) in enumerate(zip(means, stds)):
         det.begin_step(i)
-        # Simulate samples with given mean/std
         rng = random.Random(42 + i)
         for _ in range(125):
             det.update(mu + rng.gauss(0, std))
@@ -79,47 +69,39 @@ def _run_trial_means(det, means, stds):
     return False, len(means)
 
 
-class TestEWMAMode(unittest.TestCase):
-    """Tests for EWMA band detection mode."""
+class TestEWMA(unittest.TestCase):
 
     def test_no_trigger_on_diverging_signal(self):
-        """Diverging means should never trigger."""
-        det = _make_detector(mode="ewma")
+        det = _make_detector()
         det.reset()
         means = [1.0, 1.2, 1.5, 1.1, 0.8, 1.3]
         for i, mu in enumerate(means):
             det.begin_step(i)
             for _ in range(100):
                 det.update(mu)
-            result = det.finalize_step()
-            self.assertFalse(result.secure)
+            self.assertFalse(det.finalize_step().secure)
 
     def test_trigger_on_converged_signal(self):
-        """Converged means should trigger."""
-        det = _make_detector(mode="ewma")
+        det = _make_detector()
         det.reset()
-        # Step 0: initial
         _feed_step(det, 0, 1.2, std=0.05)
-        # Step 1: close
-        r1 = _feed_step(det, 1, 1.21, std=0.05)
-        # Step 2: close (streak=2 -> SECURE)
-        r2 = _feed_step(det, 2, 1.215, std=0.05)
+        _feed_step(det, 1, 1.21, std=0.05)
+        _feed_step(det, 2, 1.215, std=0.05)
         self.assertTrue(det.secure)
 
     def test_high_noise_blocks(self):
-        """High within-step std should block detection."""
-        det = _make_detector(mode="ewma", std_threshold=0.14)
+        det = _make_detector(std_threshold=0.14)
         det.reset()
         rng = random.Random(99)
         for i in range(5):
             det.begin_step(i)
             for _ in range(100):
                 det.update(1.0 + rng.gauss(0, 0.2))
-            r = det.finalize_step()
+            det.finalize_step()
         self.assertFalse(det.secure)
 
     def test_reset_clears_all_state(self):
-        det = _make_detector(mode="ewma", n_confirm=1)
+        det = _make_detector(n_confirm=1)
         det.reset()
         _feed_step(det, 0, 1.0)
         _feed_step(det, 1, 1.01)
@@ -129,16 +111,15 @@ class TestEWMAMode(unittest.TestCase):
         self.assertEqual(det.converge_streak, 0)
 
     def test_secure_is_latched(self):
-        det = _make_detector(mode="ewma", n_confirm=1)
+        det = _make_detector(n_confirm=1)
         det.reset()
         _feed_step(det, 0, 1.0)
         _feed_step(det, 1, 1.01)
         self.assertTrue(det.secure)
-        r = det.finalize_step()
-        self.assertTrue(r.secure)
+        self.assertTrue(det.finalize_step().secure)
 
     def test_step_zero_skips_comparison(self):
-        det = _make_detector(mode="ewma")
+        det = _make_detector()
         det.reset()
         det.begin_step(0)
         for _ in range(100):
@@ -147,185 +128,41 @@ class TestEWMAMode(unittest.TestCase):
         self.assertFalse(r.secure)
 
     def test_zero_samples_returns_safe(self):
-        det = _make_detector(mode="ewma")
+        det = _make_detector()
         det.begin_step(0)
         r = det.finalize_step()
         self.assertFalse(r.secure)
 
-
-class TestSlopeMode(unittest.TestCase):
-    """Tests for slope-based plateau detection mode."""
-
-    def test_no_trigger_on_diverging_signal(self):
-        det = _make_detector(mode="slope", slope_window_size=3, slope_threshold=0.03)
+    def test_large_oscillation_no_trigger(self):
+        det = _make_detector()
         det.reset()
-        means = [1.0, 1.2, 1.5, 1.8, 2.1]
-        for i, mu in enumerate(means):
-            det.begin_step(i)
-            for _ in range(100):
-                det.update(mu)
-            r = det.finalize_step()
-            self.assertFalse(r.secure)
-
-    def test_trigger_on_flat_signal(self):
-        det = _make_detector(mode="slope", slope_window_size=3, slope_threshold=0.03)
-        det.reset()
-        means = [1.2, 1.21, 1.19]
-        for i, mu in enumerate(means):
-            _feed_step(det, i, mu, std=0.05)
-        self.assertTrue(det.secure)
-
-    def test_needs_window_to_fill(self):
-        det = _make_detector(mode="slope", slope_window_size=3)
-        det.reset()
-        _feed_step(det, 0, 1.0)
-        self.assertFalse(det.secure)
-        _feed_step(det, 1, 1.0)
-        self.assertFalse(det.secure)
-
-    def test_high_noise_blocks(self):
-        det = _make_detector(mode="slope", std_threshold=0.14)
-        det.reset()
-        rng = random.Random(99)
-        for i in range(5):
-            det.begin_step(i)
-            for _ in range(100):
-                det.update(1.0 + rng.gauss(0, 0.2))
-            det.finalize_step()
-        self.assertFalse(det.secure)
-
-
-class TestBothMode(unittest.TestCase):
-    """Tests for AND-gated BOTH mode."""
-
-    def test_needs_both_to_agree(self):
-        det = _make_detector(mode="both", n_confirm=1, slope_window_size=3)
-        det.reset()
-        # Flat signal that should trigger both
-        _feed_step(det, 0, 1.2, std=0.05)
-        _feed_step(det, 1, 1.21, std=0.05)
-        r = _feed_step(det, 2, 1.205, std=0.05)
-        self.assertTrue(det.secure)
-
-    def test_diverging_blocks_both(self):
-        det = _make_detector(mode="both")
-        det.reset()
-        means = [1.0, 1.2, 1.5, 1.1, 0.8]
-        for i, mu in enumerate(means):
-            det.begin_step(i)
-            for _ in range(100):
-                det.update(mu)
-            det.finalize_step()
-        self.assertFalse(det.secure)
-
-
-class TestEWMAAllTrials(unittest.TestCase):
-    """EWMA mode must detect all 29 trials from kitting_bags 3."""
-
-    def test_ewma_detects_all_29_trials(self):
-        detected = 0
-        for name, data in TRIAL_DATA.items():
-            det = _make_detector(mode="ewma")
-            found, step = _run_trial_means(det, data["means"], data["stds"])
-            if found:
-                detected += 1
-            else:
-                print(f"  EWMA missed: {name}")
-        self.assertEqual(detected, 29, f"EWMA detected {detected}/29 trials")
-
-
-class TestSlopeAllTrials(unittest.TestCase):
-    """Slope mode must detect all 29 trials from kitting_bags 3."""
-
-    def test_slope_detects_all_29_trials(self):
-        detected = 0
-        for name, data in TRIAL_DATA.items():
-            det = _make_detector(mode="slope")
-            found, step = _run_trial_means(det, data["means"], data["stds"])
-            if found:
-                detected += 1
-            else:
-                print(f"  Slope missed: {name}")
-        # Slope may miss highly oscillatory trials (triangle1_t2, bigCircle_t6)
-        self.assertGreaterEqual(detected, 27, f"Slope detected {detected}/29 trials")
-
-
-class TestBothAllTrials(unittest.TestCase):
-    """Both mode should detect most trials (may be slightly more conservative)."""
-
-    def test_both_detects_most_trials(self):
-        detected = 0
-        for name, data in TRIAL_DATA.items():
-            det = _make_detector(mode="both")
-            found, step = _run_trial_means(det, data["means"], data["stds"])
-            if found:
-                detected += 1
-        # Both mode is AND-gated, may miss a few
-        self.assertGreaterEqual(detected, 27, f"Both mode detected {detected}/29")
-
-
-class TestSafetyPatterns(unittest.TestCase):
-    """Ensure dangerous patterns never trigger in any mode."""
-
-    def _assert_no_trigger(self, mode, means, stds=None):
-        det = _make_detector(mode=mode)
-        det.reset()
-        if stds is None:
-            stds = [0.05] * len(means)
-        for i, (mu, std) in enumerate(zip(means, stds)):
-            _feed_step(det, i, mu, std=std)
-        self.assertFalse(det.secure, f"{mode} falsely triggered on {means}")
-
-    def test_monotonically_increasing(self):
-        means = [1.0, 1.1, 1.2, 1.3, 1.4, 1.5]
-        for mode in ("ewma", "slope", "both"):
-            self._assert_no_trigger(mode, means)
-
-    def test_large_oscillation(self):
         means = [1.0, 1.3, 1.0, 1.3, 1.0, 1.3]
-        for mode in ("ewma", "slope", "both"):
-            self._assert_no_trigger(mode, means)
-
-
-class TestBothModePartialTrigger(unittest.TestCase):
-    """AND-gate: one sub-detector fires but not the other."""
-
-    def test_ewma_fires_slope_does_not(self):
-        """EWMA converges but slope sees a trend — both mode should NOT fire."""
-        det = _make_detector(mode="both", n_confirm=2, slope_window_size=3, slope_threshold=0.01)
-        det.reset()
-        # Upward trending means: EWMA adapts (low dev), but slope is positive
-        means = [1.0, 1.05, 1.10, 1.15, 1.20]
         for i, mu in enumerate(means):
             _feed_step(det, i, mu, std=0.05)
         self.assertFalse(det.secure)
 
-    def test_slope_fires_ewma_does_not(self):
-        """Slope is flat but EWMA sees large deviation — both mode should NOT fire."""
-        det = _make_detector(mode="both", n_confirm=2,
-                             ewma_band_width=0.01)  # very tight band
+    def test_monotonically_increasing_no_trigger(self):
+        det = _make_detector()
         det.reset()
-        # Flat with some noise: slope triggers but EWMA band too tight
-        means = [1.0, 1.05, 1.0, 1.05, 1.0]
+        means = [1.0, 1.1, 1.2, 1.3, 1.4, 1.5]
         for i, mu in enumerate(means):
             _feed_step(det, i, mu, std=0.05)
         self.assertFalse(det.secure)
+
+
+class TestAllTrials(unittest.TestCase):
+
+    def test_detects_all_29_trials(self):
+        detected = 0
+        for name, data in TRIAL_DATA.items():
+            det = _make_detector()
+            found, step = _run_trial_means(det, data["means"], data["stds"])
+            if found:
+                detected += 1
+        self.assertEqual(detected, 29, f"Detected {detected}/29 trials")
 
 
 class TestConfigValidation(unittest.TestCase):
-    """Config validation catches invalid parameters."""
-
-    def test_invalid_mode_raises(self):
-        with self.assertRaises(ValueError):
-            SecureGraspConfig(mode="invalid")
-
-    def test_uppercase_mode_raises(self):
-        with self.assertRaises(ValueError):
-            SecureGraspConfig(mode="EWMA")
-
-    def test_slope_window_too_small_raises(self):
-        with self.assertRaises(ValueError):
-            SecureGraspConfig(slope_window_size=1)
 
     def test_n_confirm_zero_raises(self):
         with self.assertRaises(ValueError):
@@ -338,25 +175,8 @@ class TestConfigValidation(unittest.TestCase):
             SecureGraspConfig(ewma_lambda=1.5)
 
 
-class TestSetConfig(unittest.TestCase):
-    """set_config() properly propagates mode changes."""
-
-    def test_mode_change_via_set_config(self):
-        det = _make_detector(mode="ewma")
-        det.reset()
-        _feed_step(det, 0, 1.0)
-        _feed_step(det, 1, 1.01)
-        _feed_step(det, 2, 1.005)
-        self.assertTrue(det.secure)
-
-        # Switch to slope mode and reset
-        new_config = SecureGraspConfig(mode="slope")
-        det.set_config(new_config)
-        self.assertFalse(det.secure)
-        self.assertEqual(det.step_index, 0)
-
-
 class TestUsesSlots(unittest.TestCase):
+
     def test_uses_slots(self):
         det = _make_detector()
         self.assertTrue(hasattr(SecureGraspDetector, '__slots__'))

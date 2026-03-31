@@ -62,7 +62,7 @@ namespace franka_kitting_controller {
     CONTACT,            // Gripper stopped — contact confirmed
     GRASPING,     // Multi-step force ramp (f_min→f_max), object on table. Published as GRASP_1..GRASP_N
     UPLIFT,       // Cosine-smoothed micro-lift trajectory (single pass after ramp)
-    EVALUATE,     // Hold + 3-gate slip evaluation
+    EVALUATE,     // Hold + 2-gate slip evaluation
     SUCCESS,      // Stable grasp confirmed
     FAILED        // Grasp failed (no contact, timeout, slip, or max force)
   };
@@ -229,11 +229,9 @@ namespace franka_kitting_controller {
     double fr_grasp_speed_{0.02};
     double fr_epsilon_{0.008};
     double fr_slip_drop_thresh_{0.15};
-    double fr_slip_width_thresh_{0.0005};
     double fr_load_transfer_min_{1.5};
     double fr_grasp_force_hold_time_{2.0};
     double fr_grasp_settle_time_{0.5};
-    sms_cusum::SecureGraspMode fr_secure_grasp_mode_{sms_cusum::SecureGraspMode::EWMA};
 
     // RT-local copies (snapshotted at GRASPING entry)
     double rt_fr_f_min_{3.0};
@@ -245,7 +243,6 @@ namespace franka_kitting_controller {
     double rt_fr_grasp_speed_{0.02};
     double rt_fr_epsilon_{0.008};
     double rt_fr_slip_drop_thresh_{0.15};
-    double rt_fr_slip_width_thresh_{0.0005};
     double rt_fr_load_transfer_min_{1.5};
     double rt_fr_grasp_force_hold_time_{2.0};
     double rt_fr_grasp_settle_time_{0.5};
@@ -260,7 +257,6 @@ namespace franka_kitting_controller {
     double staging_fr_grasp_speed_{0.02};
     double staging_fr_epsilon_{0.008};
     double staging_fr_slip_drop_thresh_{0.15};
-    double staging_fr_slip_width_thresh_{0.0005};
     double staging_fr_load_transfer_min_{1.5};
     double staging_fr_grasp_force_hold_time_{2.0};
     double staging_fr_grasp_settle_time_{0.5};
@@ -289,7 +285,6 @@ namespace franka_kitting_controller {
     int    fr_early_count_{0};
     double fr_late_sum_{0.0};
     int    fr_late_count_{0};
-    std::vector<double> fr_width_samples_;
     double accumulated_uplift_{0.0};
 
     // Deferred grasp (RT → read thread → command thread)
@@ -305,8 +300,6 @@ namespace franka_kitting_controller {
     static constexpr double kMinUpliftHold{0.5};
     static constexpr double kMaxUpliftHold{120.0};
     static constexpr double kMinLiftSpeed{0.001};
-    static constexpr int kWidthSamplesPerSec{250};
-    static constexpr int kMaxWidthSamples{30000};
     static constexpr int kActionTimeoutSec{30};
     static constexpr double kBaselineSettleTime{2.0};
     static constexpr double kClosingCmdTimeout{10.0};

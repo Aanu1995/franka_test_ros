@@ -30,12 +30,10 @@ kitting_state_controller:
   f_max: 70.0 # [N] Maximum force for the final ramp step
   grasp_force_hold_time: 2.0  # [s] Hold at each force step before advancing (clamped to min 0.25)
   grasp_settle_time: 0.5      # [s] Wait after each grasp command completes for gripper to stabilize
-  secure_grasp_mode: "ewma"   # Secure grasp detection: "ewma", "slope", or "both"
   uplift_distance: 0.010 # [m] Micro-uplift distance after final ramp step
   lift_speed: 0.01 # [m/s] Lift speed for final UPLIFT (clamped to min 0.001)
   uplift_hold: 1.0  # [s] Evaluation hold at top; early + late windows (clamped to 0.5–120.0)
   slip_drop_thresh: 0.15    # DF_TH: max allowed relative support force drop (15% = fail)
-  slip_width_thresh: 0.0005 # [m] W_TH: max allowed jaw widening P95-P5 (0.5mm = fail)
   load_transfer_min: 1.5    # [N] Minimum load transfer threshold (lighter objects need lower value)
 
   # Recording / Logger parameters (used by launch file, see kitting_state_controller.launch)

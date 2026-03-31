@@ -7,8 +7,7 @@ triangle, triangle4, triangle6) with baseline noise sigma 0.031-0.067 Nm
 and contact drop magnitudes 0.13-0.75 Nm.
 
 Secure grasp parameters derived from kitting_bags 3 trials across 7 object
-types (29 trials total). Two detection modes available: EWMA band and
-slope-based plateau detection.
+types (29 trials total) using EWMA band detection.
 """
 
 from dataclasses import dataclass, field
@@ -45,66 +44,30 @@ class CusumStageConfig:
 
 @dataclass
 class SecureGraspConfig:
-    """Configuration for secure grasp convergence detection.
+    """Configuration for secure grasp convergence detection (EWMA band).
 
-    Detects when increasing grip force no longer changes the steady-state
-    tau_ext_norm, indicating the object is fully compressed and the grasp
-    is secure.
-
-    Three modes are available, selectable via the ``mode`` parameter:
-
-    - ``"ewma"``: EWMA band detection. Tracks an exponentially weighted
-      moving average of step means and checks if new means stay within
-      ±band_width of the EWMA. Fast, adaptive.
-    - ``"slope"``: Slope-based plateau detection. Fits a linear regression
-      to the last W step means and checks if |slope| ≈ 0. Detects flat
-      trends regardless of absolute level.
-    - ``"both"``: AND-gated combination — both EWMA and Slope must
-      independently declare secure before the detector fires.
+    Tracks an exponentially weighted moving average of step-level settled
+    means during the force ramp. Fires when new means stay within
+    +/-band_width of the EWMA for n_confirm consecutive steps.
 
     Parameters
     ----------
-    mode : str
-        Detection mode: ``"ewma"``, ``"slope"``, or ``"both"``.
     ewma_lambda : float
-        EWMA smoothing factor (0–1). Higher = more weight on current step.
+        EWMA smoothing factor (0-1). Higher = more weight on current step.
     ewma_band_width : float
-        Maximum |μ_late - EWMA| (Nm) for EWMA convergence.
+        Maximum |mu_late - EWMA| (Nm) for convergence.
     n_confirm : int
-        Consecutive converged steps required for EWMA mode.
-    slope_window_size : int
-        Number of recent step means used for slope regression.
-    slope_threshold : float
-        Maximum |slope| for plateau detection.
-    slope_max_range : float
-        Maximum (max - min) of values in the slope window. Guards against
-        oscillating signals where slope is near zero but amplitude is large.
+        Consecutive converged steps required before declaring secure.
     std_threshold : float
-        Maximum σ_late (Nm) for within-step signal stability.
-        Shared across all modes.
+        Maximum sigma_late (Nm) for within-step signal stability.
     """
 
-    mode: str = "ewma"
     ewma_lambda: float = 0.4
     ewma_band_width: float = 0.08
     n_confirm: int = 2
-    slope_window_size: int = 3
-    slope_threshold: float = 0.03
-    slope_max_range: float = 0.15
     std_threshold: float = 0.14
 
     def __post_init__(self) -> None:
-        valid_modes = ("ewma", "slope", "both")
-        if self.mode not in valid_modes:
-            raise ValueError(
-                f"SecureGraspConfig.mode must be one of {valid_modes}, "
-                f"got {self.mode!r}"
-            )
-        if not (2 <= self.slope_window_size <= 8):
-            raise ValueError(
-                f"SecureGraspConfig.slope_window_size must be in [2, 8], "
-                f"got {self.slope_window_size}"
-            )
         if self.n_confirm < 1:
             raise ValueError(
                 f"SecureGraspConfig.n_confirm must be >= 1, "
@@ -131,20 +94,15 @@ class SMSCusumConfig:
     ----------
     contact_stage : CusumStageConfig
         CUSUM parameters for detecting initial contact (CLOSING -> CONTACT).
-        Tuned for detecting negative mean shifts in tau_ext_norm during
-        gripper closure.
     secure_grasp_stage : SecureGraspConfig
-        Parameters for detecting secure grasp convergence (GRASPING -> SECURE_GRASP).
-        Monitors tau_ext_norm mean convergence across consecutive force ramp steps.
+        EWMA parameters for detecting secure grasp (GRASPING -> SECURE_GRASP).
     baseline_init_samples : int
         Number of samples to collect for initial baseline mean and sigma.
         At 250 Hz, 50 samples = 0.2 s.
     baseline_alpha : float
         EMA smoothing factor for baseline tracking during FREE_MOTION.
-        Smaller = smoother (slower adaptation). Time constant = 1/alpha samples.
     sample_rate : float
-        Expected sample rate in Hz (for diagnostic reporting only,
-        does not affect algorithm behavior).
+        Expected sample rate in Hz (for diagnostic reporting only).
     """
 
     contact_stage: CusumStageConfig = field(default_factory=lambda: CusumStageConfig(
