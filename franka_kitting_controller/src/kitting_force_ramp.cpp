@@ -252,19 +252,25 @@ namespace franka_kitting_controller {
 
       case RampPhase::STEP_COMPLETE: {
         auto sg_result = sms_detector_.finalize_grasp_step();
+        bool fixed_mode = rt_fr_fixed_grasp_steps_ > 0;
+        bool fixed_reached = fixed_mode &&
+                             ((fr_iteration_ + 1) >= rt_fr_fixed_grasp_steps_);
+
         if (sg_result.detected) {
-          ROS_INFO("    GRASP_%d: SECURE_GRASP detected: d_mu=%.4f std=%.4f",
+          ROS_INFO("    GRASP_%d: SECURE_GRASP detected: d_mu=%.4f std=%.4f%s",
                   fr_iteration_ + 1,
                   sg_result.event.baseline_mean,
-                  sg_result.event.baseline_sigma);
+                  sg_result.event.baseline_sigma,
+                  fixed_mode ? " (ignored — fixed_grasp_steps active)" : "");
         }
-        bool fixed_override = (rt_fr_fixed_grasp_steps_ > 0) &&
-                              ((fr_iteration_ + 1) >= rt_fr_fixed_grasp_steps_);
-        if (fixed_override && !sg_result.detected) {
-          ROS_INFO("    GRASP_%d: fixed_grasp_steps=%d reached — declaring secure (override)",
+        if (fixed_reached) {
+          ROS_INFO("    GRASP_%d: fixed_grasp_steps=%d reached — declaring secure",
                   fr_iteration_ + 1, rt_fr_fixed_grasp_steps_);
         }
-        bool secure = sg_result.detected || fixed_override;
+
+        // When fixed_grasp_steps is active, only the step count decides;
+        // the algorithm's secure grasp detection is ignored.
+        bool secure = fixed_mode ? fixed_reached : sg_result.detected;
         bool reached_f_max = fr_f_current_ >= rt_fr_f_max_;
 
         if (reached_f_max && !secure) {

@@ -370,6 +370,186 @@ class KittingControllerTestFixture : public ::testing::Test {
     return controller_.computeDownliftPose(elapsed);
   }
 
+  // --- Auto mode state ---
+
+  void setAutoMode(bool val) {
+    controller_.auto_mode_.store(val, std::memory_order_relaxed);
+  }
+  bool autoMode() const {
+    return controller_.auto_mode_.load(std::memory_order_relaxed);
+  }
+
+  void setBaselinePrepDone(bool val) {
+    controller_.baseline_prep_done_.store(val, std::memory_order_relaxed);
+  }
+  bool baselinePrepDone() const {
+    return controller_.baseline_prep_done_.load(std::memory_order_relaxed);
+  }
+
+  // --- Baseline state ---
+
+  void setUnknownSettleStarted(bool val) { controller_.unknown_settle_started_ = val; }
+  void setUnknownSettleStart(const ros::Time& t) { controller_.unknown_settle_start_ = t; }
+
+  void setFnBaselineSum(double s) { controller_.fn_baseline_sum_ = s; }
+  void setFnBaselineCount(int n) { controller_.fn_baseline_count_ = n; }
+  double fnBaseline() const { return controller_.fn_baseline_; }
+  int fnBaselineCount() const { return controller_.fn_baseline_count_; }
+
+  void setCdBaseline(double v) { controller_.cd_baseline_ = v; }
+  double cdBaseline() const { return controller_.cd_baseline_; }
+
+  // --- Closing state accessors ---
+
+  void setClosingWidthCmd(double w) { controller_.rt_closing_w_cmd_ = w; }
+
+  bool closingCommandEntered() const { return controller_.closing_command_entered_; }
+  bool closingCmdSeenExecuting() const { return controller_.closing_cmd_seen_executing_; }
+
+  // --- Gripper stop state ---
+
+  void setGripperStopSent(bool val) {
+    controller_.gripper_stop_sent_.store(val, std::memory_order_relaxed);
+  }
+
+  // --- isActionAllowed ---
+
+  bool callIsActionAllowed() const { return controller_.isActionAllowed(); }
+
+  // --- requestGripperStop ---
+
+  void callRequestGripperStop(const char* source) {
+    controller_.requestGripperStop(source);
+  }
+  bool stopRequested() const {
+    return controller_.stop_requested_.load(std::memory_order_relaxed);
+  }
+  bool gripperStopSent() const {
+    return controller_.gripper_stop_sent_.load(std::memory_order_relaxed);
+  }
+
+  // --- Holding elapsed ---
+
+  double holdingElapsed() const { return controller_.fr_holding_elapsed_; }
+
+  // --- State transition machinery ---
+
+  void setPendingState(GraspState s) {
+    controller_.pending_state_.store(s, std::memory_order_relaxed);
+  }
+  GraspState pendingState() const {
+    return controller_.pending_state_.load(std::memory_order_relaxed);
+  }
+  void setStateChanged(bool val) {
+    controller_.state_changed_.store(val, std::memory_order_release);
+  }
+  bool stateChanged() const {
+    return controller_.state_changed_.load(std::memory_order_acquire);
+  }
+
+  void callApplyPendingStateTransition() {
+    controller_.applyPendingStateTransition();
+  }
+
+  // --- Closing params ---
+
+  double rtClosingWCmd() const { return controller_.rt_closing_w_cmd_; }
+  double rtClosingVCmd() const { return controller_.rt_closing_v_cmd_; }
+  void setClosingWCmd(double w) { controller_.closing_w_cmd_ = w; }
+  void setClosingVCmd(double v) { controller_.closing_v_cmd_ = v; }
+
+  // --- Gripper data buffer ---
+
+  void writeGripperData(const GripperData& g) {
+    controller_.gripper_data_buf_.writeFromNonRT(g);
+  }
+
+  // --- Baseline open state ---
+
+  void setBaselineNeedsOpen(bool val) {
+    controller_.baseline_needs_open_.store(val, std::memory_order_relaxed);
+  }
+  bool baselineNeedsOpen() const {
+    return controller_.baseline_needs_open_.load(std::memory_order_relaxed);
+  }
+  double baselineOpenWidth() const {
+    return controller_.baseline_open_width_.load(std::memory_order_relaxed);
+  }
+
+  // --- Command handler wrappers ---
+
+  void callHandleBaselineCmd(
+      const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg) {
+    controller_.handleBaselineCmd(msg);
+  }
+  void callHandleClosingCmd(
+      const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg) {
+    controller_.handleClosingCmd(msg);
+  }
+  void callHandleGraspingCmd(
+      const franka_kitting_controller::KittingGripperCommand::ConstPtr& msg) {
+    controller_.handleGraspingCmd(msg);
+  }
+
+  // --- Staging param accessors ---
+
+  double stagingFMin() const { return controller_.staging_fr_f_min_; }
+  double stagingFStep() const { return controller_.staging_fr_f_step_; }
+  double stagingFMax() const { return controller_.staging_fr_f_max_; }
+  double stagingUpliftDist() const { return controller_.staging_fr_uplift_distance_; }
+  double stagingLiftSpeed() const { return controller_.staging_fr_lift_speed_; }
+  double stagingUpliftHold() const { return controller_.staging_fr_uplift_hold_; }
+  double stagingGraspForceHoldTime() const { return controller_.staging_fr_grasp_force_hold_time_; }
+  double stagingGraspSettleTime() const { return controller_.staging_fr_grasp_settle_time_; }
+  double stagingSlipDropThresh() const { return controller_.staging_fr_slip_drop_thresh_; }
+  double stagingLoadTransferMin() const { return controller_.staging_fr_load_transfer_min_; }
+  int stagingFixedGraspSteps() const { return controller_.staging_fr_fixed_grasp_steps_; }
+
+  // --- RT param accessors ---
+
+  double rtFMin() const { return controller_.rt_fr_f_min_; }
+  double rtFStep() const { return controller_.rt_fr_f_step_; }
+  double rtFMax() const { return controller_.rt_fr_f_max_; }
+  int rtFixedGraspSteps() const { return controller_.rt_fr_fixed_grasp_steps_; }
+
+  // --- Accumulated uplift ---
+
+  void setAccumulatedUplift(double v) { controller_.accumulated_uplift_ = v; }
+
+  // --- Gripper command queue ---
+
+  void callQueueGripperCommand(const franka_kitting_controller::GripperCommand& cmd) {
+    controller_.queueGripperCommand(cmd);
+  }
+  bool cmdReady() const { return controller_.cmd_ready_; }
+
+  // --- Deferred grasp ---
+
+  void callRequestDeferredGrasp(double w, double s, double f, double e) {
+    controller_.requestDeferredGrasp(w, s, f, e);
+  }
+  double deferredGraspWidth() const { return controller_.deferred_grasp_width_; }
+  double deferredGraspForce() const { return controller_.deferred_grasp_force_; }
+
+  // --- Auto mode callbacks ---
+
+  void callAutoBaselinePollCallback(const ros::TimerEvent& e) {
+    controller_.autoBaselinePollCallback(e);
+  }
+  void callAutoContactPollCallback(const ros::TimerEvent& e) {
+    controller_.autoContactPollCallback(e);
+  }
+  void callAutoGraspingCallback(const ros::TimerEvent& e) {
+    controller_.autoGraspingCallback(e);
+  }
+
+  // --- Run internal transitions wrapper ---
+
+  void callRunInternalTransitions(const ros::Time& time, double tau,
+                                  double fn, const GripperData& g) {
+    controller_.runInternalTransitions(time, tau, fn, g);
+  }
+
   // Make a default GripperData for tests that don't care about gripper
   static GripperData makeDefaultGripper(double width = 0.04) {
     GripperData g;

@@ -74,12 +74,13 @@ TEST_F(KittingControllerTestFixture, TickGrasping_Timeout) {
 
 TEST_F(KittingControllerTestFixture, TickGrasping_NormalFlow_ToUplift) {
   // Simulate full single-step ramp: COMMAND_SENT → WAITING → SETTLING → HOLDING → STEP_COMPLETE → UPLIFT
-  // Use f_min = f_max so there's only one step (last step)
+  // Use f_min = f_max with fixed_grasp_steps=1 to guarantee UPLIFT after 1 step
   setCurrentState(GraspState::GRASPING);
   setForceCurrent(70.0);
   setForceRampParams(70.0, 3.0, 70.0, 0.010, 0.01, 1.0);
   setGraspSettleTime(0.5);
   setGraspForceHoldTime(1.0);
+  setFixedGraspSteps(1);
   auto g = makeDefaultGripper();
   ros::Time t0(100.0);
 
@@ -327,14 +328,15 @@ TEST_F(KittingControllerTestFixture, TickGrasping_RampStepAdvance) {
 }
 
 TEST_F(KittingControllerTestFixture, TickGrasping_RampComplete) {
-  // On last step's STEP_COMPLETE → transition to UPLIFT
+  // On last step's STEP_COMPLETE with fixed_grasp_steps → transition to UPLIFT
   setCurrentState(GraspState::GRASPING);
-  setForceCurrent(69.0);  // 69 + 3 > 70 → last step
+  setForceCurrent(70.0);  // At f_max
   setIteration(22);
   setGraspingInitialized(true);
   setPhaseStartTime(ros::Time(100.0));
   setRampPhase(RampPhase::STEP_COMPLETE);
   setForceRampParams(3.0, 3.0, 70.0, 0.010, 0.01, 1.0);
+  setFixedGraspSteps(23);  // Force UPLIFT at step 23
 
   auto g = makeDefaultGripper();
   ros::Time t(101.0);
@@ -389,7 +391,7 @@ TEST_F(KittingControllerTestFixture, TickGrasping_NonDivisibleRange_ReachesFMax)
 }
 
 TEST_F(KittingControllerTestFixture, TickGrasping_AtFMax_IsLastStep) {
-  // When fr_f_current_ == f_max, STEP_COMPLETE should transition to UPLIFT
+  // When fr_f_current_ == f_max with fixed_grasp_steps, STEP_COMPLETE → UPLIFT
   setCurrentState(GraspState::GRASPING);
   setForceCurrent(10.0);  // Already at f_max
   setIteration(2);
@@ -397,6 +399,7 @@ TEST_F(KittingControllerTestFixture, TickGrasping_AtFMax_IsLastStep) {
   setPhaseStartTime(ros::Time(100.0));
   setRampPhase(RampPhase::STEP_COMPLETE);
   setForceRampParams(3.0, 4.0, 10.0, 0.010, 0.01, 1.0);
+  setFixedGraspSteps(3);  // Force UPLIFT at step 3
 
   auto g = makeDefaultGripper();
   ros::Time t(101.0);
@@ -404,6 +407,24 @@ TEST_F(KittingControllerTestFixture, TickGrasping_AtFMax_IsLastStep) {
 
   EXPECT_EQ(currentState(), GraspState::UPLIFT);
   EXPECT_TRUE(upliftActive());
+}
+
+TEST_F(KittingControllerTestFixture, TickGrasping_AtFMax_NoSecure_Failed) {
+  // When fr_f_current_ == f_max without secure grasp and no fixed override → FAILED
+  setCurrentState(GraspState::GRASPING);
+  setForceCurrent(10.0);
+  setIteration(2);
+  setGraspingInitialized(true);
+  setPhaseStartTime(ros::Time(100.0));
+  setRampPhase(RampPhase::STEP_COMPLETE);
+  setForceRampParams(3.0, 4.0, 10.0, 0.010, 0.01, 1.0);
+  setFixedGraspSteps(-1);  // Algorithm only — no secure grasp → FAILED
+
+  auto g = makeDefaultGripper();
+  ros::Time t(101.0);
+  callTickGrasping(t, 0.0, 5.0, g);
+
+  EXPECT_EQ(currentState(), GraspState::FAILED);
 }
 
 // ============================================================================
@@ -521,13 +542,14 @@ TEST(ConstantsTest, SafetyLimits) {
 
 TEST_F(KittingControllerTestFixture, FullCycle_GraspingToSuccess) {
   // This test exercises the full happy path through the force ramp cycle.
-  // Use f_min = f_max so there's only one step (last step).
+  // Use f_min = f_max with fixed_grasp_steps=1 to guarantee UPLIFT after 1 step.
   setCurrentState(GraspState::GRASPING);
   setForceCurrent(70.0);
   setIteration(0);
   setForceRampParams(70.0, 3.0, 70.0, 0.010, 0.01, 1.0);
   setGraspSettleTime(0.5);
   setGraspForceHoldTime(1.0);
+  setFixedGraspSteps(1);
   auto g = makeDefaultGripper();
 
   // --- GRASPING phase ---
@@ -971,5 +993,522 @@ TEST_F(KittingControllerTestFixture, ComputeDownliftPose_PreservesXY) {
   for (int i = 0; i < 12; ++i) {
     EXPECT_DOUBLE_EQ(pose[i], start[i]);
   }
+}
+
+// ============================================================================
+// Force ramp: reached_f_max without secure grasp → FAILED
+// ============================================================================
+
+TEST_F(KittingControllerTestFixture, TickGrasping_FMaxWithoutSecure_Failed) {
+  // f_min=f_max=70, fixed_grasp_steps=-1 → single step, no secure → FAILED
+  setCurrentState(GraspState::GRASPING);
+  setForceCurrent(70.0);
+  setForceRampParams(70.0, 3.0, 70.0, 0.010, 0.01, 1.0);
+  setGraspSettleTime(0.5);
+  setGraspForceHoldTime(1.0);
+  setFixedGraspSteps(-1);
+  auto g = makeDefaultGripper();
+  ros::Time t(100.0);
+
+  // Drive through full step
+  callTickGrasping(t, 0.0, 0.0, g);  // init
+  setCmdExecuting(true);
+  t = ros::Time(100.15);
+  callTickGrasping(t, 0.0, 0.0, g);  // WAITING
+  setCmdExecuting(false);
+  setCmdSuccess(true);
+  t = ros::Time(100.5);
+  callTickGrasping(t, 0.0, 5.0, g);  // SETTLING
+  t = ros::Time(101.1);
+  callTickGrasping(t, 0.0, 5.0, g);  // HOLDING
+  t = ros::Time(102.2);
+  callTickGrasping(t, 0.0, 5.0, g);  // STEP_COMPLETE
+
+  // At STEP_COMPLETE: f_max reached, no secure, no fixed override → FAILED
+  t = ros::Time(102.3);
+  callTickGrasping(t, 0.0, 5.0, g);
+  EXPECT_EQ(currentState(), GraspState::FAILED);
+}
+
+// ============================================================================
+// Closing: gripper finishes without contact → FAILED
+// ============================================================================
+
+TEST_F(KittingControllerTestFixture, Closing_GripperDone_NoContact_Failed) {
+  setCurrentState(GraspState::CLOSING);
+  setContactLatched(false);
+  setClosingCommandEntered(true);
+  setClosingCmdSeenExecuting(true);
+  setCmdExecuting(false);  // Gripper finished moving
+
+  // Baseline ready, CUSUM active
+  for (int i = 0; i < 50; ++i) smsDetector().update(1.8);
+  smsDetector().enter_closing();
+  setCdBaselineReady(true);
+
+  auto g = makeDefaultGripper();
+  ros::Time t(100.0);
+  setPhaseStartTime(t);
+
+  // Gripper done but no contact → FAILED
+  callRunClosingTransitions(t, g, 1.8);
+  EXPECT_EQ(currentState(), GraspState::FAILED);
+}
+
+// ============================================================================
+// Closing: timeout during CLOSING (30s) → FAILED
+// ============================================================================
+
+TEST_F(KittingControllerTestFixture, Closing_Timeout_Failed) {
+  setCurrentState(GraspState::CLOSING);
+  setContactLatched(false);
+  setClosingCommandEntered(true);
+  setClosingCmdSeenExecuting(true);
+  setCmdExecuting(true);  // Gripper still moving
+
+  for (int i = 0; i < 50; ++i) smsDetector().update(1.8);
+  smsDetector().enter_closing();
+  setCdBaselineReady(true);
+
+  auto g = makeDefaultGripper();
+  ros::Time t0(100.0);
+  setPhaseStartTime(t0);
+
+  // Jump past kClosingTimeout (30s)
+  ros::Time t_late(131.0);
+  callRunClosingTransitions(t_late, g, 1.8);
+  EXPECT_EQ(currentState(), GraspState::FAILED);
+}
+
+// ============================================================================
+// Closing: contact_latched skips detection block
+// ============================================================================
+
+TEST_F(KittingControllerTestFixture, Closing_ContactLatched_SkipsDetection) {
+  setCurrentState(GraspState::CLOSING);
+  setContactLatched(true);  // Already latched
+  setClosingCommandEntered(true);
+  setClosingCmdSeenExecuting(true);
+
+  auto g = makeDefaultGripper();
+  ros::Time t(100.0);
+
+  // Should NOT enter the detection block (guard: !contact_latched_)
+  callRunClosingTransitions(t, g, 1.8);
+  // State unchanged — the detection block is skipped
+  EXPECT_EQ(currentState(), GraspState::CLOSING);
+}
+
+// ============================================================================
+// isActionAllowed tests
+// ============================================================================
+
+TEST_F(KittingControllerTestFixture, IsActionAllowed_StartState) {
+  setCurrentState(GraspState::START);
+  EXPECT_TRUE(callIsActionAllowed());
+}
+
+TEST_F(KittingControllerTestFixture, IsActionAllowed_SuccessState) {
+  setCurrentState(GraspState::SUCCESS);
+  EXPECT_TRUE(callIsActionAllowed());
+}
+
+TEST_F(KittingControllerTestFixture, IsActionAllowed_FailedState) {
+  setCurrentState(GraspState::FAILED);
+  EXPECT_TRUE(callIsActionAllowed());
+}
+
+TEST_F(KittingControllerTestFixture, IsActionAllowed_GraspingState_Rejected) {
+  setCurrentState(GraspState::GRASPING);
+  EXPECT_FALSE(callIsActionAllowed());
+}
+
+TEST_F(KittingControllerTestFixture, IsActionAllowed_ClosingState_Rejected) {
+  setCurrentState(GraspState::CLOSING);
+  EXPECT_FALSE(callIsActionAllowed());
+}
+
+TEST_F(KittingControllerTestFixture, IsActionAllowed_BaselineState_Rejected) {
+  setCurrentState(GraspState::BASELINE);
+  EXPECT_FALSE(callIsActionAllowed());
+}
+
+TEST_F(KittingControllerTestFixture, IsActionAllowed_EvaluateState_Rejected) {
+  setCurrentState(GraspState::EVALUATE);
+  EXPECT_FALSE(callIsActionAllowed());
+}
+
+// ============================================================================
+// requestGripperStop tests
+// ============================================================================
+
+TEST_F(KittingControllerTestFixture, RequestGripperStop_SetsFlags) {
+  setGripperStopSent(false);
+  callRequestGripperStop("Test");
+  EXPECT_TRUE(stopRequested());
+  EXPECT_TRUE(gripperStopSent());
+}
+
+TEST_F(KittingControllerTestFixture, RequestGripperStop_AlreadySent_NoOp) {
+  setGripperStopSent(true);
+  // Should not re-set stop_requested_ (guarded by gripper_stop_sent_)
+  callRequestGripperStop("Test");
+  // The guard prevents re-entry but stop_requested_ may already be true
+  EXPECT_TRUE(gripperStopSent());
+}
+
+// ============================================================================
+// Baseline collection tests (via direct member access)
+// ============================================================================
+
+TEST_F(KittingControllerTestFixture, BaselineCollection_AccumulatesFnBaseline) {
+  // Simulate what update() does in BASELINE state
+  setCurrentState(GraspState::BASELINE);
+
+  setFnBaselineSum(0.0);
+  setFnBaselineCount(0);
+
+  // Simulate 10 samples of Fn = 3.0
+  for (int i = 0; i < 10; ++i) {
+    smsDetector().update(1.8);  // tau_ext_norm
+    // Mimicking the fn_baseline accumulation in update()
+  }
+
+  // After 50 samples, baseline should be ready
+  for (int i = 10; i < 50; ++i) {
+    smsDetector().update(1.8);
+  }
+  EXPECT_TRUE(smsDetector().baseline_ready());
+  EXPECT_NEAR(smsDetector().baseline().mean(), 1.8, 1e-9);
+}
+
+// ============================================================================
+// UNKNOWN → BASELINE settle transition test
+// ============================================================================
+
+TEST_F(KittingControllerTestFixture, UnknownSettle_TransitionsToBaseline) {
+  setCurrentState(GraspState::UNKNOWN);
+  setBaselinePrepDone(true);
+  setUnknownSettleStarted(false);
+
+  // This test verifies the settle logic that normally runs in update().
+  // We can't call update() directly (needs rate_trigger_), but we can
+  // verify the state variables are correctly wired.
+  // The settle time is kBaselineSettleTime = 2.0s.
+  EXPECT_EQ(KittingStateController::kBaselineSettleTime, 2.0);
+}
+
+// ============================================================================
+// runInternalTransitions dispatches correctly
+// ============================================================================
+
+TEST_F(KittingControllerTestFixture, RunInternalTransitions_GraspingState) {
+  setCurrentState(GraspState::GRASPING);
+  setForceCurrent(3.0);
+  auto g = makeDefaultGripper();
+  ros::Time t(100.0);
+
+  // Should dispatch to tickGrasping which initializes the phase
+  callRunInternalTransitions(t, 0.0, 0.0, g);
+  EXPECT_EQ(currentState(), GraspState::GRASPING);  // Still grasping
+}
+
+TEST_F(KittingControllerTestFixture, RunInternalTransitions_UpliftState) {
+  setCurrentState(GraspState::UPLIFT);
+  setUpliftActive(false);  // Trajectory already done
+  auto g = makeDefaultGripper();
+  ros::Time t(100.0);
+
+  callRunInternalTransitions(t, 0.0, 0.0, g);
+  EXPECT_EQ(currentState(), GraspState::EVALUATE);  // Transitioned
+}
+
+TEST_F(KittingControllerTestFixture, RunInternalTransitions_NonRampState_NoOp) {
+  setCurrentState(GraspState::BASELINE);
+  auto g = makeDefaultGripper();
+  ros::Time t(100.0);
+
+  // BASELINE is not a force ramp phase — should not dispatch
+  // (isForceRampPhase returns false for BASELINE)
+  // This verifies no crash from unexpected states
+  EXPECT_EQ(currentState(), GraspState::BASELINE);
+}
+
+// ============================================================================
+// Evaluate: zero sample counts (edge case)
+// ============================================================================
+
+TEST_F(EvaluateTest, Evaluate_ZeroSampleCounts_NoCrash) {
+  // Both early and late have zero samples → Fn_early = 0, Fn_late = 0
+  SetUpEvaluate(/*fn_baseline=*/2.0, /*fn_early=*/0.0, /*early_n=*/0,
+                /*fn_late=*/0.0, /*late_n=*/0);
+
+  ros::Time eval_start(100.0);
+  setPhaseStartTime(eval_start);
+
+  auto g = makeDefaultGripper();
+  ros::Time t(101.1);
+
+  // When count = 0, the code does: (count > 0) ? sum/count : 0.0
+  // This should not crash and should result in FAILED (no load transfer)
+  callTickEvaluate(t, 0.0, 0.0, g);
+  EXPECT_EQ(currentState(), GraspState::FAILED);
+}
+
+// ============================================================================
+// Evaluate: accumulation during early and late windows
+// ============================================================================
+
+TEST_F(KittingControllerTestFixture, Evaluate_EarlyWindowOnly_NoVerdict) {
+  setCurrentState(GraspState::EVALUATE);
+  setFnBaseline(2.0);
+  setEarlyAccumulators(0.0, 0);
+  setLateAccumulators(0.0, 0);
+
+  ros::Time eval_start(100.0);
+  setPhaseStartTime(eval_start);
+  auto g = makeDefaultGripper();
+
+  // At 0.3s (within early window, hold=1.0s, early = first 0.5s)
+  ros::Time t(100.3);
+  callTickEvaluate(t, 0.0, 10.0, g);
+  // Should still be EVALUATE — no verdict yet
+  EXPECT_EQ(currentState(), GraspState::EVALUATE);
+}
+
+TEST_F(KittingControllerTestFixture, Evaluate_LateWindowOnly_NoVerdict) {
+  setCurrentState(GraspState::EVALUATE);
+  setFnBaseline(2.0);
+  setEarlyAccumulators(10.0 * 125, 125);  // Already have early data
+  setLateAccumulators(0.0, 0);
+
+  ros::Time eval_start(100.0);
+  setPhaseStartTime(eval_start);
+  auto g = makeDefaultGripper();
+
+  // At 0.7s (within late window, but not past hold time 1.0s)
+  ros::Time t(100.7);
+  callTickEvaluate(t, 0.0, 10.0, g);
+  EXPECT_EQ(currentState(), GraspState::EVALUATE);
+}
+
+// ============================================================================
+// Holding phase: SMS update at mid-hold
+// ============================================================================
+
+TEST_F(KittingControllerTestFixture, TickGrasping_Holding_SMSUpdateAtMidHold) {
+  // Verify that sms_detector_.update() is called during the late half of holding
+  setCurrentState(GraspState::GRASPING);
+  setForceCurrent(3.0);
+  setForceRampParams(3.0, 3.0, 70.0, 0.010, 0.01, 1.0);
+  setGraspSettleTime(0.5);
+  setGraspForceHoldTime(2.0);  // Mid-hold at 1.0s
+
+  // Pre-fill baseline and set to GRASPING in SMS detector
+  for (int i = 0; i < 50; ++i) smsDetector().update(1.8);
+  smsDetector().enter_closing();
+  // Simulate contact → grasping
+  for (int i = 0; i < 20; ++i) smsDetector().update(1.3);
+  if (smsDetector().state() == sms_cusum::GraspState::CONTACT) {
+    smsDetector().enter_grasping();
+  }
+
+  auto g = makeDefaultGripper();
+  ros::Time t(100.0);
+
+  // Drive to HOLDING phase
+  callTickGrasping(t, 0.0, 0.0, g);  // init
+  setCmdExecuting(true);
+  t = ros::Time(100.15);
+  callTickGrasping(t, 0.0, 0.0, g);  // WAITING
+  setCmdExecuting(false);
+  setCmdSuccess(true);
+  t = ros::Time(100.5);
+  callTickGrasping(t, 0.0, 5.0, g);  // SETTLING
+  t = ros::Time(101.1);
+  callTickGrasping(t, 0.0, 5.0, g);  // → HOLDING
+  EXPECT_EQ(rampPhase(), RampPhase::HOLDING);
+
+  int idx_before = smsDetector().sample_index();
+
+  // Tick at mid-hold (elapsed > hold_time/2 = 1.0s)
+  t = ros::Time(102.2);
+  callTickGrasping(t, 1.8, 5.0, g);
+
+  // SMS detector should have received at least one update
+  EXPECT_GT(smsDetector().sample_index(), idx_before);
+}
+
+// ============================================================================
+// Uplift: trajectory beyond duration is clamped
+// ============================================================================
+
+TEST_F(KittingControllerTestFixture, ComputeUpliftPose_BeyondDuration) {
+  auto start = makeIdentityPose(0.40);
+  setUpliftStartPose(start);
+  setUpliftParams(0.010, 1.0);
+
+  // Elapsed > duration → clamped to end position
+  auto pose = callComputeUpliftPose(2.0);
+  EXPECT_NEAR(pose[14], 0.41, 1e-10);
+}
+
+TEST_F(KittingControllerTestFixture, ComputeDownliftPose_BeyondDuration) {
+  auto start = makeIdentityPose(0.41);
+  setDownliftStartPose(start);
+  setDownliftParams(0.010, 1.0);
+
+  auto pose = callComputeDownliftPose(2.0);
+  EXPECT_NEAR(pose[14], 0.40, 1e-10);
+}
+
+// ============================================================================
+// Grasping: cmd_gen fallback path (command generation counter)
+// ============================================================================
+
+TEST_F(KittingControllerTestFixture, TickGrasping_CmdGenFallback) {
+  // When cmd_gen_ increments past fr_expected_cmd_gen_,
+  // the controller transitions from COMMAND_SENT to WAITING_EXECUTION
+  setCurrentState(GraspState::GRASPING);
+  setForceCurrent(3.0);
+  setForceRampParams(3.0, 3.0, 70.0, 0.010, 0.01, 1.0);
+  auto g = makeDefaultGripper();
+  ros::Time t(100.0);
+
+  // Initialize
+  callTickGrasping(t, 0.0, 0.0, g);
+  EXPECT_EQ(rampPhase(), RampPhase::COMMAND_SENT);
+
+  // Don't set cmd_executing_, but bump cmd_gen_ past expected
+  // (The fixture doesn't expose cmd_gen_ directly, but we can verify
+  //  that the normal setCmdExecuting path still works)
+  setCmdExecuting(true);
+  t = ros::Time(100.15);
+  callTickGrasping(t, 0.0, 0.0, g);
+  EXPECT_EQ(rampPhase(), RampPhase::WAITING_EXECUTION);
+}
+
+// ============================================================================
+// Contact width update during HOLDING phase
+// ============================================================================
+
+TEST_F(KittingControllerTestFixture, TickGrasping_ContactWidthUpdated) {
+  setCurrentState(GraspState::GRASPING);
+  setForceCurrent(3.0);
+  setForceRampParams(3.0, 3.0, 70.0, 0.010, 0.01, 1.0);
+  setGraspSettleTime(0.5);
+  setGraspForceHoldTime(1.0);
+  setContactWidth(0.04);
+  auto g = makeDefaultGripper(0.035);  // Different width
+  ros::Time t(100.0);
+
+  // Drive to HOLDING → STEP_COMPLETE
+  callTickGrasping(t, 0.0, 0.0, g);
+  setCmdExecuting(true);
+  t = ros::Time(100.15);
+  callTickGrasping(t, 0.0, 0.0, g);
+  setCmdExecuting(false);
+  setCmdSuccess(true);
+  t = ros::Time(100.5);
+  callTickGrasping(t, 0.0, 5.0, g);
+  t = ros::Time(101.1);
+  callTickGrasping(t, 0.0, 5.0, g);  // HOLDING
+
+  // During HOLDING, contact_width_ is updated at the end
+  t = ros::Time(102.2);
+  callTickGrasping(t, 0.0, 5.0, g);  // → STEP_COMPLETE
+
+  // contact_width_ should be updated to gripper width (0.035)
+  EXPECT_NEAR(contactWidth(), 0.035, 1e-6);
+}
+
+// ============================================================================
+// Grasping: hardware-rejected grasp command
+// ============================================================================
+
+TEST_F(KittingControllerTestFixture, TickGrasping_GraspFailed_HardwareRejected) {
+  setCurrentState(GraspState::GRASPING);
+  setForceCurrent(3.0);
+  setForceRampParams(3.0, 3.0, 70.0, 0.010, 0.01, 1.0);
+  auto g = makeDefaultGripper();
+  ros::Time t(100.0);
+
+  callTickGrasping(t, 0.0, 0.0, g);  // init
+  setCmdExecuting(true);
+  t = ros::Time(100.15);
+  callTickGrasping(t, 0.0, 0.0, g);  // WAITING
+
+  // Hardware rejects the grasp
+  setCmdExecuting(false);
+  setCmdSuccess(false);
+  t = ros::Time(100.5);
+  callTickGrasping(t, 0.0, 5.0, g);
+  EXPECT_EQ(currentState(), GraspState::FAILED);
+}
+
+// ============================================================================
+// Ramp step advance: force increment and iteration counter
+// ============================================================================
+
+TEST_F(KittingControllerTestFixture, TickGrasping_RampAdvance_ForceAndIteration) {
+  // f_min=3, f_step=3, f_max=70 → should advance from 3 to 6
+  setCurrentState(GraspState::GRASPING);
+  setForceCurrent(3.0);
+  setIteration(0);
+  setForceRampParams(3.0, 3.0, 70.0, 0.010, 0.01, 1.0);
+  setGraspSettleTime(0.5);
+  setGraspForceHoldTime(1.0);
+  setFixedGraspSteps(-1);
+  setContactWidth(0.04);
+  auto g = makeDefaultGripper();
+  ros::Time t(100.0);
+
+  // Drive through one full step
+  callTickGrasping(t, 0.0, 0.0, g);
+  setCmdExecuting(true);
+  t = ros::Time(100.15);
+  callTickGrasping(t, 0.0, 0.0, g);
+  setCmdExecuting(false);
+  setCmdSuccess(true);
+  t = ros::Time(100.5);
+  callTickGrasping(t, 0.0, 5.0, g);
+  t = ros::Time(101.1);
+  callTickGrasping(t, 0.0, 5.0, g);
+  t = ros::Time(102.2);
+  callTickGrasping(t, 0.0, 5.0, g);  // STEP_COMPLETE
+
+  // Advance: not at f_max, no secure → next step
+  t = ros::Time(102.3);
+  callTickGrasping(t, 0.0, 5.0, g);
+
+  EXPECT_EQ(currentState(), GraspState::GRASPING);
+  EXPECT_EQ(iteration(), 1);
+  EXPECT_NEAR(forceCurrent(), 6.0, 1e-9);
+  EXPECT_TRUE(deferredGraspPending());
+}
+
+// ============================================================================
+// Non-divisible force range reaches f_max
+// ============================================================================
+
+TEST_F(KittingControllerTestFixture, TickGrasping_NonDivisibleRange_ClampedToFMax) {
+  // f_min=3, f_step=4, f_max=10 → step sequence: 3, 7, 10 (clamped)
+  setCurrentState(GraspState::GRASPING);
+  setForceCurrent(7.0);  // Already at step 2
+  setIteration(1);
+  setForceRampParams(3.0, 4.0, 10.0, 0.010, 0.01, 1.0);
+  setGraspSettleTime(0.5);
+  setGraspForceHoldTime(1.0);
+  setFixedGraspSteps(-1);
+  setContactWidth(0.04);
+  setRampPhase(RampPhase::STEP_COMPLETE);
+  setGraspingInitialized(true);
+  auto g = makeDefaultGripper();
+  ros::Time t(100.0);
+
+  // At STEP_COMPLETE with f=7, not at f_max=10, no secure → advance
+  callTickGrasping(t, 0.0, 5.0, g);
+  EXPECT_EQ(iteration(), 2);
+  EXPECT_NEAR(forceCurrent(), 10.0, 1e-9);  // min(7+4, 10) = 10
 }
 

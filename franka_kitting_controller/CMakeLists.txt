@@ -111,6 +111,7 @@ if(CATKIN_ENABLE_TESTING)
     test/main.cpp
     test/kitting_unit_test.cpp
     test/kitting_state_machine_test.cpp
+    test/kitting_integration_test.cpp
   )
   add_dependencies(kitting_controller_test
     ${${PROJECT_NAME}_EXPORTED_TARGETS}

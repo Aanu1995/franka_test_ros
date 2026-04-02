@@ -214,7 +214,7 @@ The force ramp runs entirely on the table (no mid-trial lift/lower). The control
 
 After secure grasp is confirmed (or `fixed_grasp_steps` is reached), the controller transitions to UPLIFT. If `f_max` is reached without secure grasp (and `fixed_grasp_steps` is not active), the controller transitions directly to FAILED.
 
-**Fixed grasp steps override** (`fixed_grasp_steps`, default `-1`): When set to a positive integer, the force ramp runs for exactly that many steps and then declares the grasp secure, bypassing the EWMA convergence algorithm. This is useful for objects where the algorithm cannot reliably detect convergence or when a known number of force increments is sufficient. When `-1` (default), only the algorithm's secure grasp detection is used.
+**Fixed grasp steps override** (`fixed_grasp_steps`, default `-1`): When set to a positive integer, the force ramp runs for exactly that many steps and then declares the grasp secure. The algorithm's secure grasp detection is completely ignored — even if the algorithm detects convergence earlier, the ramp continues until the specified step count is reached. This is useful for objects where the algorithm cannot reliably detect convergence or when a known number of force increments is sufficient. When `-1` (default), only the algorithm's secure grasp detection is used.
 
 - Grasp width starts as the `contact_width` captured at CONTACT; updated after each ramp step
 - **Grasp failure**: After each ramp step's grasp command completes, the RT thread checks `cmd_success_` (the `grasp()` return value stored by the command thread). If `false`, transitions to FAILED immediately
