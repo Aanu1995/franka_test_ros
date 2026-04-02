@@ -303,6 +303,46 @@ class KittingControllerTestFixture : public ::testing::Test {
     return controller_.deferred_grasp_pending_.load(std::memory_order_relaxed);
   }
 
+  // --- Fixed grasp steps ---
+
+  void setFixedGraspSteps(int n) { controller_.rt_fr_fixed_grasp_steps_ = n; }
+  int fixedGraspSteps() const { return controller_.rt_fr_fixed_grasp_steps_; }
+
+  // --- SMS-CUSUM detector access ---
+
+  sms_cusum::SMSCusum& smsDetector() { return controller_.sms_detector_; }
+
+  // --- Contact detection state ---
+
+  void setContactLatched(bool val) { controller_.contact_latched_ = val; }
+  bool contactLatched() const { return controller_.contact_latched_; }
+
+  void setClosingCommandEntered(bool val) { controller_.closing_command_entered_ = val; }
+  void setClosingCmdSeenExecuting(bool val) { controller_.closing_cmd_seen_executing_ = val; }
+
+  void setCdBaselineReady(bool val) {
+    controller_.cd_baseline_ready_.store(val, std::memory_order_relaxed);
+  }
+  bool cdBaselineReady() const {
+    return controller_.cd_baseline_ready_.load(std::memory_order_relaxed);
+  }
+
+  void setGripperStopped(bool val) {
+    controller_.gripper_stopped_.store(val, std::memory_order_relaxed);
+  }
+
+  // --- Wrappers for private contact/closing functions ---
+
+  void callDetectContact(const ros::Time& time, const GripperData& g,
+                         double tau_ext_norm) {
+    controller_.detectContact(time, g, tau_ext_norm);
+  }
+
+  void callRunClosingTransitions(const ros::Time& time, const GripperData& g,
+                                 double tau_ext_norm) {
+    controller_.runClosingTransitions(time, g, tau_ext_norm);
+  }
+
   // --- Wrappers for private tick functions ---
 
   void callTickGrasping(const ros::Time& time, double tau, double fn,

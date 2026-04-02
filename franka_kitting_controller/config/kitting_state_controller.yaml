@@ -32,6 +32,7 @@ kitting_state_controller:
   uplift_hold: 1.0  # [s] Evaluation hold at top; early + late windows (clamped to 0.5–120.0)
   slip_drop_thresh: 0.15    # DF_TH: max allowed relative support force drop (15% = fail)
   load_transfer_min: 0.02   # [N] Minimum load transfer threshold (supports objects down to ~5g)
+  fixed_grasp_steps: -1    # -1 = algorithm determines secure grasp; positive = force exactly N steps then declare secure
 
   # Recording / Logger parameters (used by launch file, see kitting_state_controller.launch)
   # Set require_logger: true to enable rosbag recording (launch arg: record:=true)

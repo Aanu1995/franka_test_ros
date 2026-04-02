@@ -131,6 +131,14 @@ if(CATKIN_ENABLE_TESTING)
     include
     ${CMAKE_CURRENT_SOURCE_DIR}/../sms_cusum/cpp/include
   )
+
+  # SMS-CUSUM C++ header-only library tests (no ROS dependency)
+  catkin_add_gtest(sms_cusum_cpp_test
+    ${CMAKE_CURRENT_SOURCE_DIR}/../sms_cusum/cpp/test/test_sms_cusum_cpp.cpp
+  )
+  target_include_directories(sms_cusum_cpp_test PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../sms_cusum/cpp/include
+  )
 endif()
 
 ## Installation

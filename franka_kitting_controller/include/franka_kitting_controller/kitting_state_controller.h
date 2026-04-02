@@ -237,6 +237,7 @@ namespace franka_kitting_controller {
     double fr_load_transfer_min_{0.02};
     double fr_grasp_force_hold_time_{2.0};
     double fr_grasp_settle_time_{0.5};
+    int fr_fixed_grasp_steps_{-1};
 
     // RT-local copies (snapshotted at GRASPING entry)
     double rt_fr_f_min_{3.0};
@@ -251,6 +252,7 @@ namespace franka_kitting_controller {
     double rt_fr_load_transfer_min_{0.02};
     double rt_fr_grasp_force_hold_time_{2.0};
     double rt_fr_grasp_settle_time_{0.5};
+    int rt_fr_fixed_grasp_steps_{-1};
 
     // Staging variables (subscriber → RT via state_changed_)
     double staging_fr_f_min_{3.0};
@@ -265,6 +267,7 @@ namespace franka_kitting_controller {
     double staging_fr_load_transfer_min_{0.02};
     double staging_fr_grasp_force_hold_time_{2.0};
     double staging_fr_grasp_settle_time_{0.5};
+    int staging_fr_fixed_grasp_steps_{-1};
     uint32_t staging_fr_expected_cmd_gen_{0};
 
     // Force ramp runtime state (RT-thread owned)

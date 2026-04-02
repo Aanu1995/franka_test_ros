@@ -258,16 +258,23 @@ namespace franka_kitting_controller {
                   sg_result.event.baseline_mean,
                   sg_result.event.baseline_sigma);
         }
+        bool fixed_override = (rt_fr_fixed_grasp_steps_ > 0) &&
+                              ((fr_iteration_ + 1) >= rt_fr_fixed_grasp_steps_);
+        if (fixed_override && !sg_result.detected) {
+          ROS_INFO("    GRASP_%d: fixed_grasp_steps=%d reached — declaring secure (override)",
+                  fr_iteration_ + 1, rt_fr_fixed_grasp_steps_);
+        }
+        bool secure = sg_result.detected || fixed_override;
         bool reached_f_max = fr_f_current_ >= rt_fr_f_max_;
 
-        if (reached_f_max && !sg_result.detected) {
+        if (reached_f_max && !secure) {
           // Maximum force reached without secure grasp — fail
           current_state_.store(GraspState::FAILED, std::memory_order_relaxed);
           publishStateLabel("FAILED");
           logStateTransition("FAILED", "f_max reached without secure grasp");
           ROS_WARN("    GRASP_%d: FAILED — f_max=%.1f N reached without secure grasp",
                   fr_iteration_ + 1, rt_fr_f_max_);
-        } else if (sg_result.detected) {
+        } else if (secure) {
           // Secure grasp confirmed — proceed to uplift
           uplift_start_pose_ = cartesian_pose_handle_->getRobotState().O_T_EE_d;
           uplift_z_start_ = uplift_start_pose_[14];

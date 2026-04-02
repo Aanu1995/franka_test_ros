@@ -204,7 +204,7 @@ Gripper stopped — contact confirmed. Published **automatically** by the contro
 
 Initiate automated multi-step force ramp. Published via `/kitting_controller/state_cmd` with `command: "GRASPING"`. This is the **last user command** — all subsequent states are driven internally by the force ramp. **Requires CONTACT state** — rejected otherwise to prevent use of stale width from a previous trial.
 
-The force ramp runs entirely on the table (no mid-trial lift/lower). The controller grasps at increasing force levels from `f_min` to `f_max` in `f_step` increments. Each step is published as a distinct state label: `GRASP_1`, `GRASP_2`, ..., `GRASP_N`. The ramp terminates either when `f_max` is reached or when **secure grasp** is detected (see [Secure Grasp Detection](#grasp-secure-grasp-detection)).
+The force ramp runs entirely on the table (no mid-trial lift/lower). The controller grasps at increasing force levels from `f_min` to `f_max` in `f_step` increments. Each step is published as a distinct state label: `GRASP_1`, `GRASP_2`, ..., `GRASP_N`. The ramp terminates either when `f_max` is reached, when **secure grasp** is detected (see [Secure Grasp Detection](#grasp-secure-grasp-detection)), or when `fixed_grasp_steps` is reached (overrides the algorithm — see below).
 
 **Each ramp step (GRASP_k):**
 1. **Grasp command**: Dispatches a deferred grasp at force `f_current` to the `contact_width` (updated after each step)
@@ -212,7 +212,9 @@ The force ramp runs entirely on the table (no mid-trial lift/lower). The control
 3. **Hold** (`grasp_force_hold_time`, default 2.0 s): Hold at force level for data logging and analysis. Published `grasp_ramp_phase = "holding"`. During the late segment (last half), tau_ext_norm samples are fed to the SMS-CUSUM secure grasp detector
 4. **Advance**: Update `contact_width` from the current gripper width. If secure grasp was detected, transition to UPLIFT. If `f_current >= f_max` without secure grasp, transition to FAILED. Otherwise increment force by `f_step` and advance to next step
 
-After secure grasp is confirmed, the controller transitions to UPLIFT. If `f_max` is reached without secure grasp, the controller transitions directly to FAILED.
+After secure grasp is confirmed (or `fixed_grasp_steps` is reached), the controller transitions to UPLIFT. If `f_max` is reached without secure grasp (and `fixed_grasp_steps` is not active), the controller transitions directly to FAILED.
+
+**Fixed grasp steps override** (`fixed_grasp_steps`, default `-1`): When set to a positive integer, the force ramp runs for exactly that many steps and then declares the grasp secure, bypassing the EWMA convergence algorithm. This is useful for objects where the algorithm cannot reliably detect convergence or when a known number of force increments is sufficient. When `-1` (default), only the algorithm's secure grasp detection is used.
 
 - Grasp width starts as the `contact_width` captured at CONTACT; updated after each ramp step
 - **Grasp failure**: After each ramp step's grasp command completes, the RT thread checks `cmd_success_` (the `grasp()` return value stored by the command thread). If `false`, transitions to FAILED immediately
@@ -366,6 +368,10 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
     fr_slip_drop_thresh: 0.15, \
     fr_load_transfer_min: 0.02}" --once
 
+# GRASPING — force exactly 5 ramp steps (override algorithm)
+rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGripperCommand \
+  "{command: 'GRASPING', fr_fixed_grasp_steps: 5}" --once
+
 # Stop recording
 rostopic pub /kitting_controller/record_control std_msgs/String "data: 'STOP'" --once
 
@@ -393,7 +399,8 @@ rostopic pub /kitting_controller/state_cmd franka_kitting_controller/KittingGrip
     fr_grasp_speed: 0.02, fr_epsilon: 0.008, \
     fr_uplift_distance: 0.010, fr_lift_speed: 0.01, fr_uplift_hold: 1.0, \
     fr_slip_drop_thresh: 0.15, \
-    fr_load_transfer_min: 0.02}" --once
+    fr_load_transfer_min: 0.02, \
+    fr_fixed_grasp_steps: -1}" --once
 ```
 
 ## Gripper Action Servers
@@ -748,7 +755,7 @@ The **velocity profile** (first derivative) is:
 | Parameter                  | Type   | Default | Description                                                         |
 | -------------------------- | ------ | ------- | ------------------------------------------------------------------- |
 | `arm_id`                   | string | `panda` | Robot arm identifier                                                |
-| `publish_rate`             | double | `250.0` | KittingState publish rate [Hz] (detection runs at full 1 kHz control rate) |
+| `publish_rate`             | double | `250.0` | KittingState publish rate [Hz] (detection and state machine also run at this rate) |
 | `closing_width`            | double | `0.001` | Default width for MoveAction in CLOSING [m]                                |
 | `closing_speed`            | double | `0.05`  | Default speed for MoveAction in CLOSING [m/s] (clamped to max 0.10) |
 | `grasp_speed`              | double | `0.02`  | Gripper speed for GraspAction [m/s]                                 |
@@ -763,6 +770,7 @@ The **velocity profile** (first derivative) is:
 | `grasp_settle_time`        | double | `0.5`   | Settle time after each grasp command completes [s]                  |
 | `slip_drop_thresh`         | double | `0.15`   | DF_TH: max allowed relative support force drop (15% = fail)         |
 | `load_transfer_min`        | double | `0.02`   | Floor for load transfer threshold [N] (supports objects down to ~5 g) |
+| `fixed_grasp_steps`        | int    | `-1`    | Fixed ramp steps overriding algorithm (-1 = algorithm only; positive = force exactly N steps) |
 | `require_logger`           | bool   | `false` | Gate commands behind logger readiness (set true when `record:=true`)|
 
 Gripper and GRASPING parameters are **defaults**. They can be overridden per-command by setting non-zero values in the `KittingGripperCommand` message published on `/kitting_controller/state_cmd`.
@@ -869,13 +877,14 @@ Per-object command published on `/kitting_controller/state_cmd`. Any float64 par
 | `fr_epsilon`           | float64 | Epsilon for ramp GraspAction, inner and outer [m] (0 = use default 0.008)          |
 | `fr_slip_drop_thresh`     | float64 | DF_TH: max allowed relative support force drop (0 = use default 0.15)           |
 | `fr_load_transfer_min`    | float64 | Floor for load transfer threshold [N] (0 = use default 0.02)                    |
+| `fr_fixed_grasp_steps`   | int32   | Fixed ramp steps overriding algorithm (-1 = algorithm only, 0 = use YAML default) |
 | `auto_delay`           | float64 | Delay between auto transitions [s] (0 = default 5.0). Only used by `AUTO` command  |
 
 Only the parameters relevant to the command are used:
 
 - `BASELINE` uses `open_gripper` and `open_width`
 - `CLOSING` uses `closing_width` and `closing_speed` (`contact_torque_thresh` and `contact_debounce_time` are ignored — SMS-CUSUM auto-tunes detection)
-- `GRASPING` requires CONTACT state and uses all `f_*`/`fr_*` force ramp parameters plus `grasp_force_hold_time` and `grasp_settle_time` (grasp width is always from `contact_width`; rejected if not in CONTACT or if `contact_width` is out of range `[0, max_width]`)
+- `GRASPING` requires CONTACT state and uses all `f_*`/`fr_*` force ramp parameters plus `grasp_force_hold_time`, `grasp_settle_time`, and `fr_fixed_grasp_steps` (grasp width is always from `contact_width`; rejected if not in CONTACT or if `contact_width` is out of range `[0, max_width]`)
 - `AUTO` uses all of the above, plus `auto_delay`
 
 ## KittingState Message
@@ -981,7 +990,7 @@ The Grasp logger is written in C++ using the `rosbag::Bag` API directly and `top
 - CSV contains 70 flattened columns with state labels per row (includes `grasp_ramp_phase`)
 - CSV export does not block the ROS spin loop (runs in background thread)
 - metadata.yaml contains bag_filename, csv_filename, total_samples, start/stop times, and detector parameters
-- Contact detection: SMS-CUSUM (noise-adaptive CUSUM: S = max(0, S + (μ − tau) − k_eff), alarm when S ≥ h for 3 consecutive samples)
+- Contact detection: SMS-CUSUM (noise-adaptive CUSUM: S = max(0, S + (μ − tau) − k_eff), alarm when S ≥ h for 5 consecutive samples)
 - Free closing (no object): width reaches w_cmd, gap ~0 → no false CONTACT → transitions to FAILED ("no contact detected")
 - Object contact: SMS-CUSUM detects torque drop → CONTACT_CONFIRMED immediately, then CONTACT when gripper stopped
 - Gripper stop requested immediately on contact: `stop()` called via atomic flag and read thread

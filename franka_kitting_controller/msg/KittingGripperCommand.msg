@@ -53,6 +53,7 @@ float64 fr_grasp_speed       # [m/s] Gripper speed for ramp grasps (0 = use defa
 float64 fr_epsilon           # [m]   Epsilon for ramp grasps, same for inner/outer (0 = use default 0.008)
 float64 fr_slip_drop_thresh     # DF_TH: max allowed relative support force drop (0 = use default 0.15)
 float64 fr_load_transfer_min    # [N] Min load transfer threshold floor (0 = use default 0.02)
+int32 fr_fixed_grasp_steps      # Fixed ramp steps overriding algorithm (-1 = algorithm only, 0 = use YAML default)
 
 # --- AUTO parameters (used when command == "AUTO") ---
 # AUTO runs the full sequence: BASELINE → CLOSING → GRASPING automatically.

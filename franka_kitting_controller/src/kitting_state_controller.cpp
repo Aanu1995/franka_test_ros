@@ -174,8 +174,7 @@ namespace franka_kitting_controller {
     if (fr_load_transfer_min_ < 0.0) fr_load_transfer_min_ = 0.0;
     node_handle.param("grasp_force_hold_time", fr_grasp_force_hold_time_, 2.0);
     node_handle.param("grasp_settle_time", fr_grasp_settle_time_, 0.5);
-
-
+    node_handle.param("fixed_grasp_steps", fr_fixed_grasp_steps_, -1);
 
     if (fr_f_min_ <= 0.0) {
       ROS_ERROR("KittingStateController: f_min must be positive (got %.2f)", fr_f_min_);
@@ -463,6 +462,7 @@ namespace franka_kitting_controller {
       rt_fr_load_transfer_min_ = staging_fr_load_transfer_min_;
       rt_fr_grasp_force_hold_time_ = staging_fr_grasp_force_hold_time_;
       rt_fr_grasp_settle_time_ = staging_fr_grasp_settle_time_;
+      rt_fr_fixed_grasp_steps_ = staging_fr_fixed_grasp_steps_;
 
       fr_f_current_ = rt_fr_f_min_;
       fr_iteration_ = 0;

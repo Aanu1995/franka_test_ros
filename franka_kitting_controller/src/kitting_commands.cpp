@@ -163,6 +163,8 @@ namespace franka_kitting_controller {
     staging_fr_load_transfer_min_    = resolveParam(msg->fr_load_transfer_min, fr_load_transfer_min_);
     staging_fr_grasp_force_hold_time_ = resolveParam(msg->grasp_force_hold_time, fr_grasp_force_hold_time_);
     staging_fr_grasp_settle_time_     = resolveParam(msg->grasp_settle_time, fr_grasp_settle_time_);
+    staging_fr_fixed_grasp_steps_ = (msg->fr_fixed_grasp_steps != 0)
+        ? msg->fr_fixed_grasp_steps : fr_fixed_grasp_steps_;
 
     if (staging_fr_uplift_distance_ > kMaxUpliftDistance) {
       ROS_WARN("KittingStateController: fr_uplift_distance %.4f exceeds max %.4f, clamping",
@@ -236,8 +238,9 @@ namespace franka_kitting_controller {
             staging_fr_uplift_distance_, staging_fr_lift_speed_, staging_fr_uplift_hold_);
     ROS_INFO("    grasp: speed=%.4f m/s  eps=%.4f m",
             staging_fr_grasp_speed_, staging_fr_epsilon_);
-    ROS_INFO("    eval: DF_TH=%.3f  load_min=%.2f N",
-            staging_fr_slip_drop_thresh_, staging_fr_load_transfer_min_);
+    ROS_INFO("    eval: DF_TH=%.3f  load_min=%.2f N  fixed_steps=%d",
+            staging_fr_slip_drop_thresh_, staging_fr_load_transfer_min_,
+            staging_fr_fixed_grasp_steps_);
   }
 
   void KittingStateController::handleAutoCmd(
