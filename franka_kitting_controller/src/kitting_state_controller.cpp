@@ -593,7 +593,7 @@ namespace franka_kitting_controller {
     applyPendingStateTransition();
     updateCartesianCommand(period);
 
-    {
+    if (rate_trigger_()) {
       franka::RobotState robot_state = franka_state_handle_->getRobotState();
 
       double tau_ext_norm = arrayNorm(robot_state.tau_ext_hat_filtered);
@@ -706,7 +706,7 @@ namespace franka_kitting_controller {
                   gripper_snapshot.width - rt_closing_w_cmd_);
       }
 
-      if (rate_trigger_() && kitting_publisher_.trylock()) {
+      if (kitting_publisher_.trylock()) {
         std::array<double, 42> jacobian =
             model_handle_->getZeroJacobian(franka::Frame::kEndEffector);
         std::array<double, 7> gravity = model_handle_->getGravity();
