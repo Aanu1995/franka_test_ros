@@ -3,7 +3,7 @@
 // Use of this source code is governed by the Apache-2.0 license, see LICENSE
 //
 // Tier 1 — Pure unit tests for static/inline utility functions.
-// These tests exercise code directly from the header with no fixture needed.
+// Uses the fixture to access private static methods via friend class.
 
 #include <array>
 #include <cmath>
@@ -11,7 +11,7 @@
 
 #include <gtest/gtest.h>
 
-#include <franka_kitting_controller/kitting_state_controller.h>
+#include "test_helpers.h"
 
 using franka_kitting_controller::GraspState;
 using franka_kitting_controller::KittingStateController;
@@ -20,131 +20,122 @@ using franka_kitting_controller::KittingStateController;
 // arrayNorm tests
 // ============================================================================
 
-TEST(ArrayNormTest, ZeroVector) {
+TEST_F(KittingControllerTestFixture, ArrayNorm_ZeroVector) {
   std::array<double, 7> v = {};
-  EXPECT_DOUBLE_EQ(KittingStateController::arrayNorm(v), 0.0);
+  EXPECT_DOUBLE_EQ(callArrayNorm(v), 0.0);
 }
 
-TEST(ArrayNormTest, UnitVector) {
+TEST_F(KittingControllerTestFixture, ArrayNorm_UnitVector) {
   std::array<double, 7> v = {{1.0, 0, 0, 0, 0, 0, 0}};
-  EXPECT_DOUBLE_EQ(KittingStateController::arrayNorm(v), 1.0);
+  EXPECT_DOUBLE_EQ(callArrayNorm(v), 1.0);
 }
 
-TEST(ArrayNormTest, KnownValue_3_4) {
-  // Classic 3-4-5 triangle
+TEST_F(KittingControllerTestFixture, ArrayNorm_KnownValue_3_4) {
   std::array<double, 7> v = {{3.0, 4.0, 0, 0, 0, 0, 0}};
-  EXPECT_DOUBLE_EQ(KittingStateController::arrayNorm(v), 5.0);
+  EXPECT_DOUBLE_EQ(callArrayNorm(v), 5.0);
 }
 
-TEST(ArrayNormTest, AllOnes) {
+TEST_F(KittingControllerTestFixture, ArrayNorm_AllOnes) {
   std::array<double, 7> v = {{1, 1, 1, 1, 1, 1, 1}};
-  EXPECT_DOUBLE_EQ(KittingStateController::arrayNorm(v), std::sqrt(7.0));
+  EXPECT_DOUBLE_EQ(callArrayNorm(v), std::sqrt(7.0));
 }
 
-TEST(ArrayNormTest, SixElement) {
-  // arrayNorm is templated — verify it works for 6-element arrays too (wrench)
+TEST_F(KittingControllerTestFixture, ArrayNorm_SixElement) {
   std::array<double, 6> v = {{1, 2, 3, 4, 5, 6}};
   double expected = std::sqrt(1 + 4 + 9 + 16 + 25 + 36);
-  EXPECT_NEAR(KittingStateController::arrayNorm(v), expected, 1e-12);
+  EXPECT_NEAR(callArrayNorm(v), expected, 1e-12);
 }
 
-TEST(ArrayNormTest, NegativeValues) {
-  // Norm should be same regardless of sign
+TEST_F(KittingControllerTestFixture, ArrayNorm_NegativeValues) {
   std::array<double, 7> v = {{-3.0, -4.0, 0, 0, 0, 0, 0}};
-  EXPECT_DOUBLE_EQ(KittingStateController::arrayNorm(v), 5.0);
+  EXPECT_DOUBLE_EQ(callArrayNorm(v), 5.0);
 }
 
 // ============================================================================
 // resolveParam tests
 // ============================================================================
 
-TEST(ResolveParamTest, PositiveMsgValue) {
-  // msg_value > 0 → use msg_value
-  EXPECT_DOUBLE_EQ(KittingStateController::resolveParam(5.0, 3.0), 5.0);
+TEST_F(KittingControllerTestFixture, ResolveParam_PositiveMsgValue) {
+  EXPECT_DOUBLE_EQ(callResolveParam(5.0, 3.0), 5.0);
 }
 
-TEST(ResolveParamTest, ZeroMsgValue) {
-  // msg_value == 0 → use default
-  EXPECT_DOUBLE_EQ(KittingStateController::resolveParam(0.0, 3.0), 3.0);
+TEST_F(KittingControllerTestFixture, ResolveParam_ZeroMsgValue) {
+  EXPECT_DOUBLE_EQ(callResolveParam(0.0, 3.0), 3.0);
 }
 
-TEST(ResolveParamTest, NegativeMsgValue) {
-  // msg_value < 0 → use default
-  EXPECT_DOUBLE_EQ(KittingStateController::resolveParam(-1.0, 3.0), 3.0);
+TEST_F(KittingControllerTestFixture, ResolveParam_NegativeMsgValue) {
+  EXPECT_DOUBLE_EQ(callResolveParam(-1.0, 3.0), 3.0);
 }
 
-TEST(ResolveParamTest, SmallPositiveMsgValue) {
-  // Any positive value (even tiny) should be used
-  EXPECT_DOUBLE_EQ(KittingStateController::resolveParam(0.001, 10.0), 0.001);
+TEST_F(KittingControllerTestFixture, ResolveParam_SmallPositive) {
+  EXPECT_DOUBLE_EQ(callResolveParam(0.001, 10.0), 0.001);
 }
 
-TEST(ResolveParamTest, ZeroDefault) {
-  // Zero default with zero msg → return 0
-  EXPECT_DOUBLE_EQ(KittingStateController::resolveParam(0.0, 0.0), 0.0);
+TEST_F(KittingControllerTestFixture, ResolveParam_ZeroDefault) {
+  EXPECT_DOUBLE_EQ(callResolveParam(0.0, 0.0), 0.0);
 }
 
 // ============================================================================
 // stateToString tests
 // ============================================================================
 
-TEST(StateToStringTest, AllStates) {
-  EXPECT_STREQ(KittingStateController::stateToString(GraspState::START), "START");
-  EXPECT_STREQ(KittingStateController::stateToString(GraspState::BASELINE), "BASELINE");
-  EXPECT_STREQ(KittingStateController::stateToString(GraspState::CLOSING_COMMAND), "CLOSING_COMMAND");
-  EXPECT_STREQ(KittingStateController::stateToString(GraspState::CLOSING), "CLOSING");
-  EXPECT_STREQ(KittingStateController::stateToString(GraspState::CONTACT_CONFIRMED), "CONTACT_CONFIRMED");
-  EXPECT_STREQ(KittingStateController::stateToString(GraspState::CONTACT), "CONTACT");
-  EXPECT_STREQ(KittingStateController::stateToString(GraspState::GRASPING), "GRASPING");
-  EXPECT_STREQ(KittingStateController::stateToString(GraspState::UPLIFT), "UPLIFT");
-  EXPECT_STREQ(KittingStateController::stateToString(GraspState::EVALUATE), "EVALUATE");
-  EXPECT_STREQ(KittingStateController::stateToString(GraspState::SUCCESS), "SUCCESS");
-  EXPECT_STREQ(KittingStateController::stateToString(GraspState::FAILED), "FAILED");
+TEST_F(KittingControllerTestFixture, StateToString_AllStates) {
+  EXPECT_STREQ(callStateToString(GraspState::START), "START");
+  EXPECT_STREQ(callStateToString(GraspState::BASELINE), "BASELINE");
+  EXPECT_STREQ(callStateToString(GraspState::CLOSING_COMMAND), "CLOSING_COMMAND");
+  EXPECT_STREQ(callStateToString(GraspState::CLOSING), "CLOSING");
+  EXPECT_STREQ(callStateToString(GraspState::CONTACT_CONFIRMED), "CONTACT_CONFIRMED");
+  EXPECT_STREQ(callStateToString(GraspState::CONTACT), "CONTACT");
+  EXPECT_STREQ(callStateToString(GraspState::GRASPING), "GRASPING");
+  EXPECT_STREQ(callStateToString(GraspState::UPLIFT), "UPLIFT");
+  EXPECT_STREQ(callStateToString(GraspState::EVALUATE), "EVALUATE");
+  EXPECT_STREQ(callStateToString(GraspState::SUCCESS), "SUCCESS");
+  EXPECT_STREQ(callStateToString(GraspState::FAILED), "FAILED");
 }
 
-TEST(StateToStringTest, UnknownState) {
-  // Cast an out-of-range value to GraspState
+TEST_F(KittingControllerTestFixture, StateToString_Unknown) {
   auto unknown = static_cast<GraspState>(999);
-  EXPECT_STREQ(KittingStateController::stateToString(unknown), "UNKNOWN");
+  EXPECT_STREQ(callStateToString(unknown), "UNKNOWN");
 }
 
 // ============================================================================
 // isClosingPhase tests
 // ============================================================================
 
-TEST(IsClosingPhaseTest, ClosingStates) {
-  EXPECT_TRUE(KittingStateController::isClosingPhase(GraspState::CLOSING_COMMAND));
-  EXPECT_TRUE(KittingStateController::isClosingPhase(GraspState::CLOSING));
-  EXPECT_TRUE(KittingStateController::isClosingPhase(GraspState::CONTACT_CONFIRMED));
+TEST_F(KittingControllerTestFixture, IsClosingPhase_ClosingStates) {
+  EXPECT_TRUE(callIsClosingPhase(GraspState::CLOSING_COMMAND));
+  EXPECT_TRUE(callIsClosingPhase(GraspState::CLOSING));
+  EXPECT_TRUE(callIsClosingPhase(GraspState::CONTACT_CONFIRMED));
 }
 
-TEST(IsClosingPhaseTest, NonClosingStates) {
-  EXPECT_FALSE(KittingStateController::isClosingPhase(GraspState::START));
-  EXPECT_FALSE(KittingStateController::isClosingPhase(GraspState::BASELINE));
-  EXPECT_FALSE(KittingStateController::isClosingPhase(GraspState::CONTACT));
-  EXPECT_FALSE(KittingStateController::isClosingPhase(GraspState::GRASPING));
-  EXPECT_FALSE(KittingStateController::isClosingPhase(GraspState::UPLIFT));
-  EXPECT_FALSE(KittingStateController::isClosingPhase(GraspState::EVALUATE));
-  EXPECT_FALSE(KittingStateController::isClosingPhase(GraspState::SUCCESS));
-  EXPECT_FALSE(KittingStateController::isClosingPhase(GraspState::FAILED));
+TEST_F(KittingControllerTestFixture, IsClosingPhase_NonClosingStates) {
+  EXPECT_FALSE(callIsClosingPhase(GraspState::START));
+  EXPECT_FALSE(callIsClosingPhase(GraspState::BASELINE));
+  EXPECT_FALSE(callIsClosingPhase(GraspState::CONTACT));
+  EXPECT_FALSE(callIsClosingPhase(GraspState::GRASPING));
+  EXPECT_FALSE(callIsClosingPhase(GraspState::UPLIFT));
+  EXPECT_FALSE(callIsClosingPhase(GraspState::EVALUATE));
+  EXPECT_FALSE(callIsClosingPhase(GraspState::SUCCESS));
+  EXPECT_FALSE(callIsClosingPhase(GraspState::FAILED));
 }
 
 // ============================================================================
 // isForceRampPhase tests
 // ============================================================================
 
-TEST(IsForceRampPhaseTest, ForceRampStates) {
-  EXPECT_TRUE(KittingStateController::isForceRampPhase(GraspState::GRASPING));
-  EXPECT_TRUE(KittingStateController::isForceRampPhase(GraspState::UPLIFT));
-  EXPECT_TRUE(KittingStateController::isForceRampPhase(GraspState::EVALUATE));
+TEST_F(KittingControllerTestFixture, IsForceRampPhase_ForceRampStates) {
+  EXPECT_TRUE(callIsForceRampPhase(GraspState::GRASPING));
+  EXPECT_TRUE(callIsForceRampPhase(GraspState::UPLIFT));
+  EXPECT_TRUE(callIsForceRampPhase(GraspState::EVALUATE));
 }
 
-TEST(IsForceRampPhaseTest, NonForceRampStates) {
-  EXPECT_FALSE(KittingStateController::isForceRampPhase(GraspState::START));
-  EXPECT_FALSE(KittingStateController::isForceRampPhase(GraspState::BASELINE));
-  EXPECT_FALSE(KittingStateController::isForceRampPhase(GraspState::CLOSING_COMMAND));
-  EXPECT_FALSE(KittingStateController::isForceRampPhase(GraspState::CLOSING));
-  EXPECT_FALSE(KittingStateController::isForceRampPhase(GraspState::CONTACT_CONFIRMED));
-  EXPECT_FALSE(KittingStateController::isForceRampPhase(GraspState::CONTACT));
-  EXPECT_FALSE(KittingStateController::isForceRampPhase(GraspState::SUCCESS));
-  EXPECT_FALSE(KittingStateController::isForceRampPhase(GraspState::FAILED));
+TEST_F(KittingControllerTestFixture, IsForceRampPhase_NonForceRampStates) {
+  EXPECT_FALSE(callIsForceRampPhase(GraspState::START));
+  EXPECT_FALSE(callIsForceRampPhase(GraspState::BASELINE));
+  EXPECT_FALSE(callIsForceRampPhase(GraspState::CLOSING_COMMAND));
+  EXPECT_FALSE(callIsForceRampPhase(GraspState::CLOSING));
+  EXPECT_FALSE(callIsForceRampPhase(GraspState::CONTACT_CONFIRMED));
+  EXPECT_FALSE(callIsForceRampPhase(GraspState::CONTACT));
+  EXPECT_FALSE(callIsForceRampPhase(GraspState::SUCCESS));
+  EXPECT_FALSE(callIsForceRampPhase(GraspState::FAILED));
 }

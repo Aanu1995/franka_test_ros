@@ -269,7 +269,7 @@ TEST_F(KittingControllerTestFixture, HandleGrasping_ClampsUpliftDistance) {
   callHandleGraspingCmd(msg);
 
   EXPECT_TRUE(stateChanged());
-  EXPECT_LE(stagingUpliftDist(), KittingStateController::kMaxUpliftDistance);
+  EXPECT_LE(stagingUpliftDist(), kMaxUpliftDist());
 }
 
 TEST_F(KittingControllerTestFixture, HandleGrasping_ClampsLiftSpeed) {
@@ -288,7 +288,7 @@ TEST_F(KittingControllerTestFixture, HandleGrasping_ClampsLiftSpeed) {
   callHandleGraspingCmd(msg);
 
   EXPECT_TRUE(stateChanged());
-  EXPECT_GE(stagingLiftSpeed(), KittingStateController::kMinLiftSpeed);
+  EXPECT_GE(stagingLiftSpeed(), kMinLiftSpd());
 }
 
 TEST_F(KittingControllerTestFixture, HandleGrasping_ClampsUpliftHoldMin) {
@@ -307,7 +307,7 @@ TEST_F(KittingControllerTestFixture, HandleGrasping_ClampsUpliftHoldMin) {
   callHandleGraspingCmd(msg);
 
   EXPECT_TRUE(stateChanged());
-  EXPECT_GE(stagingUpliftHold(), KittingStateController::kMinUpliftHold);
+  EXPECT_GE(stagingUpliftHold(), kMinUpliftHld());
 }
 
 TEST_F(KittingControllerTestFixture, HandleGrasping_ClampsUpliftHoldMax) {
@@ -326,7 +326,7 @@ TEST_F(KittingControllerTestFixture, HandleGrasping_ClampsUpliftHoldMax) {
   callHandleGraspingCmd(msg);
 
   EXPECT_TRUE(stateChanged());
-  EXPECT_LE(stagingUpliftHold(), KittingStateController::kMaxUpliftHold);
+  EXPECT_LE(stagingUpliftHold(), kMaxUpliftHld());
 }
 
 TEST_F(KittingControllerTestFixture, HandleGrasping_ClampsFMinPositive) {
@@ -682,8 +682,8 @@ TEST_F(KittingControllerTestFixture, StartState_RejectsClosing) {
 
   // We can't call stateCmdCallback directly without a subscriber,
   // but we can verify the guard logic: isClosingPhase and isForceRampPhase
-  EXPECT_FALSE(KittingStateController::isClosingPhase(GraspState::START));
-  EXPECT_FALSE(KittingStateController::isForceRampPhase(GraspState::START));
+  EXPECT_FALSE(callIsClosingPhase(GraspState::START));
+  EXPECT_FALSE(callIsForceRampPhase(GraspState::START));
 }
 
 // ============================================================================

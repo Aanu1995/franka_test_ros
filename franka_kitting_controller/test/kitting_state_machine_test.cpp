@@ -526,14 +526,12 @@ TEST_F(KittingControllerTestFixture, ComputeDownliftPose_Midpoint) {
 // Constants sanity tests
 // ============================================================================
 
-TEST(ConstantsTest, SafetyLimits) {
-  EXPECT_GT(KittingStateController::kMaxClosingSpeed, 0.0);
-  EXPECT_GT(KittingStateController::kMaxUpliftDistance, 0.0);
-  EXPECT_GT(KittingStateController::kMinUpliftHold, 0.0);
-  EXPECT_GT(KittingStateController::kMaxUpliftHold,
-            KittingStateController::kMinUpliftHold);
-  EXPECT_GT(KittingStateController::kGraspTimeout,
-            KittingStateController::kGraspSettleDelay);
+TEST_F(KittingControllerTestFixture, SafetyLimits) {
+  EXPECT_GT(kMaxClosingSpd(), 0.0);
+  EXPECT_GT(kMaxUpliftDist(), 0.0);
+  EXPECT_GT(kMinUpliftHld(), 0.0);
+  EXPECT_GT(kMaxUpliftHld(), kMinUpliftHld());
+  EXPECT_GT(kGraspTimeoutVal(), kGraspSettleDelayVal());
 }
 
 // ============================================================================
@@ -1195,7 +1193,7 @@ TEST_F(KittingControllerTestFixture, UnknownSettle_TransitionsToBaseline) {
   // We can't call update() directly (needs rate_trigger_), but we can
   // verify the state variables are correctly wired.
   // The settle time is kBaselineSettleTime = 2.0s.
-  EXPECT_EQ(KittingStateController::kBaselineSettleTime, 2.0);
+  EXPECT_EQ(kBaselineSettleTm(), 2.0);
 }
 
 // ============================================================================

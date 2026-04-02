@@ -543,6 +543,39 @@ class KittingControllerTestFixture : public ::testing::Test {
     controller_.autoGraspingCallback(e);
   }
 
+  // --- Private static function/constant wrappers (friend-class workaround) ---
+
+  template <std::size_t N>
+  static double callArrayNorm(const std::array<double, N>& arr) {
+    return KittingStateController::arrayNorm(arr);
+  }
+  static double callResolveParam(double msg, double def) {
+    return KittingStateController::resolveParam(msg, def);
+  }
+  static const char* callStateToString(GraspState s) {
+    return KittingStateController::stateToString(s);
+  }
+
+  // --- Private constant accessors (friend-class workaround) ---
+
+  static double kMaxUpliftDist() { return KittingStateController::kMaxUpliftDistance; }
+  static double kMinLiftSpd() { return KittingStateController::kMinLiftSpeed; }
+  static double kMinUpliftHld() { return KittingStateController::kMinUpliftHold; }
+  static double kMaxUpliftHld() { return KittingStateController::kMaxUpliftHold; }
+  static double kMaxClosingSpd() { return KittingStateController::kMaxClosingSpeed; }
+  static double kBaselineSettleTm() { return KittingStateController::kBaselineSettleTime; }
+  static double kGraspTimeoutVal() { return KittingStateController::kGraspTimeout; }
+  static double kGraspSettleDelayVal() { return KittingStateController::kGraspSettleDelay; }
+
+  // --- Private static function accessors ---
+
+  static bool callIsClosingPhase(GraspState s) {
+    return KittingStateController::isClosingPhase(s);
+  }
+  static bool callIsForceRampPhase(GraspState s) {
+    return KittingStateController::isForceRampPhase(s);
+  }
+
   // --- Run internal transitions wrapper ---
 
   void callRunInternalTransitions(const ros::Time& time, double tau,
