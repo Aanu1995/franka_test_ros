@@ -170,6 +170,11 @@ class KittingControllerTestFixture : public ::testing::Test {
     controller_.rt_fr_load_transfer_min_ = 0.02;
     controller_.rt_fr_grasp_force_hold_time_ = 2.0;
     controller_.rt_fr_grasp_settle_time_ = 0.5;
+
+    // Default to EWMA method for existing tests that check sms_detector_ side-effects.
+    // Tests covering the wrench_slope path should override this explicitly.
+    controller_.secure_grasp_method_ = "ewma";
+    controller_.use_wrench_slope_ = false;
   }
 
   // --- Accessor / mutator helpers ---
@@ -347,7 +352,12 @@ class KittingControllerTestFixture : public ::testing::Test {
 
   void callTickGrasping(const ros::Time& time, double tau, double fn,
                         const GripperData& g) {
-    controller_.tickGrasping(time, tau, fn, g);
+    controller_.tickGrasping(time, tau, 0.0, fn, g);
+  }
+
+  void callTickGrasping(const ros::Time& time, double tau, double wrench_norm,
+                        double fn, const GripperData& g) {
+    controller_.tickGrasping(time, tau, wrench_norm, fn, g);
   }
 
   void callTickUplift(const ros::Time& time, double tau, double fn,
@@ -580,7 +590,13 @@ class KittingControllerTestFixture : public ::testing::Test {
 
   void callRunInternalTransitions(const ros::Time& time, double tau,
                                   double fn, const GripperData& g) {
-    controller_.runInternalTransitions(time, tau, fn, g);
+    controller_.runInternalTransitions(time, tau, 0.0, fn, g);
+  }
+
+  void callRunInternalTransitions(const ros::Time& time, double tau,
+                                  double wrench_norm, double fn,
+                                  const GripperData& g) {
+    controller_.runInternalTransitions(time, tau, wrench_norm, fn, g);
   }
 
   // Make a default GripperData for tests that don't care about gripper

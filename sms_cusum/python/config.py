@@ -89,6 +89,83 @@ class SecureGraspConfig:
 
 
 @dataclass
+class WrenchSlopeConfig:
+    """Configuration for wrench slope secure grasp detector.
+
+    Uses EWMA band detection combined with online linear regression
+    slope check on wrench_norm step means. Fires when both the EWMA
+    band and slope checks pass for n_confirm consecutive steps.
+
+    Parameters
+    ----------
+    ewma_lambda : float
+        EWMA smoothing factor (0-1). Higher = more weight on current step.
+    ewma_band_width : float
+        Maximum |mu_late - EWMA| (Nm) for convergence.
+    slope_window : int
+        Number of recent step means used for slope computation.
+    slope_threshold : float
+        Maximum |slope| for signal to be considered flat.
+    n_confirm : int
+        Consecutive converged steps required before declaring secure.
+    std_threshold : float
+        Maximum sigma_late (Nm) for within-step signal stability.
+    min_slope_points : int
+        Minimum step means accumulated before slope check activates.
+    """
+
+    ewma_lambda: float = 0.4
+    ewma_band_width: float = 0.20
+    slope_window: int = 5
+    slope_threshold: float = 0.04
+    n_confirm: int = 3
+    std_threshold: float = 0.14
+    min_slope_points: int = 3
+
+    def __post_init__(self) -> None:
+        if self.n_confirm < 1:
+            raise ValueError(
+                f"WrenchSlopeConfig.n_confirm must be >= 1, "
+                f"got {self.n_confirm}"
+            )
+        if not (0.0 < self.ewma_lambda <= 1.0):
+            raise ValueError(
+                f"WrenchSlopeConfig.ewma_lambda must be in (0, 1], "
+                f"got {self.ewma_lambda}"
+            )
+        if self.ewma_band_width <= 0.0:
+            raise ValueError(
+                f"WrenchSlopeConfig.ewma_band_width must be > 0, "
+                f"got {self.ewma_band_width}"
+            )
+        if self.std_threshold <= 0.0:
+            raise ValueError(
+                f"WrenchSlopeConfig.std_threshold must be > 0, "
+                f"got {self.std_threshold}"
+            )
+        if self.slope_window < 2:
+            raise ValueError(
+                f"WrenchSlopeConfig.slope_window must be >= 2, "
+                f"got {self.slope_window}"
+            )
+        if self.slope_threshold <= 0.0:
+            raise ValueError(
+                f"WrenchSlopeConfig.slope_threshold must be > 0, "
+                f"got {self.slope_threshold}"
+            )
+        if self.min_slope_points < 2:
+            raise ValueError(
+                f"WrenchSlopeConfig.min_slope_points must be >= 2, "
+                f"got {self.min_slope_points}"
+            )
+        if self.min_slope_points > self.slope_window:
+            raise ValueError(
+                f"WrenchSlopeConfig.min_slope_points ({self.min_slope_points}) "
+                f"must be <= slope_window ({self.slope_window})"
+            )
+
+
+@dataclass
 class SMSCusumConfig:
     """Configuration for the SMS-CUSUM detector.
 

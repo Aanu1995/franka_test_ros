@@ -58,15 +58,16 @@ making fixed parameters unreliable. SMS-CUSUM extends standard CUSUM with:
 
 ## Architecture
 
-Three core components, mirrored in both Python and C++:
+Core components, mirrored in both Python and C++:
 
 ```
 sms_cusum/
 ├── python/
 │   ├── cusum.py               # CUSUM detector with noise-adaptive allowance
 │   ├── adaptive_baseline.py   # EMA baseline with lifecycle management
-│   ├── sms_cusum.py           # SMS-CUSUM state machine (core algorithm)
-│   ├── secure_grasp.py        # Secure grasp detector (EWMA band)
+│   ├── sms_cusum.py           # SMS-CUSUM state machine (contact detection + EWMA secure grasp)
+│   ├── secure_grasp.py        # Secure grasp detector: EWMA band on tau_ext_norm
+│   ├── wrench_slope.py        # Secure grasp detector: EWMA band + slope on wrench_norm
 │   ├── config.py              # Parameter configuration dataclasses
 │   ├── validate_offline.py    # Offline validation against CSV trial data
 │   ├── tune_parameters.py     # Grid search parameter optimization
@@ -76,12 +77,14 @@ sms_cusum/
 │       ├── cusum.hpp           # Header-only CUSUM (noexcept, zero alloc)
 │       ├── adaptive_baseline.hpp  # Header-only baseline estimator
 │       ├── sms_cusum.hpp       # Header-only SMS-CUSUM state machine
-│       └── secure_grasp.hpp    # Header-only secure grasp detector
+│       ├── secure_grasp.hpp    # Header-only secure grasp detector (EWMA)
+│       └── wrench_slope.hpp    # Header-only secure grasp detector (wrench slope)
 └── tests/
     ├── test_cusum.py           # 10 CUSUM unit tests
     ├── test_baseline.py        # 11 baseline unit tests
     ├── test_sms_cusum.py       # 18 SMS-CUSUM integration tests
-    └── test_secure_grasp.py    # 13 secure grasp tests (EWMA)
+    ├── test_secure_grasp.py    # 13 secure grasp tests (EWMA)
+    └── test_wrench_slope.py    # 16 wrench slope detector tests
 ```
 
 ### 1. CUSUM Detector (`cusum.py` / `cusum.hpp`)
@@ -291,12 +294,13 @@ python3 python/tune_parameters.py --data-dir ../kitting_bags2
 
 ## Secure Grasp Detection
 
-After contact is confirmed and the force ramp begins, SMS-CUSUM detects
-when the grasp has become secure — i.e., when increasing grip force no
-longer changes the steady-state tau_ext_norm, indicating the object is
-fully compressed and additional force is unnecessary.
+Two independent algorithms are provided for secure grasp detection during
+the force ramp. The calling application (e.g., the kitting controller)
+selects which algorithm to use and passes the appropriate signal.
 
-### Algorithm: EWMA Band Detection
+### Algorithm 1: EWMA Band Detection (`SecureGraspDetector`)
+
+**Signal**: `tau_ext_norm` (external torque norm)
 
 Tracks an exponentially weighted moving average (EWMA) of the step-level
 settled means (Roberts, 1959; Lucas & Saccucci, 1990). At each step, the
@@ -309,11 +313,12 @@ Detection:      |mu_late[N] - Z_N| < band_width  AND  sigma_late[N] < std_thresh
 Confirmation:   above holds for n_confirm consecutive steps
 ```
 
-- Adapts naturally to different objects' tau_ext_norm baselines
-- Recursive O(1) computation per step, zero allocation
-- Empirical result: **100% detection (29/29 trials), avg 3.2 steps**
+- Fast detection for light objects (avg 3.3 steps)
+- O(1) per sample, zero allocation
+- **Limitation**: Produces false positives on heavy objects (>1 kg) because
+  tau_ext_norm appears locally converged while actually drifting slowly
 
-### Parameters
+#### Parameters (`SecureGraspConfig`)
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -322,32 +327,111 @@ Confirmation:   above holds for n_confirm consecutive steps
 | `n_confirm` | 2 | Consecutive converged steps required |
 | `std_threshold` | 0.14 Nm | Max within-step std for signal stability |
 
-### Lifecycle
+#### Usage
 
 ```python
-from sms_cusum.python.config import SMSCusumConfig
-from sms_cusum.python.sms_cusum import SMSCusum, GraspState
+from sms_cusum.python.secure_grasp import SecureGraspDetector
+from sms_cusum.python.config import SecureGraspConfig
 
-detector = SMSCusum(SMSCusumConfig())
-
-# Phase 1: Baseline + Contact (as before)
-...
-
-# Phase 3: Secure grasp detection
-detector.enter_grasping()           # Resets detector, begins step 0
-for step in range(num_steps):
-    for sample in late_holding:
-        detector.update(sample)
-    result = detector.finalize_grasp_step()
-    if result.detected:
-        break                       # Secure grasp — skip to UPLIFT
-    detector.begin_grasp_step(step + 1)
+detector = SecureGraspDetector(SecureGraspConfig())
+detector.begin_step(0)
+for sample in late_holding_step0:
+    detector.update(sample.tau_ext_norm)
+result = detector.finalize_step()
+# result.secure, result.d_mu, result.std_late, result.converge_streak
 ```
 
-### Validation
+### Algorithm 2: Wrench Slope Detection (`WrenchSlopeDetector`)
 
-Validated against 27 trials across 6 objects (object0–object5):
-100% detection rate, average 3.3 force ramp steps.
+**Signal**: `wrench_norm` (external wrench norm)
+
+Combines EWMA band detection with online linear regression slope check
+on wrench_norm step means. Both criteria must pass simultaneously for
+n_confirm consecutive steps. The slope check catches gradual signal drift
+that EWMA alone cannot detect — this is the key failure mode for heavy
+objects where the signal appears locally converged but is trending over
+many steps.
+
+```
+EWMA check:     |mu_late[N] - Z_N| < band_width  AND  sigma_late[N] < std_threshold
+Slope check:    |slope(last W means)| < slope_threshold
+Confirmation:   both checks pass for n_confirm consecutive steps
+```
+
+The slope is computed via online linear regression over the last
+`slope_window` step means:
+
+```
+slope = sum((i - x_mean) * (mu_i - y_mean)) / sum((i - x_mean)^2)
+```
+
+- **100% accuracy** across all 41 trials (9 objects, including heavy >1 kg)
+- **0 false positives** on heavy objects (vs 6 false positives with EWMA alone)
+- O(1) per sample, O(W) per step finalization (W=5, fixed cost)
+- Requires 2-5 extra steps for light objects compared to EWMA
+
+#### Parameters (`WrenchSlopeConfig`)
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `ewma_lambda` | 0.4 | Smoothing factor (0-1). Higher = more weight on current step |
+| `ewma_band_width` | 0.20 Nm | Max deviation from EWMA for convergence |
+| `slope_window` | 5 | Number of recent step means for slope computation |
+| `slope_threshold` | 0.04 | Max |slope| for signal to be considered flat |
+| `n_confirm` | 3 | Consecutive converged steps required |
+| `std_threshold` | 0.14 Nm | Max within-step std for signal stability |
+| `min_slope_points` | 3 | Min step means before slope check activates |
+
+#### Usage
+
+```python
+from sms_cusum.python.wrench_slope import WrenchSlopeDetector
+from sms_cusum.python.config import WrenchSlopeConfig
+
+detector = WrenchSlopeDetector(WrenchSlopeConfig())
+detector.begin_step(0)
+for sample in late_holding_step0:
+    detector.update(sample.wrench_norm)
+result = detector.finalize_step()
+# result.secure, result.d_mu, result.slope, result.std_late, result.converge_streak
+```
+
+#### C++ Usage
+
+```cpp
+#include <sms_cusum/wrench_slope.hpp>
+
+sms_cusum::WrenchSlopeDetector detector(sms_cusum::WrenchSlopeConfig{});
+detector.begin_step(0);
+detector.update(wrench_norm);  // feed late-segment samples
+auto result = detector.finalize_step();
+if (result.secure) { /* grasp is secure */ }
+```
+
+### Choosing Between Algorithms
+
+| | EWMA (`SecureGraspDetector`) | Wrench Slope (`WrenchSlopeDetector`) |
+|---|---|---|
+| **Signal** | `tau_ext_norm` | `wrench_norm` |
+| **Accuracy (all objects)** | 85.4% | **100%** |
+| **False positives (heavy)** | 6/7 trials | **0/7 trials** |
+| **Avg steps (light objects)** | 3.3 | 5-8 |
+| **Best for** | Light objects only | All objects including heavy |
+
+The calling application (e.g., kitting controller) selects the method and
+creates the appropriate detector directly. Both detectors share the same
+interface pattern: `begin_step()`, `update()`, `finalize_step()`, `reset()`.
+
+### Offline Validation
+
+Run secure grasp validation with method selection:
+```bash
+# Wrench slope (recommended)
+python3 python/validate_offline.py --data-dir ../kitting_bags --method wrench_slope
+
+# EWMA (original)
+python3 python/validate_offline.py --data-dir ../kitting_bags --method ewma
+```
 
 ## Extensibility
 

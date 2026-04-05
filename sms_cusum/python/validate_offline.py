@@ -25,7 +25,8 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from python.sms_cusum import SMSCusum, GraspState, DetectionEvent
-from python.config import SMSCusumConfig, CusumStageConfig
+from python.config import SMSCusumConfig, CusumStageConfig, WrenchSlopeConfig
+from python.wrench_slope import WrenchSlopeDetector
 
 
 @dataclass
@@ -45,6 +46,9 @@ class TrialResult:
     k_effective: float
     cusum_at_alarm: float
     events: list[DetectionEvent]
+    # Secure grasp fields
+    secure_grasp_detected: bool = False
+    secure_grasp_step: Optional[int] = None
 
 
 def load_trial(csv_path: str) -> list[dict]:
@@ -67,18 +71,39 @@ def run_trial(
     trial_name: str,
     config: SMSCusumConfig,
     sample_rate: float = 250.0,
+    method: str = "ewma",
+    wrench_slope_config: Optional[WrenchSlopeConfig] = None,
 ) -> TrialResult:
     """Run SMS-CUSUM on a single trial and compare to ground truth."""
     detector = SMSCusum(config)
+    ws_detector = None
+    if method == "wrench_slope":
+        ws_detector = WrenchSlopeDetector(wrench_slope_config or WrenchSlopeConfig())
 
     gt_contact_idx = find_gt_contact_index(rows)
     has_contact_gt = gt_contact_idx is not None
 
     contact_det_idx = None
     entered_closing = False
+    entered_grasping = False
+    current_grasp_step = 0
+    prev_grasp_label = None
+    secure_grasp_detected = False
+    secure_grasp_step = None
+    step_sample_count = 0
+    step_total_samples = 0  # estimated total samples per step (set from first step)
+
+    # Validate that wrench_norm column exists when wrench_slope method is selected
+    if method == "wrench_slope" and rows and "wrench_norm" not in rows[0]:
+        raise KeyError(
+            f"Trial '{trial_name}' CSV is missing 'wrench_norm' column, "
+            f"which is required for method='wrench_slope'. "
+            f"Use --method ewma for CSVs without wrench data."
+        )
 
     for i, row in enumerate(rows):
         tau_ext_norm = float(row["tau_ext_norm"])
+        wrench_norm = float(row["wrench_norm"]) if method == "wrench_slope" else 0.0
         gt_label = row["state_label"]
 
         # Enter closing when ground truth indicates gripper is closing
@@ -87,13 +112,82 @@ def run_trial(
                 detector.enter_closing()
                 entered_closing = True
 
-        event = detector.update(tau_ext_norm)
+        # Enter grasping when ground truth transitions to first GRASP state
+        if not entered_grasping and gt_label.startswith("GRASP_"):
+            if method == "wrench_slope" and ws_detector is not None:
+                ws_detector.reset()
+                ws_detector.begin_step(0)
+            else:
+                detector.enter_grasping()
+            entered_grasping = True
+            current_grasp_step = 0
+            prev_grasp_label = gt_label
+
+        # Detect grasp step transitions
+        if entered_grasping and gt_label.startswith("GRASP_"):
+            if gt_label != prev_grasp_label:
+                # Record total samples for the step that just ended
+                if prev_grasp_label is not None and step_total_samples == 0:
+                    step_total_samples = step_sample_count  # learn from first step
+                # Finalize previous step
+                if prev_grasp_label is not None:
+                    if method == "wrench_slope" and ws_detector is not None:
+                        ws_result = ws_detector.finalize_step()
+                        if ws_result.secure and not secure_grasp_detected:
+                            secure_grasp_detected = True
+                            secure_grasp_step = current_grasp_step + 1
+                    else:
+                        result = detector.finalize_grasp_step()
+                        if result.detected and not secure_grasp_detected:
+                            secure_grasp_detected = True
+                            secure_grasp_step = current_grasp_step + 1
+                # Begin new step
+                current_grasp_step += 1
+                if method == "wrench_slope" and ws_detector is not None:
+                    ws_detector.begin_step(current_grasp_step)
+                else:
+                    detector.begin_grasp_step(current_grasp_step)
+                step_sample_count = 0
+                prev_grasp_label = gt_label
+
+        # Feed only late-half samples to detectors (matching controller behavior)
+        if entered_grasping and gt_label.startswith("GRASP_"):
+            step_sample_count += 1
+            # For the first step, we don't know total length yet — feed all samples
+            # (the detector seeds EWMA on step 0, so extra early samples are harmless).
+            # For subsequent steps, use the first step's length as the reference.
+            if step_total_samples > 0:
+                midpoint = step_total_samples // 2
+                in_late_half = step_sample_count > midpoint
+            else:
+                in_late_half = True  # first step: feed all samples
+            if in_late_half:
+                if method == "wrench_slope" and ws_detector is not None:
+                    ws_detector.update(wrench_norm)
+                else:
+                    detector.update(tau_ext_norm)
+            event = None
+        else:
+            event = detector.update(tau_ext_norm)
 
         if event is not None:
             if event.new_state == GraspState.CONTACT and contact_det_idx is None:
                 contact_det_idx = i
 
-    # Compute metrics
+    # Finalize last grasp step
+    if entered_grasping and not secure_grasp_detected:
+        if method == "wrench_slope" and ws_detector is not None:
+            ws_result = ws_detector.finalize_step()
+            if ws_result.secure:
+                secure_grasp_detected = True
+                secure_grasp_step = current_grasp_step + 1
+        else:
+            result = detector.finalize_grasp_step()
+            if result.detected:
+                secure_grasp_detected = True
+                secure_grasp_step = current_grasp_step + 1
+
+    # Compute contact metrics
     contact_latency_samples = None
     contact_latency_ms = None
     if has_contact_gt and contact_det_idx is not None:
@@ -117,6 +211,8 @@ def run_trial(
         k_effective=detector.contact_cusum.k_effective,
         cusum_at_alarm=detector.contact_cusum.statistic,
         events=detector.events,
+        secure_grasp_detected=secure_grasp_detected,
+        secure_grasp_step=secure_grasp_step,
     )
 
 
@@ -186,16 +282,49 @@ def print_results_table(results: list[TrialResult]) -> None:
     print()
 
 
+def print_secure_grasp_table(results: list[TrialResult], method: str) -> None:
+    """Print secure grasp detection results per trial."""
+    print(f"\n{'='*80}")
+    print(f"SECURE GRASP DETECTION RESULTS (method: {method})")
+    print(f"{'='*80}")
+    print(f"{'Trial':<30s} {'Det?':>5s} {'Step':>6s} {'Note'}")
+    print("-" * 60)
+
+    for r in results:
+        det_str = "YES" if r.secure_grasp_detected else "no"
+        step_str = str(r.secure_grasp_step) if r.secure_grasp_step is not None else "—"
+        note = ""
+        if "object6" in r.trial_name and r.secure_grasp_detected:
+            if r.secure_grasp_step is not None and r.secure_grasp_step <= 5:
+                note = "FALSE POSITIVE"
+        print(f"  {r.trial_name:<28s} {det_str:>5s} {step_str:>6s}  {note}")
+
+    # Summary
+    detected = [r for r in results if r.secure_grasp_detected]
+    obj6_fp = [r for r in results
+               if "object6" in r.trial_name and r.secure_grasp_detected
+               and r.secure_grasp_step is not None and r.secure_grasp_step <= 5]
+    print(f"\nSecure grasps detected: {len(detected)}/{len(results)}")
+    print(f"Object6 false positives: {len(obj6_fp)}")
+    print()
+
+
 def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(description="SMS-CUSUM offline validation")
     parser.add_argument(
         "--data-dir",
-        default=str(Path(__file__).resolve().parent.parent.parent / "kitting_bags2"),
-        help="Path to kitting_bags2 directory with trial data",
+        default=str(Path(__file__).resolve().parent.parent.parent / "kitting_bags"),
+        help="Path to kitting_bags directory with trial data",
     )
     parser.add_argument("--plot", action="store_true", help="Generate overlay plots")
+    parser.add_argument(
+        "--method",
+        choices=["ewma", "wrench_slope"],
+        default="wrench_slope",
+        help="Secure grasp detection method (default: wrench_slope)",
+    )
     args = parser.parse_args()
 
     trials = discover_trials(args.data_dir)
@@ -204,17 +333,21 @@ def main() -> None:
         return
 
     print(f"Found {len(trials)} trial(s) in {args.data_dir}")
+    print(f"Secure grasp method: {args.method}")
 
     config = SMSCusumConfig()
+    ws_config = WrenchSlopeConfig() if args.method == "wrench_slope" else None
     results = []
 
     for name, csv_path in trials:
         print(f"  Processing {name}...")
         rows = load_trial(csv_path)
-        result = run_trial(rows, name, config)
+        result = run_trial(rows, name, config, method=args.method,
+                           wrench_slope_config=ws_config)
         results.append(result)
 
     print_results_table(results)
+    print_secure_grasp_table(results, args.method)
 
     if args.plot:
         try:

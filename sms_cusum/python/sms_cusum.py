@@ -399,3 +399,4 @@ class SMSCusum:
         self._baseline.unfreeze()
         self._contact_cusum.reset()
         self._secure_grasp.reset()
+        self._events.clear()

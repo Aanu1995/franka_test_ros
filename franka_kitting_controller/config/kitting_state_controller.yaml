@@ -11,8 +11,24 @@ kitting_state_controller:
   # Uses built-in optimized parameters: k_min=0.02, h=0.3, debounce=5 samples, noise_mult=2.0
   # Baseline: 50 samples (0.2s at 250Hz), EMA alpha=0.01
 
-  # Secure grasp detection (EWMA band): built-in parameters
+  # Secure grasp detection method: "ewma" or "wrench_slope" (default: wrench_slope)
+  #   ewma:         EWMA band on tau_ext_norm — fast (avg 3 steps) but false positives on heavy objects
+  #   wrench_slope: EWMA band + slope check on wrench_norm — 100% accuracy, handles heavy objects
+  secure_grasp_method: "wrench_slope"
+
+  # EWMA secure grasp parameters (used when secure_grasp_method: "ewma")
+  # Signal: tau_ext_norm. Built-in to SMS-CUSUM, not configurable via ROS params.
   # ewma_lambda=0.4, band_width=0.12 Nm, n_confirm=2, std_threshold=0.14 Nm
+
+  # Wrench slope secure grasp parameters (used when secure_grasp_method: "wrench_slope")
+  # Signal: wrench_norm. Loaded from ROS params below.
+  ws_ewma_lambda: 0.4          # EWMA smoothing factor (0-1)
+  ws_ewma_band_width: 0.20     # [Nm] Max deviation from EWMA for convergence
+  ws_slope_window: 5            # Number of recent step means for slope computation
+  ws_slope_threshold: 0.04      # Max |slope| for signal to be considered flat
+  ws_n_confirm: 3               # Consecutive converged steps required
+  ws_std_threshold: 0.14        # [Nm] Max within-step std for signal stability
+  ws_min_slope_points: 3        # Min step means before slope check activates (must be <= ws_slope_window)
 
   # Grasping parameters (overridable per-command via KittingGripperCommand)
   # After GRASPING command, controller runs a contact-only force ramp:

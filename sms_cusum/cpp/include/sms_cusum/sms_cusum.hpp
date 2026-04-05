@@ -323,6 +323,7 @@ public:
         baseline_.unfreeze();
         contact_cusum_.reset();
         secure_grasp_.reset();
+        event_count_ = 0;
     }
 
 private:

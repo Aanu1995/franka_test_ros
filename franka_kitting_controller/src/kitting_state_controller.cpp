@@ -176,6 +176,49 @@ namespace franka_kitting_controller {
     node_handle.param("grasp_settle_time", fr_grasp_settle_time_, 0.5);
     node_handle.param("fixed_grasp_steps", fr_fixed_grasp_steps_, -1);
 
+    node_handle.param<std::string>("secure_grasp_method", secure_grasp_method_, "wrench_slope");
+    if (secure_grasp_method_ != "ewma" && secure_grasp_method_ != "wrench_slope") {
+      ROS_ERROR("KittingStateController: unknown secure_grasp_method '%s' "
+                "(must be 'ewma' or 'wrench_slope')", secure_grasp_method_.c_str());
+      return false;
+    }
+    use_wrench_slope_ = (secure_grasp_method_ == "wrench_slope");
+
+    // Load wrench slope parameters from ROS params
+    if (use_wrench_slope_) {
+      sms_cusum::WrenchSlopeConfig ws_cfg;
+      node_handle.param("ws_ewma_lambda", ws_cfg.ewma_lambda, 0.4);
+      node_handle.param("ws_ewma_band_width", ws_cfg.ewma_band_width, 0.20);
+      node_handle.param("ws_slope_window", ws_cfg.slope_window, 5);
+      node_handle.param("ws_slope_threshold", ws_cfg.slope_threshold, 0.04);
+      node_handle.param("ws_n_confirm", ws_cfg.n_confirm, 3);
+      node_handle.param("ws_std_threshold", ws_cfg.std_threshold, 0.14);
+      node_handle.param("ws_min_slope_points", ws_cfg.min_slope_points, 3);
+      if (ws_cfg.ewma_band_width <= 0.0 || ws_cfg.slope_threshold <= 0.0 || ws_cfg.std_threshold <= 0.0) {
+        ROS_ERROR("KittingStateController: wrench_slope thresholds must be > 0 "
+                  "(ewma_bw=%.4f, slope_t=%.4f, std_t=%.4f)",
+                  ws_cfg.ewma_band_width, ws_cfg.slope_threshold, ws_cfg.std_threshold);
+        return false;
+      }
+      wrench_slope_detector_.set_config(ws_cfg);
+      const auto& eff = wrench_slope_detector_.config();
+      ROS_INFO("KittingStateController: Secure grasp method: wrench_slope"
+               " | ewma_bw=%.2f | slope_w=%d | slope_t=%.3f | nc=%d | std_t=%.2f"
+               " | min_pts=%d | lambda=%.2f",
+               eff.ewma_band_width, eff.slope_window,
+               eff.slope_threshold, eff.n_confirm, eff.std_threshold,
+               eff.min_slope_points, eff.ewma_lambda);
+      if (eff.ewma_band_width != ws_cfg.ewma_band_width ||
+          eff.slope_window != ws_cfg.slope_window ||
+          eff.n_confirm != ws_cfg.n_confirm ||
+          eff.ewma_lambda != ws_cfg.ewma_lambda ||
+          eff.min_slope_points != ws_cfg.min_slope_points) {
+        ROS_WARN("KittingStateController: some wrench_slope params were clamped to valid range");
+      }
+    } else {
+      ROS_INFO("KittingStateController: Secure grasp method: ewma (built-in SMS-CUSUM)");
+    }
+
     if (fr_f_min_ <= 0.0) {
       ROS_ERROR("KittingStateController: f_min must be positive (got %.2f)", fr_f_min_);
       return false;
@@ -375,6 +418,7 @@ namespace franka_kitting_controller {
     fr_early_count_ = 0;
     fr_late_sum_ = 0.0;
     fr_late_count_ = 0;
+    wrench_slope_detector_.reset();
   }
 
   void KittingStateController::applyPendingStateTransition() {
@@ -648,8 +692,8 @@ namespace franka_kitting_controller {
       {
         GraspState fr_state = current_state_.load(std::memory_order_relaxed);
         if (isForceRampPhase(fr_state)) {
-          runInternalTransitions(time, tau_ext_norm, support_force,
-                                gripper_snapshot);
+          runInternalTransitions(time, tau_ext_norm, wrench_norm,
+                                support_force, gripper_snapshot);
         }
       }
 

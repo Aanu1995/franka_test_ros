@@ -500,29 +500,30 @@ Once CONTACT is declared, it is **latched** — the detector stops evaluating. T
 
 ## Grasp: Secure Grasp Detection
 
-After contact is confirmed and the force ramp begins, the SMS-CUSUM secure grasp detector monitors tau_ext_norm during each step's HOLDING phase to detect when the grasp has become secure — i.e., when increasing grip force no longer changes the steady-state torque, indicating the object is fully compressed.
+After contact is confirmed and the force ramp begins, a secure grasp detector monitors the force/torque signal during each step's HOLDING phase to detect when the grasp has become secure — i.e., when increasing grip force no longer changes the steady-state signal, indicating the object is fully compressed.
 
 ### Signal Extraction
 
 During each GRASP_k step, the HOLDING phase is split into two segments:
 - **Early segment** (first half): Transient settling after force increment (ignored by the detector)
-- **Late segment** (last half): Steady-state samples fed to `sms_detector_.update(tau_ext_norm)`
+- **Late segment** (last half): Steady-state samples fed to the active detector
 
-At each step's completion (`STEP_COMPLETE`), `sms_detector_.finalize_grasp_step()` computes the settled mean `mu_late[N]` and standard deviation `sigma_late[N]` from the accumulated late-segment samples, then applies the selected detection algorithm.
+At each step's completion (`STEP_COMPLETE`), the detector computes the settled mean and standard deviation from the accumulated late-segment samples, then applies the selected detection algorithm.
 
 When secure grasp is detected, the force ramp terminates early and transitions directly to UPLIFT, skipping remaining force increments. This avoids unnecessary force on the object while maintaining grasp quality (validated by the subsequent UPLIFT + EVALUATE phase).
 
-### Algorithm: EWMA Band Detection
+### Method Selection
 
-Tracks an exponentially weighted moving average (EWMA) of the step-level settled means (Roberts, 1959). At each step, the new mean is compared to the running EWMA; if it stays within a tolerance band for `n_confirm` consecutive steps, the grasp is declared secure.
+The controller selects which secure grasp algorithm to use via the `secure_grasp_method` config parameter. Both algorithms are implemented independently in the `sms_cusum` library; the controller creates and calls the selected detector directly.
 
-```
-Z_N = lambda * mu_late[N] + (1 - lambda) * Z_{N-1}
-Secure when: |mu_late[N] - Z_N| < band_width AND sigma_late[N] < std_threshold
-             for n_confirm consecutive steps
-```
+| Method | Signal | Accuracy | Avg Steps | Best For |
+|--------|--------|----------|-----------|----------|
+| `"ewma"` | `tau_ext_norm` | 85.4% | 3.3 | Light objects only |
+| **`"wrench_slope"`** (default) | **`wrench_norm`** | **100%** | **5-8** | **All objects including heavy** |
 
-### Parameters
+### Algorithm 1: EWMA Band Detection (`secure_grasp_method: "ewma"`)
+
+Uses `sms_cusum::SecureGraspDetector` on `tau_ext_norm`. Tracks an EWMA of step-level settled means and checks convergence within a tolerance band.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -531,19 +532,49 @@ Secure when: |mu_late[N] - Z_N| < band_width AND sigma_late[N] < std_threshold
 | `n_confirm` | 2 | Consecutive converged steps required |
 | `std_threshold` | 0.14 Nm | Max within-step std for stability |
 
+When selected, the controller calls `sms_detector_.update(tau_ext_norm)` during HOLDING and `sms_detector_.finalize_grasp_step()` at STEP_COMPLETE.
+
+### Algorithm 2: Wrench Slope Detection (`secure_grasp_method: "wrench_slope"`)
+
+Uses `sms_cusum::WrenchSlopeDetector` on `wrench_norm`. Combines EWMA band detection with online linear regression slope check. Both criteria must pass for `n_confirm` consecutive steps. The slope check catches gradual signal drift that EWMA alone cannot detect — this eliminates false positives on heavy objects (>1 kg).
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `ewma_lambda` | 0.4 | Smoothing factor (0-1) |
+| `ewma_band_width` | 0.20 Nm | Max deviation from EWMA |
+| `slope_window` | 5 | Number of recent step means for slope computation |
+| `slope_threshold` | 0.04 | Max \|slope\| for signal to be considered flat |
+| `n_confirm` | 3 | Consecutive converged steps required |
+| `std_threshold` | 0.14 Nm | Max within-step std for stability |
+| `min_slope_points` | 3 | Min step means before slope check activates |
+
+When selected, the controller calls `wrench_slope_detector_.update(wrench_norm)` during HOLDING and `wrench_slope_detector_.finalize_step()` at STEP_COMPLETE.
+
 ### Integration
 
-The secure grasp detector is integrated inside the SMS-CUSUM state machine (`sms_cusum::SMSCusum`), extending the state graph:
+The controller owns two independent detectors:
+- `sms_detector_` (`sms_cusum::SMSCusum`) — handles contact detection and EWMA secure grasp
+- `wrench_slope_detector_` (`sms_cusum::WrenchSlopeDetector`) — handles wrench slope secure grasp
 
-```
-FREE_MOTION -> CLOSING -> CONTACT -> GRASPING -> SECURE_GRASP
-```
+Based on `secure_grasp_method_`, the controller routes signals and finalizations to the active detector:
 
-The controller calls:
-- `sms_detector_.enter_grasping()` when the force ramp begins
-- `sms_detector_.update(tau_ext_norm)` during the late segment of each HOLDING phase
-- `sms_detector_.finalize_grasp_step()` at each STEP_COMPLETE to check for convergence
-- `sms_detector_.begin_grasp_step(iteration)` when advancing to the next step
+```cpp
+// HOLDING phase (late segment):
+if (secure_grasp_method_ == "wrench_slope") {
+    wrench_slope_detector_.update(wrench_norm);
+} else {
+    sms_detector_.update(tau_ext_norm);
+}
+
+// STEP_COMPLETE:
+if (secure_grasp_method_ == "wrench_slope") {
+    auto result = wrench_slope_detector_.finalize_step();
+    secure = result.secure;
+} else {
+    auto result = sms_detector_.finalize_grasp_step();
+    secure = result.detected;
+}
+```
 
 All operations are O(1) per sample with zero dynamic allocation, safe for the 250 Hz real-time loop.
 

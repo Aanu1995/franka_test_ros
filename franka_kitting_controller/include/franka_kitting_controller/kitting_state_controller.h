@@ -40,6 +40,7 @@
 #include <franka_hw/trigger_rate.h>
 
 #include <sms_cusum/sms_cusum.hpp>
+#include <sms_cusum/wrench_slope.hpp>
 
 namespace franka_kitting_controller {
 
@@ -188,6 +189,15 @@ namespace franka_kitting_controller {
     bool contact_latched_{false};
 
     sms_cusum::SMSCusum sms_detector_{sms_cusum::SMSCusumConfig{}};
+
+    // Secure grasp method selection: "ewma" or "wrench_slope"
+    // When "wrench_slope", the controller uses wrench_slope_detector_ directly
+    // instead of sms_detector_'s built-in EWMA secure grasp.
+    std::string secure_grasp_method_{"wrench_slope"};
+    bool use_wrench_slope_{true};  // Cached from secure_grasp_method_ for RT-safe comparison
+
+    // RT-thread-only detector; no synchronization needed (single-threaded RT access)
+    sms_cusum::WrenchSlopeDetector wrench_slope_detector_{};
     std::atomic<bool> gripper_stop_sent_{false};
     std::atomic<bool> gripper_stopped_{false};
     std::atomic<bool> width_capture_pending_{false};
@@ -323,6 +333,7 @@ namespace franka_kitting_controller {
                                double tau_ext_norm);
     void runInternalTransitions(const ros::Time& time,
                                 double tau_ext_norm,
+                                double wrench_norm,
                                 double support_force,
                                 const GripperData& gripper_snapshot);
     void resetForceRampState();
@@ -410,7 +421,7 @@ namespace franka_kitting_controller {
                        double tau_ext_norm);
 
     void tickGrasping(const ros::Time& time, double tau_ext_norm,
-                      double support_force,
+                      double wrench_norm, double support_force,
                       const GripperData& gripper_snapshot);
     void tickUplift(const ros::Time& time, double tau_ext_norm,
                     double support_force,

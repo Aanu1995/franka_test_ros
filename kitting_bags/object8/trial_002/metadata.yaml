@@ -1,0 +1,13 @@
+object_name: object8
+trial_number: 2
+bag_filename: "20260402_144729_object8_trial_002.bag"
+csv_filename: "trial_002_signals.csv"
+start_time: "20260402_144729"
+stop_time: "20260402_144756"
+total_samples: 5877
+topics_recorded:
+  - /kitting_state_controller/kitting_state_data
+  - /kitting_controller/state
+export_csv_on_stop: true
+detector_parameters:
+  method: torque_drop

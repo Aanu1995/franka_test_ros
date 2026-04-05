@@ -145,10 +145,11 @@ namespace franka_kitting_controller {
 
   void KittingStateController::runInternalTransitions(const ros::Time& time,
                                                       double tau_ext_norm,
+                                                      double wrench_norm,
                                                       double support_force,
                                                       const GripperData& gripper_snapshot) {
     switch (current_state_.load(std::memory_order_relaxed)) {
-      case GraspState::GRASPING:  tickGrasping(time, tau_ext_norm, support_force, gripper_snapshot); break;
+      case GraspState::GRASPING:  tickGrasping(time, tau_ext_norm, wrench_norm, support_force, gripper_snapshot); break;
       case GraspState::UPLIFT:    tickUplift(time, tau_ext_norm, support_force, gripper_snapshot);   break;
       case GraspState::EVALUATE:  tickEvaluate(time, tau_ext_norm, support_force, gripper_snapshot); break;
       default: break;
@@ -157,12 +158,20 @@ namespace franka_kitting_controller {
 
   void KittingStateController::tickGrasping(const ros::Time& time,
                                             double tau_ext_norm,
+                                            double wrench_norm,
                                             double support_force,
                                             const GripperData& gripper_snapshot) {
     if (!fr_grasping_phase_initialized_) {
       fr_phase_start_time_ = time;
       fr_grasping_phase_initialized_ = true;
-      sms_detector_.enter_grasping();
+      if (use_wrench_slope_) {
+        wrench_slope_detector_.reset();
+        wrench_slope_detector_.begin_step(0);
+        // Still transition SMS-CUSUM to GRASPING state for state tracking
+        sms_detector_.enter_grasping();
+      } else {
+        sms_detector_.enter_grasping();
+      }
     }
 
     double elapsed = (time - fr_phase_start_time_).toSec();
@@ -234,7 +243,11 @@ namespace franka_kitting_controller {
         double hold_elapsed = (time - fr_ramp_step_start_time_).toSec();
 
         if (hold_elapsed >= rt_fr_grasp_force_hold_time_ / 2.0) {
-          sms_detector_.update(tau_ext_norm);
+          if (use_wrench_slope_) {
+            wrench_slope_detector_.update(wrench_norm);
+          } else {
+            sms_detector_.update(tau_ext_norm);
+          }
         }
 
         if (hold_elapsed < rt_fr_grasp_force_hold_time_) {
@@ -251,17 +264,36 @@ namespace franka_kitting_controller {
       }
 
       case RampPhase::STEP_COMPLETE: {
-        auto sg_result = sms_detector_.finalize_grasp_step();
+        bool algorithm_detected = false;
+
+        if (use_wrench_slope_) {
+          auto ws_result = wrench_slope_detector_.finalize_step();
+          algorithm_detected = ws_result.secure;
+          if (ws_result.secure) {
+            ROS_INFO("    GRASP_%d: SECURE_GRASP detected (wrench_slope): "
+                    "d_mu=%.4f slope=%.5f std=%.4f streak=%d",
+                    fr_iteration_ + 1,
+                    ws_result.d_mu, ws_result.slope,
+                    ws_result.std_late, ws_result.converge_streak);
+          }
+        } else {
+          auto sg_result = sms_detector_.finalize_grasp_step();
+          algorithm_detected = sg_result.detected;
+          if (sg_result.detected) {
+            ROS_INFO("    GRASP_%d: SECURE_GRASP detected (ewma): d_mu=%.4f std=%.4f",
+                    fr_iteration_ + 1,
+                    sg_result.event.baseline_mean,
+                    sg_result.event.baseline_sigma);
+          }
+        }
+
         bool fixed_mode = rt_fr_fixed_grasp_steps_ > 0;
         bool fixed_reached = fixed_mode &&
                              ((fr_iteration_ + 1) >= rt_fr_fixed_grasp_steps_);
 
-        if (sg_result.detected) {
-          ROS_INFO("    GRASP_%d: SECURE_GRASP detected: d_mu=%.4f std=%.4f%s",
-                  fr_iteration_ + 1,
-                  sg_result.event.baseline_mean,
-                  sg_result.event.baseline_sigma,
-                  fixed_mode ? " (ignored — fixed_grasp_steps active)" : "");
+        if (fixed_mode && algorithm_detected) {
+          ROS_INFO("    GRASP_%d: algorithm detected but fixed_grasp_steps active — ignoring",
+                  fr_iteration_ + 1);
         }
         if (fixed_reached) {
           ROS_INFO("    GRASP_%d: fixed_grasp_steps=%d reached — declaring secure",
@@ -270,7 +302,7 @@ namespace franka_kitting_controller {
 
         // When fixed_grasp_steps is active, only the step count decides;
         // the algorithm's secure grasp detection is ignored.
-        bool secure = fixed_mode ? fixed_reached : sg_result.detected;
+        bool secure = fixed_mode ? fixed_reached : algorithm_detected;
         bool reached_f_max = fr_f_current_ >= rt_fr_f_max_;
 
         if (reached_f_max && !secure) {
@@ -310,7 +342,11 @@ namespace franka_kitting_controller {
           fr_ramp_phase_ = RampPhase::COMMAND_SENT;
 
           // Begin next secure grasp step
-          sms_detector_.begin_grasp_step(fr_iteration_);
+          if (use_wrench_slope_) {
+            wrench_slope_detector_.begin_step(fr_iteration_);
+          } else {
+            sms_detector_.begin_grasp_step(fr_iteration_);
+          }
 
           char label[16];
           std::snprintf(label, sizeof(label), "GRASP_%d", fr_iteration_ + 1);
