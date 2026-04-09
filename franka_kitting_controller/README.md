@@ -528,7 +528,7 @@ Secure when: |mu_late[N] - Z_N| < band_width AND sigma_late[N] < std_threshold
 |-----------|---------|-------------|
 | `ewma_lambda` | 0.4 | Smoothing factor (0-1) |
 | `ewma_band_width` | 0.12 Nm | Max deviation from EWMA |
-| `n_confirm` | 2 | Consecutive converged steps required |
+| `n_confirm` | 3 | Consecutive converged steps required |
 | `std_threshold` | 0.14 Nm | Max within-step std for stability |
 
 ### Integration

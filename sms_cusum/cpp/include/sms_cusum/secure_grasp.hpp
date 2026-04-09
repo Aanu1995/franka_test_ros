@@ -28,7 +28,7 @@ namespace sms_cusum {
 struct SecureGraspConfig {
     double  ewma_lambda             = 0.4;
     double  ewma_band_width         = 0.12;
-    int32_t n_confirm               = 2;
+    int32_t n_confirm               = 3;
     double  std_threshold           = 0.14;
 };
 

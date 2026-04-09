@@ -244,7 +244,7 @@ class TestSMSCusumSecureGrasp(unittest.TestCase):
         from python.config import SecureGraspConfig
         config = SMSCusumConfig(
             contact_stage=CusumStageConfig(k_min=0.05, h=0.8, debounce_count=5),
-            secure_grasp_stage=SecureGraspConfig(n_confirm=2),
+            secure_grasp_stage=SecureGraspConfig(n_confirm=3),
             baseline_init_samples=20,
         )
         return SMSCusum(config)
@@ -294,13 +294,20 @@ class TestSMSCusumSecureGrasp(unittest.TestCase):
         r2 = det.finalize_grasp_step()
         self.assertFalse(r2.detected)
 
-        # Step 3: still close (streak=2 -> SECURE)
+        # Step 3: still close (streak=2)
         det.begin_grasp_step(3)
         for _ in range(100):
             det.update(1.14)
         r3 = det.finalize_grasp_step()
-        self.assertTrue(r3.detected)
-        self.assertEqual(r3.event.new_state, GraspState.SECURE_GRASP)
+        self.assertFalse(r3.detected)  # Need n_confirm=3
+
+        # Step 4: still close (streak=3 -> SECURE)
+        det.begin_grasp_step(4)
+        for _ in range(100):
+            det.update(1.135)
+        r4 = det.finalize_grasp_step()
+        self.assertTrue(r4.detected)
+        self.assertEqual(r4.event.new_state, GraspState.SECURE_GRASP)
         self.assertEqual(det.state, GraspState.SECURE_GRASP)
 
     def test_grasping_accumulates_on_update(self):
@@ -335,6 +342,11 @@ class TestSMSCusumSecureGrasp(unittest.TestCase):
         det.begin_grasp_step(2)
         for _ in range(100):
             det.update(1.015)
+        det.finalize_grasp_step()
+
+        det.begin_grasp_step(3)
+        for _ in range(100):
+            det.update(1.013)
         det.finalize_grasp_step()
 
         self.assertEqual(len(det.events), contact_events + 1)

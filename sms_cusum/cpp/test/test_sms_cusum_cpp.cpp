@@ -230,7 +230,7 @@ static void feedStep(sms_cusum::SecureGraspDetector& det, int step_index,
 }
 
 TEST(SecureGrasp, DivergingSignalNeverSecure) {
-  sms_cusum::SecureGraspConfig cfg{0.4, 0.12, 2, 0.14};
+  sms_cusum::SecureGraspConfig cfg{0.4, 0.12, 3, 0.14};
   sms_cusum::SecureGraspDetector det(cfg);
 
   double means[] = {1.0, 1.3, 1.6, 1.1, 0.8, 1.4};
@@ -242,7 +242,7 @@ TEST(SecureGrasp, DivergingSignalNeverSecure) {
 }
 
 TEST(SecureGrasp, ConvergingSignalTriggersSecure) {
-  sms_cusum::SecureGraspConfig cfg{0.4, 0.12, 2, 0.14};
+  sms_cusum::SecureGraspConfig cfg{0.4, 0.12, 3, 0.14};
   sms_cusum::SecureGraspDetector det(cfg);
 
   // Step 0: initialize EWMA
@@ -250,34 +250,40 @@ TEST(SecureGrasp, ConvergingSignalTriggersSecure) {
   auto r0 = det.finalize_step();
   EXPECT_FALSE(r0.secure);
 
-  // Step 1: very close to EWMA — streak=1
+  // Step 1: close to EWMA — streak=1
   feedStep(det, 1, 1.21, 0.03, 50);
   auto r1 = det.finalize_step();
-  EXPECT_FALSE(r1.secure);  // Need n_confirm=2
+  EXPECT_FALSE(r1.secure);
 
-  // Step 2: still close — streak=2 → secure
+  // Step 2: still close — streak=2
   feedStep(det, 2, 1.215, 0.03, 50);
   auto r2 = det.finalize_step();
-  EXPECT_TRUE(r2.secure);
+  EXPECT_FALSE(r2.secure);  // Need n_confirm=3
+
+  // Step 3: still close — streak=3 → secure
+  feedStep(det, 3, 1.213, 0.03, 50);
+  auto r3 = det.finalize_step();
+  EXPECT_TRUE(r3.secure);
 }
 
 TEST(SecureGrasp, HighNoiseBlocksConvergence) {
-  sms_cusum::SecureGraspConfig cfg{0.4, 0.12, 2, 0.14};
+  sms_cusum::SecureGraspConfig cfg{0.4, 0.12, 3, 0.14};
   sms_cusum::SecureGraspDetector det(cfg);
 
   // Converging means but std > std_threshold
   feedStep(det, 0, 1.2, 0.2, 50);
   det.finalize_step();
   feedStep(det, 1, 1.21, 0.2, 50);
-  auto r1 = det.finalize_step();
-  EXPECT_FALSE(r1.secure);  // std too high
+  det.finalize_step();
   feedStep(det, 2, 1.215, 0.2, 50);
-  auto r2 = det.finalize_step();
-  EXPECT_FALSE(r2.secure);
+  det.finalize_step();
+  feedStep(det, 3, 1.213, 0.2, 50);
+  auto r3 = det.finalize_step();
+  EXPECT_FALSE(r3.secure);  // std too high even after 3 converging steps
 }
 
 TEST(SecureGrasp, ResetClearsState) {
-  sms_cusum::SecureGraspConfig cfg{0.4, 0.12, 2, 0.14};
+  sms_cusum::SecureGraspConfig cfg{0.4, 0.12, 3, 0.14};
   sms_cusum::SecureGraspDetector det(cfg);
 
   feedStep(det, 0, 1.2, 0.03, 50);
@@ -285,6 +291,8 @@ TEST(SecureGrasp, ResetClearsState) {
   feedStep(det, 1, 1.21, 0.03, 50);
   det.finalize_step();
   feedStep(det, 2, 1.215, 0.03, 50);
+  det.finalize_step();
+  feedStep(det, 3, 1.213, 0.03, 50);
   auto r = det.finalize_step();
   EXPECT_TRUE(r.secure);
 
@@ -446,7 +454,7 @@ TEST(SMSCusum, FullLifecycleToSecureGrasp) {
   sms_cusum::SMSCusumConfig cfg;
   cfg.baseline_init_samples = 10;
   cfg.contact_stage = {0.02, 0.3, 3, 2.0};
-  cfg.secure_grasp_stage = {0.4, 0.12, 2, 0.14};
+  cfg.secure_grasp_stage = {0.4, 0.12, 3, 0.14};
   sms_cusum::SMSCusum det(cfg);
 
   // Baseline
@@ -475,7 +483,7 @@ TEST(SMSCusum, FullLifecycleToSecureGrasp) {
   auto r0 = det.finalize_grasp_step();
   EXPECT_FALSE(r0.detected);
 
-  // Step 1: close to EWMA
+  // Step 1: close to EWMA — streak=1
   det.begin_grasp_step(1);
   {
     std::normal_distribution<double> d(1.21, 0.03);
@@ -484,14 +492,23 @@ TEST(SMSCusum, FullLifecycleToSecureGrasp) {
   auto r1 = det.finalize_grasp_step();
   EXPECT_FALSE(r1.detected);
 
-  // Step 2: still close → secure
+  // Step 2: still close — streak=2
   det.begin_grasp_step(2);
   {
     std::normal_distribution<double> d(1.215, 0.03);
     for (int i = 0; i < 50; ++i) det.update(d(rng));
   }
   auto r2 = det.finalize_grasp_step();
-  EXPECT_TRUE(r2.detected);
+  EXPECT_FALSE(r2.detected);  // Need n_confirm=3
+
+  // Step 3: still close — streak=3 → secure
+  det.begin_grasp_step(3);
+  {
+    std::normal_distribution<double> d(1.213, 0.03);
+    for (int i = 0; i < 50; ++i) det.update(d(rng));
+  }
+  auto r3 = det.finalize_grasp_step();
+  EXPECT_TRUE(r3.detected);
   EXPECT_EQ(det.state(), sms_cusum::GraspState::SECURE_GRASP);
 }
 

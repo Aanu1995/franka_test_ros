@@ -319,7 +319,7 @@ Confirmation:   above holds for n_confirm consecutive steps
 |-----------|---------|-------------|
 | `ewma_lambda` | 0.4 | Smoothing factor (0-1). Higher = more weight on current step |
 | `ewma_band_width` | 0.12 Nm | Max deviation from EWMA for convergence |
-| `n_confirm` | 2 | Consecutive converged steps required |
+| `n_confirm` | 3 | Consecutive converged steps required |
 | `std_threshold` | 0.14 Nm | Max within-step std for signal stability |
 
 ### Lifecycle

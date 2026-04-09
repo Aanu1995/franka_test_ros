@@ -12,7 +12,7 @@ kitting_state_controller:
   # Baseline: 50 samples (0.2s at 250Hz), EMA alpha=0.01
 
   # Secure grasp detection (EWMA band): built-in parameters
-  # ewma_lambda=0.4, band_width=0.12 Nm, n_confirm=2, std_threshold=0.14 Nm
+  # ewma_lambda=0.4, band_width=0.12 Nm, n_confirm=3, std_threshold=0.14 Nm
 
   # Grasping parameters (overridable per-command via KittingGripperCommand)
   # After GRASPING command, controller runs a contact-only force ramp:

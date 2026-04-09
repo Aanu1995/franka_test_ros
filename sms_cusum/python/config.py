@@ -72,7 +72,7 @@ class SecureGraspConfig:
 
     ewma_lambda: float = 0.4
     ewma_band_width: float = 0.12
-    n_confirm: int = 2
+    n_confirm: int = 3
     std_threshold: float = 0.14
 
     def __post_init__(self) -> None:
