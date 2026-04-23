@@ -897,6 +897,55 @@ TEST_F(KittingControllerTestFixture, Closing_ContactConfirmed_GripperStopped_Con
   EXPECT_EQ(currentState(), GraspState::CONTACT);
 }
 
+TEST_F(KittingControllerTestFixture, Closing_PostMotionGrace_DelaysFailure) {
+  setCurrentState(GraspState::CLOSING);
+  setContactLatched(false);
+  setClosingCommandEntered(true);
+  setClosingCmdSeenExecuting(true);
+  setCmdExecuting(false);
+
+  auto g = makeDefaultGripper();
+  ros::Time t0(100.0);
+  setPhaseStartTime(t0);
+
+  callRunClosingTransitions(t0, g, 1.8);
+  EXPECT_EQ(currentState(), GraspState::CLOSING);
+
+  ros::Time t_late = t0 + ros::Duration(kClosingPostMotionGraceVal() + 0.01);
+  callRunClosingTransitions(t_late, g, 1.8);
+  EXPECT_EQ(currentState(), GraspState::FAILED);
+}
+
+TEST_F(KittingControllerTestFixture, ApplyPendingStateTransition_ClosingCommand_RearmsContactDetection) {
+  for (int i = 0; i < 50; ++i) {
+    smsDetector().update(1.8);
+  }
+  ASSERT_TRUE(smsDetector().baseline_ready());
+
+  smsDetector().enter_closing();
+  for (int i = 0; i < 50; ++i) {
+    smsDetector().update(1.3);
+    if (smsDetector().state() == sms_cusum::GraspState::CONTACT) {
+      break;
+    }
+  }
+  ASSERT_EQ(smsDetector().state(), sms_cusum::GraspState::CONTACT);
+
+  setCurrentState(GraspState::CONTACT);
+  setContactLatched(true);
+  setContactWidth(0.021);
+  setPendingState(GraspState::CLOSING_COMMAND);
+  setStateChanged(true);
+
+  callApplyPendingStateTransition();
+
+  EXPECT_EQ(currentState(), GraspState::CLOSING_COMMAND);
+  EXPECT_FALSE(contactLatched());
+  EXPECT_TRUE(smsDetector().baseline_ready());
+  EXPECT_EQ(smsDetector().state(), sms_cusum::GraspState::FREE_MOTION);
+  EXPECT_DOUBLE_EQ(contactWidth(), 0.0);
+}
+
 // ============================================================================
 // Evaluate boundary tests
 // ============================================================================
@@ -1509,4 +1558,3 @@ TEST_F(KittingControllerTestFixture, TickGrasping_NonDivisibleRange_ClampedToFMa
   EXPECT_EQ(iteration(), 2);
   EXPECT_NEAR(forceCurrent(), 10.0, 1e-9);  // min(7+4, 10) = 10
 }
-

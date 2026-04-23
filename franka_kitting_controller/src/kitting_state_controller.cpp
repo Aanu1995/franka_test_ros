@@ -34,6 +34,7 @@ namespace franka_kitting_controller {
   constexpr double KittingStateController::kBaselineSettleTime;
   constexpr double KittingStateController::kClosingCmdTimeout;
   constexpr double KittingStateController::kClosingTimeout;
+  constexpr double KittingStateController::kClosingPostMotionGrace;
 
   const char* KittingStateController::stateToString(GraspState state) {
     switch (state) {
@@ -290,6 +291,14 @@ namespace franka_kitting_controller {
       return false;
     }
 
+    GripperData initial_gripper_data;
+    initial_gripper_data.width = 0.08;
+    initial_gripper_data.max_width = 0.08;
+    initial_gripper_data.width_dot = 0.0;
+    initial_gripper_data.is_grasped = false;
+    initial_gripper_data.stamp = ros::Time(0);
+    gripper_data_buf_.initRT(initial_gripper_data);
+
     gripper_read_thread_ = std::thread(&KittingStateController::gripperReadLoop, this);
     gripper_cmd_thread_ = std::thread(&KittingStateController::gripperCommandLoop, this);
 
@@ -329,14 +338,6 @@ namespace franka_kitting_controller {
     homing_action_server_->start();
     stop_action_server_->start();
     ROS_INFO("KittingStateController: Gripper action servers started (move, grasp, homing, stop)");
-
-    GripperData initial_gripper_data;
-    initial_gripper_data.width = 0.08;
-    initial_gripper_data.max_width = 0.08;
-    initial_gripper_data.width_dot = 0.0;
-    initial_gripper_data.is_grasped = false;
-    initial_gripper_data.stamp = ros::Time(0);
-    gripper_data_buf_.initRT(initial_gripper_data);
 
     return true;
   }
@@ -401,6 +402,8 @@ namespace franka_kitting_controller {
       gripper_stopped_.store(false, std::memory_order_relaxed);
       width_capture_pending_.store(false, std::memory_order_relaxed);
       contact_width_.store(0.0, std::memory_order_relaxed);
+      closing_motion_finished_ = false;
+      closing_motion_finished_time_ = ros::Time(0);
 
       resetForceRampState();
 
@@ -442,11 +445,16 @@ namespace franka_kitting_controller {
     if (new_state == GraspState::CLOSING_COMMAND) {
       rt_closing_w_cmd_ = closing_w_cmd_;
       rt_closing_v_cmd_ = closing_v_cmd_;
+      contact_latched_ = false;
+      sms_detector_.soft_reset();
       gripper_stop_sent_.store(false, std::memory_order_relaxed);
       gripper_stopped_.store(false, std::memory_order_relaxed);
       width_capture_pending_.store(false, std::memory_order_relaxed);
+      contact_width_.store(0.0, std::memory_order_relaxed);
       closing_cmd_seen_executing_ = false;
       closing_command_entered_ = false;
+      closing_motion_finished_ = false;
+      closing_motion_finished_time_ = ros::Time(0);
     }
 
     if (new_state == GraspState::GRASPING) {
@@ -593,66 +601,66 @@ namespace franka_kitting_controller {
     applyPendingStateTransition();
     updateCartesianCommand(period);
 
+    franka::RobotState robot_state = franka_state_handle_->getRobotState();
+
+    double tau_ext_norm = arrayNorm(robot_state.tau_ext_hat_filtered);
+    double wrench_norm = arrayNorm(robot_state.O_F_ext_hat_K);
+
+    double support_force = std::abs(robot_state.O_F_ext_hat_K[2]);       // Fn
+    double tangential_force = std::sqrt(
+        robot_state.O_F_ext_hat_K[0] * robot_state.O_F_ext_hat_K[0] +
+        robot_state.O_F_ext_hat_K[1] * robot_state.O_F_ext_hat_K[1]);   // Ft
+
+    const GripperData gripper_snapshot = *gripper_data_buf_.readFromRT();
+
+    {
+      GraspState bl_state = current_state_.load(std::memory_order_relaxed);
+
+      if (bl_state == GraspState::UNKNOWN &&
+          baseline_prep_done_.load(std::memory_order_acquire)) {
+        if (!unknown_settle_started_) {
+          unknown_settle_start_ = time;
+          unknown_settle_started_ = true;
+          ROS_DEBUG("  [UNKNOWN]  Prep complete — settling for %.1fs", kBaselineSettleTime);
+        }
+        if ((time - unknown_settle_start_).toSec() >= kBaselineSettleTime) {
+          current_state_.store(GraspState::BASELINE, std::memory_order_relaxed);
+          publishStateLabel("BASELINE");
+          logStateTransition("BASELINE", "Collecting reference signals");
+        }
+      }
+
+      if (bl_state == GraspState::BASELINE) {
+        sms_detector_.update(tau_ext_norm);
+        fn_baseline_sum_ += support_force;
+        fn_baseline_count_++;
+        fn_baseline_ = fn_baseline_sum_ / fn_baseline_count_;
+
+        if (!cd_baseline_ready_.load(std::memory_order_relaxed) && sms_detector_.baseline_ready()) {
+          cd_baseline_ready_.store(true, std::memory_order_relaxed);
+          cd_baseline_ = sms_detector_.baseline().mean();
+          cd_baseline_count_ = sms_detector_.config().baseline_init_samples;
+          ROS_INFO("  [BASELINE]  SMS-CUSUM baseline ready: mu=%.3f Nm, sigma=%.4f Nm  "
+                   "Fn_baseline=%.3f N  (from %d samples)",
+                   sms_detector_.baseline().mean(),
+                   sms_detector_.baseline().sigma(),
+                   fn_baseline_,
+                   sms_detector_.config().baseline_init_samples);
+        }
+      }
+    }
+
+    runClosingTransitions(time, gripper_snapshot, tau_ext_norm);
+
+    {
+      GraspState fr_state = current_state_.load(std::memory_order_relaxed);
+      if (isForceRampPhase(fr_state)) {
+        runInternalTransitions(time, tau_ext_norm, support_force,
+                              gripper_snapshot);
+      }
+    }
+
     if (rate_trigger_()) {
-      franka::RobotState robot_state = franka_state_handle_->getRobotState();
-
-      double tau_ext_norm = arrayNorm(robot_state.tau_ext_hat_filtered);
-      double wrench_norm = arrayNorm(robot_state.O_F_ext_hat_K);
-
-      double support_force = std::abs(robot_state.O_F_ext_hat_K[2]);       // Fn
-      double tangential_force = std::sqrt(
-          robot_state.O_F_ext_hat_K[0] * robot_state.O_F_ext_hat_K[0] +
-          robot_state.O_F_ext_hat_K[1] * robot_state.O_F_ext_hat_K[1]);   // Ft
-
-      const GripperData gripper_snapshot = *gripper_data_buf_.readFromRT();
-
-      {
-        GraspState bl_state = current_state_.load(std::memory_order_relaxed);
-
-        if (bl_state == GraspState::UNKNOWN &&
-            baseline_prep_done_.load(std::memory_order_acquire)) {
-          if (!unknown_settle_started_) {
-            unknown_settle_start_ = time;
-            unknown_settle_started_ = true;
-            ROS_DEBUG("  [UNKNOWN]  Prep complete — settling for %.1fs", kBaselineSettleTime);
-          }
-          if ((time - unknown_settle_start_).toSec() >= kBaselineSettleTime) {
-            current_state_.store(GraspState::BASELINE, std::memory_order_relaxed);
-            publishStateLabel("BASELINE");
-            logStateTransition("BASELINE", "Collecting reference signals");
-          }
-        }
-
-        if (bl_state == GraspState::BASELINE) {
-          sms_detector_.update(tau_ext_norm);
-          fn_baseline_sum_ += support_force;
-          fn_baseline_count_++;
-          fn_baseline_ = fn_baseline_sum_ / fn_baseline_count_;
-
-          if (!cd_baseline_ready_.load(std::memory_order_relaxed) && sms_detector_.baseline_ready()) {
-            cd_baseline_ready_.store(true, std::memory_order_relaxed);
-            cd_baseline_ = sms_detector_.baseline().mean();
-            cd_baseline_count_ = sms_detector_.config().baseline_init_samples;
-            ROS_INFO("  [BASELINE]  SMS-CUSUM baseline ready: mu=%.3f Nm, sigma=%.4f Nm  "
-                     "Fn_baseline=%.3f N  (from %d samples)",
-                     sms_detector_.baseline().mean(),
-                     sms_detector_.baseline().sigma(),
-                     fn_baseline_,
-                     sms_detector_.config().baseline_init_samples);
-          }
-        }
-      }
-
-      runClosingTransitions(time, gripper_snapshot, tau_ext_norm);
-
-      {
-        GraspState fr_state = current_state_.load(std::memory_order_relaxed);
-        if (isForceRampPhase(fr_state)) {
-          runInternalTransitions(time, tau_ext_norm, support_force,
-                                gripper_snapshot);
-        }
-      }
-
       const GraspState state = current_state_.load(std::memory_order_relaxed);
       if (signal_log_trigger_()) {
         if (state == GraspState::UNKNOWN) {

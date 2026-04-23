@@ -41,6 +41,8 @@ namespace franka_kitting_controller {
       if (!closing_cmd_seen_executing_) {
         if (cmd_executing_.load(std::memory_order_relaxed)) {
           closing_cmd_seen_executing_ = true;
+          closing_motion_finished_ = false;
+          closing_motion_finished_time_ = ros::Time(0);
           if (state == GraspState::CLOSING_COMMAND) {
             current_state_.store(GraspState::CLOSING, std::memory_order_relaxed);
             state = GraspState::CLOSING;
@@ -68,13 +70,23 @@ namespace franka_kitting_controller {
         detectContact(time, gripper_snapshot, tau_ext_norm);
 
         if (!contact_latched_ && !cmd_executing_.load(std::memory_order_relaxed)) {
-          current_state_.store(GraspState::FAILED, std::memory_order_relaxed);
-          publishStateLabel("FAILED");
-          logStateTransition("FAILED",
-              "Gripper closed to target width — no contact detected");
-          ROS_WARN("  [CLOSING]  No contact: w=%.4f  w_cmd=%.4f  -> FAILED",
-                   gripper_snapshot.width, rt_closing_w_cmd_);
-          return;
+          if (!closing_motion_finished_) {
+            closing_motion_finished_ = true;
+            closing_motion_finished_time_ = time;
+          }
+
+          if ((time - closing_motion_finished_time_).toSec() > kClosingPostMotionGrace) {
+            current_state_.store(GraspState::FAILED, std::memory_order_relaxed);
+            publishStateLabel("FAILED");
+            logStateTransition("FAILED",
+                "Gripper closed to target width — no contact detected");
+            ROS_WARN("  [CLOSING]  No contact after %.3fs grace: w=%.4f  w_cmd=%.4f  -> FAILED",
+                     kClosingPostMotionGrace, gripper_snapshot.width, rt_closing_w_cmd_);
+            return;
+          }
+        } else if (cmd_executing_.load(std::memory_order_relaxed)) {
+          closing_motion_finished_ = false;
+          closing_motion_finished_time_ = ros::Time(0);
         }
 
         if (!contact_latched_ &&

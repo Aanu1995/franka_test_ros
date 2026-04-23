@@ -564,6 +564,7 @@ class KittingControllerTestFixture : public ::testing::Test {
   static double kMaxUpliftHld() { return KittingStateController::kMaxUpliftHold; }
   static double kMaxClosingSpd() { return KittingStateController::kMaxClosingSpeed; }
   static double kBaselineSettleTm() { return KittingStateController::kBaselineSettleTime; }
+  static double kClosingPostMotionGraceVal() { return KittingStateController::kClosingPostMotionGrace; }
   static double kGraspTimeoutVal() { return KittingStateController::kGraspTimeout; }
   static double kGraspSettleDelayVal() { return KittingStateController::kGraspSettleDelay; }
 

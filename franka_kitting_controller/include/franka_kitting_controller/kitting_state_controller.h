@@ -199,6 +199,8 @@ namespace franka_kitting_controller {
     double rt_closing_v_cmd_{0.05};
     bool closing_cmd_seen_executing_{false};
     bool closing_command_entered_{false};
+    bool closing_motion_finished_{false};
+    ros::Time closing_motion_finished_time_;
 
     int    cd_baseline_count_{0};
     double cd_baseline_{0.0};
@@ -308,6 +310,7 @@ namespace franka_kitting_controller {
     static constexpr double kBaselineSettleTime{2.0};
     static constexpr double kClosingCmdTimeout{10.0};
     static constexpr double kClosingTimeout{30.0};
+    static constexpr double kClosingPostMotionGrace{0.1};
     static constexpr double kGraspSettleDelay{0.1};
     static constexpr double kGraspTimeout{10.0};
 
